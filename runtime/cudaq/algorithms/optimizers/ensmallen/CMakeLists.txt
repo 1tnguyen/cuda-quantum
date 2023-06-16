@@ -10,8 +10,7 @@ set(LIBRARY_NAME cudaq-ensmallen)
 
 set (CUDAQ_TPLS_DIR ${CMAKE_SOURCE_DIR}/tpls)
 
-set(BLA_STATIC ON)
-find_package(BLAS REQUIRED)
+
 
 add_library(${LIBRARY_NAME} SHARED ensmallen.cpp)
 target_compile_definitions(${LIBRARY_NAME} PRIVATE -DARMA_DONT_USE_LAPACK)
@@ -22,7 +21,28 @@ target_include_directories(${LIBRARY_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
 target_include_directories(${LIBRARY_NAME} SYSTEM
      PRIVATE ${CUDAQ_TPLS_DIR}/armadillo/include 
              ${CUDAQ_TPLS_DIR}/ensmallen/include)
-target_link_libraries(${LIBRARY_NAME} PRIVATE BLAS::BLAS)
+
+set(BLA_STATIC ON)
+find_package(BLAS)
+if (BLAS_FOUND)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE BLAS::BLAS)
+else()
+    #include(FetchContent)
+    #FetchContent_Declare(OpenBLAS GIT_REPOSITORY https://github.com/xianyi/OpenBLAS.git
+    #                     GIT_TAG v0.3.23)
+    #set(BUILD_TESTING OFF)
+    #set(BUILD_STATIC_LIBS ON)
+    #FetchContent_MakeAvailable(OpenBLAS)
+    #if(NOT OpenBLAS_POPULATED)
+        #FetchContent_Populate(OpenBLAS)
+    #endif()
+    #message("HPWDY: ${OpenBLAS_SOURCE_DIR} - ${OpenBLAS_BINARY_DIR} ")
+    #add_subdirectory(${OpenBLAS_SOURCE_DIR} ${OpenBLAS_BINARY_DIR})
+    #target_link_libraries(${LIBRARY_NAME} PRIVATE openblas)
+    set(BUILD_SMOKE_TEST OFF)
+    add_subdirectory(${CUDAQ_TPLS_DIR}/armadillo ${PROJECT_BINARY_DIR}/tpls/armadillo)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE armadillo)
+endif()
 
 if (NOT APPLE)
   # Don't export BLAS symbols to prevent symbol clashes.

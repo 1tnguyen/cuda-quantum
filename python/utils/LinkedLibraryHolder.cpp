@@ -32,40 +32,6 @@ constexpr static const char NVQIR_SIMULATION_BACKEND[] =
     "NVQIR_SIMULATION_BACKEND=";
 constexpr static const char TARGET_DESCRIPTION[] = "TARGET_DESCRIPTION=";
 
-#if defined(__APPLE__) && defined(__MACH__)
-#include <mach-o/dyld.h>
-#else
-#include <link.h>
-#endif
-
-struct CUDAQLibraryData {
-  std::string path;
-};
-
-#if defined(__APPLE__) && defined(__MACH__)
-static void getCUDAQLibraryPath(CUDAQLibraryData *data) {
-  auto nLibs = _dyld_image_count();
-  for (uint32_t i = 0; i < nLibs; i++) {
-    auto ptr = _dyld_get_image_name(i);
-    std::string libName(ptr);
-    if (libName.find("cudaq-common") != std::string::npos) {
-      auto casted = static_cast<CUDAQLibraryData *>(data);
-      casted->path = std::string(ptr);
-    }
-  }
-}
-#else
-static int getCUDAQLibraryPath(struct dl_phdr_info *info, size_t size,
-                               void *data) {
-  std::string libraryName(info->dlpi_name);
-  if (libraryName.find("cudaq-common") != std::string::npos) {
-    auto casted = static_cast<CUDAQLibraryData *>(data);
-    casted->path = std::string(info->dlpi_name);
-  }
-  return 0;
-}
-#endif
-
 std::size_t RuntimeTarget::num_qpus() {
   auto &platform = cudaq::get_platform();
   return platform.num_qpus();
@@ -134,17 +100,21 @@ void findAvailableTargets(
 LinkedLibraryHolder::LinkedLibraryHolder() {
   cudaq::info("Init infrastructure for pythonic builder.");
 
-  CUDAQLibraryData data;
+  cudaq::__internal__::CUDAQLibraryData data;
 #if defined(__APPLE__) && defined(__MACH__)
   libSuffix = "dylib";
-  getCUDAQLibraryPath(&data);
+  cudaq::__internal__::getCUDAQLibraryPath(&data);
+#elif defined(_WINDOWS)
+  libSuffix = "dll";
+  cudaq::__internal__::getCUDAQLibraryPath(&data);
 #else
   libSuffix = "so";
-  dl_iterate_phdr(getCUDAQLibraryPath, &data);
+  dl_iterate_phdr(cudaq::__internal__::getCUDAQLibraryPath, &data);
 #endif
 
   std::filesystem::path nvqirLibPath{data.path};
   cudaqLibPath = nvqirLibPath.parent_path();
+  std::cout << "CUDAQ Lib path:  " << cudaqLibPath.string() << std::endl;
   if (cudaqLibPath.filename().string() == "common") {
     // this is a build path
     cudaqLibPath = cudaqLibPath.parent_path().parent_path() / "lib";
@@ -164,14 +134,14 @@ LinkedLibraryHolder::LinkedLibraryHolder() {
   // Load all the defaults
   for (auto &p : libPaths)
     libHandles.emplace(p.string(),
-                       dlopen(p.string().c_str(), RTLD_GLOBAL | RTLD_NOW));
+                       cudaq::DynamicLibrary::DLOpen(p.string().c_str(), nullptr));
 
   // We will always load the RemoteRestQPU plugin in Python.
   auto potentialPath =
       cudaqLibPath / fmt::format("libcudaq-rest-qpu.{}", libSuffix);
   libHandles.emplace(
       potentialPath.string(),
-      dlopen(potentialPath.string().c_str(), RTLD_GLOBAL | RTLD_NOW));
+      cudaq::DynamicLibrary::DLOpen(potentialPath.string().c_str(), nullptr));
 
   // Search for all simulators and create / store them
   for (const auto &library :
@@ -181,7 +151,8 @@ LinkedLibraryHolder::LinkedLibraryHolder() {
     if (fileName.find("nvqir-") != std::string::npos) {
 
       // Extract and process the simulator name
-      auto simName = std::regex_replace(fileName, std::regex("libnvqir-"), "");
+      auto simName = fileName.substr(fileName.find("nvqir-"));
+      simName = std::regex_replace(simName, std::regex("nvqir-"), "");
       simName = std::regex_replace(simName, std::regex("-"), "_");
       // Remove the suffix from the library
       auto idx = simName.find_last_of(".");
@@ -197,8 +168,8 @@ LinkedLibraryHolder::LinkedLibraryHolder() {
       // Store the dlopen handles
       auto iter = libHandles.find(path.string());
       if (iter == libHandles.end())
-        libHandles.emplace(path.string(), dlopen(path.string().c_str(),
-                                                 RTLD_GLOBAL | RTLD_NOW));
+        libHandles.emplace(path.string(), cudaq::DynamicLibrary::DLOpen(
+                                              path.string().c_str(), nullptr));
 
       // Load the plugin and get the CircuitSimulator.
       std::string symbolName = fmt::format("getCircuitSimulator_{}", simName);
@@ -211,8 +182,9 @@ LinkedLibraryHolder::LinkedLibraryHolder() {
     } else if (fileName.find("cudaq-platform-") != std::string::npos) {
       // store all available platforms.
       // Extract and process the platform name
-      auto platformName =
-          std::regex_replace(fileName, std::regex("libcudaq-platform-"), "");
+      auto platformName = fileName.substr(fileName.find("cudaq-platform-"));
+      platformName =
+          std::regex_replace(platformName, std::regex("cudaq-platform-"), "");
       platformName = std::regex_replace(platformName, std::regex("-"), "_");
       // Remove the suffix from the library
       auto idx = platformName.find_last_of(".");
@@ -220,8 +192,8 @@ LinkedLibraryHolder::LinkedLibraryHolder() {
 
       auto iter = libHandles.find(path.string());
       if (iter == libHandles.end())
-        libHandles.emplace(path.string(), dlopen(path.string().c_str(),
-                                                 RTLD_GLOBAL | RTLD_NOW));
+        libHandles.emplace(path.string(), cudaq::DynamicLibrary::DLOpen(
+                                              path.string().c_str(), nullptr));
 
       // Load the plugin and get the CircuitSimulator.
       std::string symbolName =
@@ -243,7 +215,7 @@ LinkedLibraryHolder::LinkedLibraryHolder() {
 
 LinkedLibraryHolder::~LinkedLibraryHolder() {
   for (auto &[name, handle] : libHandles)
-    dlclose(handle);
+    cudaq::DynamicLibrary::DLClose(handle);
 }
 
 void LinkedLibraryHolder::resetTarget() {

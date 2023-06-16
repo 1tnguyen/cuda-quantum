@@ -48,6 +48,23 @@ struct ExternallyProvidedSimGenerator {
 };
 static std::unique_ptr<ExternallyProvidedSimGenerator> externSimGenerator;
 
+// MSVC doesn't like the returned type (std::vector) in an extern "C"
+// even it is static!!!
+/// @brief Map an Array pointer containing Paulis to a vector of Paulis.
+/// @param paulis
+/// @return
+static std::vector<Pauli> extractPauliTermIds(Array *paulis) {
+  std::vector<Pauli> pauliIds;
+  // size - 3 bc we don't want coeff.real coeff.imag or nterms
+  for (std::size_t i = 0; i < paulis->size() - 3; ++i) {
+    auto ptr = (*paulis)[i];
+    double *casted_and_deref = reinterpret_cast<double *>(ptr);
+    Pauli tmp = static_cast<Pauli>(*casted_and_deref);
+    pauliIds.emplace_back(tmp);
+  }
+  return pauliIds;
+}
+
 extern "C" {
 void __nvqir__setCircuitSimulator(nvqir::CircuitSimulator *sim) {
   simulator = sim;
@@ -324,21 +341,6 @@ Result *__quantum__qis__mz__to__register(Qubit *q, const char *name) {
   cudaq::ScopedTrace trace("NVQIR::mz", qI, regName);
   auto b = nvqir::getCircuitSimulatorInternal()->mz(qI, regName);
   return b ? ResultOne : ResultZero;
-}
-
-/// @brief Map an Array pointer containing Paulis to a vector of Paulis.
-/// @param paulis
-/// @return
-static std::vector<Pauli> extractPauliTermIds(Array *paulis) {
-  std::vector<Pauli> pauliIds;
-  // size - 3 bc we don't want coeff.real coeff.imag or nterms
-  for (std::size_t i = 0; i < paulis->size() - 3; ++i) {
-    auto ptr = (*paulis)[i];
-    double *casted_and_deref = reinterpret_cast<double *>(ptr);
-    Pauli tmp = static_cast<Pauli>(*casted_and_deref);
-    pauliIds.emplace_back(tmp);
-  }
-  return pauliIds;
 }
 
 /// @brief QIR function measuring the qubit state in the given Pauli basis.

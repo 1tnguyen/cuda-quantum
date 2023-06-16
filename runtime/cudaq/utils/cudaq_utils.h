@@ -13,7 +13,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
-
+#include "common/DynamicLibrary.h"
 #if defined(__APPLE__) && defined(__MACH__)
 #include <mach-o/dyld.h>
 #else
@@ -37,6 +37,16 @@ inline static void getCUDAQLibraryPath(CUDAQLibraryData *data) {
     }
   }
 }
+#elif defined(_WINDOWS)
+inline static void getCUDAQLibraryPath(CUDAQLibraryData *data) {
+  cudaq::DynamicLibrary::ForEachLinkedLib([&](const std::string &libPath) {
+    if (libPath.find("cudaq-common") != std::string::npos) {
+      data->path = libPath;
+      return false;
+    }
+    return true;
+  });
+}
 #else
 inline static int getCUDAQLibraryPath(struct dl_phdr_info *info, size_t size,
                                       void *data) {
@@ -59,6 +69,8 @@ class sample_result;
 inline static std::string getCUDAQLibraryPath() {
   __internal__::CUDAQLibraryData data;
 #if defined(__APPLE__) && defined(__MACH__)
+  getCUDAQLibraryPath(&data);
+#elif defined(_WINDOWS)
   getCUDAQLibraryPath(&data);
 #else
   dl_iterate_phdr(__internal__::getCUDAQLibraryPath, &data);

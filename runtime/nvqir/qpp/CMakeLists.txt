@@ -6,19 +6,27 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-ctad-maybe-unsupported")
+#set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-ctad-maybe-unsupported")
+target_add_compile_flags_if_supported(${LIBRARY_NAME} PRIVATE -Wno-ctad-maybe-unsupported)
 set(INTERFACE_POSITION_INDEPENDENT_CODE ON)
 
 find_package(OpenMP)
 
 macro (AddQppBackend LIBRARY_NAME SOURCE_FILE)
   add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILE})
+  target_add_compile_flags_if_supported(${LIBRARY_NAME} PRIVATE -Wno-ctad-maybe-unsupported)
 
   set (QPP_DEPENDENCIES "")
   if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP Found. Adding build flags to QPP Backend: ${OpenMP_CXX_FLAGS}.")
-    list(APPEND QPP_DEPENDENCIES OpenMP::OpenMP_CXX)
-    target_compile_definitions(${LIBRARY_NAME} PRIVATE -DHAS_OPENMP=1)
+    if (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+        #target_link_libraries(${LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
+        #target_compile_options(${LIBRARY_NAME} PRIVATE "/openmp:llvm")
+        #target_compile_definitions(${LIBRARY_NAME} PRIVATE -DHAS_OPENMP=1)
+    else()
+        list(APPEND QPP_DEPENDENCIES OpenMP::OpenMP_CXX)
+        target_compile_definitions(${LIBRARY_NAME} PRIVATE -DHAS_OPENMP=1)
+    endif()
   endif()
 
   target_include_directories(${LIBRARY_NAME}

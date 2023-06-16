@@ -6,9 +6,8 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-set (CMAKE_CXX_FLAGS
-     "${CMAKE_CXX_FLAGS} -Wno-attributes -Wno-ctad-maybe-unsupported")
-
+#set (CMAKE_CXX_FLAGS
+#     "${CMAKE_CXX_FLAGS} -Wno-attributes -Wno-ctad-maybe-unsupported")
 set(CUDAQ_RUNTIME_TEST_SOURCES 
   # Integration tests
   integration/adjoint_tester.cpp
@@ -49,6 +48,8 @@ macro (create_tests_with_backend NVQIR_BACKEND EXTRA_BACKEND_TESTER)
   add_executable(${TEST_EXE_NAME} main.cpp ${CUDAQ_RUNTIME_TEST_SOURCES} ${EXTRA_BACKEND_TESTER})
   target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DNVQIR_BACKEND_NAME=${NVQIR_BACKEND_OUT})
   target_include_directories(${TEST_EXE_NAME} PRIVATE .)
+  target_add_compile_flags_if_supported(${TEST_EXE_NAME} PRIVATE -Wno-attributes -Wno-ctad-maybe-unsupported)
+
   # On GCC, the default is --as-needed for linking, and therefore the 
   # nvqir-simulation plugin may not get picked up. This works as is on clang 
   # But here we add it purposefully to avoid that bug. 
@@ -97,7 +98,7 @@ set(CUDAQ_SPIN_TEST_SOURCES
    # Spin
    spin_op/SpinOpTester.cpp
 )
-add_executable(test_spin main.cpp ${CUDAQ_SPIN_TEST_SOURCES})
+add_executable(test_spin ${CUDAQ_SPIN_TEST_SOURCES})
 target_link_libraries(test_spin
   PRIVATE 
   cudaq-spin
@@ -115,6 +116,7 @@ target_link_libraries(test_qudit
   cudaq
   cudaq-platform-default
   cudaq-em-qudit
+  nvqir-qpp
   gtest_main)
 gtest_discover_tests(test_qudit)
 

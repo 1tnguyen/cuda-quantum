@@ -70,7 +70,10 @@ set (CMAKE_CXX_FLAGS "-fPIC ${CMAKE_CXX_FLAGS} -Wno-suggest-override -Wno-unused
 
 set (nlopt_lib nlopt)
 add_library (${nlopt_lib} STATIC ${NLOPT_SOURCES})
-target_link_libraries (${nlopt_lib} m)
+check_library_exists ("m" sqrt "" HAVE_LIBM)
+if (HAVE_LIBM)
+  target_link_libraries (${nlopt_lib} m)
+endif()
 
 target_include_directories (${nlopt_lib} PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR}

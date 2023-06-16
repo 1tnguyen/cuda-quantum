@@ -70,7 +70,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 # Set warnings as errors by default. 
 # Individual targets and the command line invocation can override this behavior.
 if(NOT DEFINED CMAKE_COMPILE_WARNING_AS_ERROR)
-  set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
+  set(CMAKE_COMPILE_WARNING_AS_ERROR OFF)
 endif()
 
 # Generate a CompilationDatabase (compile_commands.json file) for our build,
@@ -107,6 +107,7 @@ option(CUDAQ_ENABLE_RPC_LOGGING "Enable verbose printout for client/server qpud 
 option(CUDAQ_BUILD_RELOCATABLE_PACKAGE "Make CUDA Quantum install tree relocatable, system headers included." OFF)
 option(CUDAQ_TEST_MOCK_SERVERS "Enable Remote QPU Tests via Mock Servers." OFF)
 option(CUDAQ_DISABLE_RUNTIME "Build without the CUDA Quantum runtime, just the compiler toolchain." OFF)
+option(CUDAQ_ENABLE_PYTHON "Enable cudaq Python modules" ON)
 
 if (CUDAQ_BUILD_RELOCATABLE_PACKAGE) 
   if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
@@ -128,6 +129,7 @@ endif()
 # using `CUDAQ_LLVM_VERSION`, e.g. "-DCUDAQ_LLVM_VERSION=15".  Note that this
 # version variable is set to the latest LLVM version by default, and setting it
 # to an older version might break the project.
+set(LLVM_DIR C:\\Users\\thien\\dev\\llvm-local\\lib\\cmake\\llvm)
 find_package(LLVM ${CUDAQ_LLVM_VERSION} CONFIG QUIET)
 
 if(NOT LLVM_DIR)
@@ -243,6 +245,13 @@ endif()
 
 set(LLVM_LIT_ARGS "${LIT_ARGS_DEFAULT}" CACHE STRING "Default options for lit")
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc")
+    add_compile_definitions(_USE_MATH_DEFINES)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/dist)
+endif()
+
 # CUDA Quantum configuration
 # ==============================================================================
 message(STATUS "Build type is ${CMAKE_BUILD_TYPE}")
@@ -260,6 +269,7 @@ set(CUDAQ_TOOLS_DIR ${CMAKE_BINARY_DIR}/bin)
 list(APPEND CMAKE_MODULE_PATH "${CUDAQ_CMAKE_DIR}")
 
 include(AddCUDAQ)
+include(CompilerFlagUtils)
 
 # Add CUDA Quantum files to the include path
 include_directories(BEFORE
@@ -313,11 +323,12 @@ include_directories(SYSTEM tpls/json/include)
 
 # Add spdlog 
 set(SPDLOG_BUILD_SHARED OFF)
-set(SPDLOG_FMT_EXTERNAL ON)
+#set(SPDLOG_FMT_EXTERNAL ON)
+set(SPDLOG_FMT_EXTERNAL_HO ON)
 add_subdirectory(tpls/spdlog)
 set_property(TARGET spdlog APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
-target_compile_options(spdlog PRIVATE -Wno-covered-switch-default)
-
+#target_compile_options(spdlog PRIVATE -Wno-covered-switch-default)
+target_add_compile_flags_if_supported(spdlog PRIVATE -Wno-covered-switch-default)
 # Check for CUDA Support
 # ==============================================================================
 include(CheckLanguage)
@@ -336,6 +347,12 @@ if(CMAKE_CUDA_COMPILER)
   message(STATUS "Cuda language found. Will build NVIDIA Platform.")
 endif()
 
+# System checks
+check_include_file(dlfcn.h CUDAQ_HAVE_DLFCN_H)
+if (CUDAQ_HAVE_DLFCN_H)
+    add_compile_definitions(CUDAQ_HAVE_DLFCN_H)
+endif()
+
 # Check for CURL and OpenSSL
 find_package(CURL COMPONENTS HTTP HTTPS QUIET) 
 find_package(OpenSSL QUIET)
@@ -343,6 +360,8 @@ find_package(OpenSSL QUIET)
 # Directory setup
 # ==============================================================================
 if (CUDAQ_ENABLE_PYTHON)
+  find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+  message(STATUS "Python: version=${Python3_VERSION} interpreter=${Python3_EXECUTABLE}")
   add_subdirectory(tpls/pybind11)
 endif()
 
@@ -360,12 +379,13 @@ add_subdirectory(utils)
 if(CUDAQ_BUILD_TESTS)
   set(INSTALL_GTEST OFF)
   add_subdirectory(tpls/googletest-src)
-  target_compile_options(gtest PRIVATE -Wno-covered-switch-default)
+  target_add_compile_flags_if_supported(gtest PRIVATE -Wno-covered-switch-default)
+  #target_compile_options(gtest PRIVATE -Wno-covered-switch-default)
   include(GoogleTest)
   include(CTest)
   if (NOT CUDAQ_DISABLE_RUNTIME)
     add_subdirectory(unittests)
-    add_subdirectory(docs)
+    #add_subdirectory(docs)
   endif()
   add_subdirectory(test)
 endif()

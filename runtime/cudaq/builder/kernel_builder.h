@@ -35,6 +35,11 @@ class ExecutionEngine;
 class PassManager;
 } // namespace mlir
 
+
+namespace llvm {
+class PassInstrumentation;
+}
+
 using namespace mlir;
 
 namespace cudaq {
@@ -638,8 +643,12 @@ public:
     [[maybe_unused]] std::size_t argCounter = 0;
     (details::ArgumentValidator<Args>::validate(argCounter, arguments, args),
      ...);
-    void *argsArr[sizeof...(Args)] = {&args...};
-    return operator()(argsArr);
+    if constexpr (sizeof...(Args) > 0) {
+      void *argsArr[sizeof...(Args)] = {&args...};
+      return operator()(argsArr);
+    } else {
+      return operator()();
+    }
   }
 
   /// @brief Call operator that takes an array of opaque pointers

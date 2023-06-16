@@ -26,7 +26,7 @@ message(STATUS "Found Python version ${Python_VERSION}. Building CUDA Quantum Py
 if (CMAKE_BUILD_TYPE STREQUAL "DEBUG")
   set(CMAKE_BUILD_TYPE "Debug")
 endif()
-pybind11_add_module(_pycudaq 
+pybind11_add_module(_pycudaq  
                      _cudaq.cpp 
                      utils/LinkedLibraryHolder.cpp 
                      runtime/cudaq/builder/py_kernel_builder.cpp
@@ -43,7 +43,7 @@ pybind11_add_module(_pycudaq
                      runtime/common/py_SampleResult.cpp                     
                      runtime/common/py_NoiseModel.cpp)
 
-target_compile_options(_pycudaq PRIVATE -Wno-attributes)                     
+target_add_compile_flags_if_supported(_pycudaq PRIVATE -Wno-attributes)                     
 target_include_directories(_pycudaq PRIVATE .)
 target_link_libraries(_pycudaq 
     PRIVATE 
@@ -53,7 +53,12 @@ target_link_libraries(_pycudaq
       cudaq-em-qir 
       cudaq-platform-default 
       fmt::fmt-header-only)
-
+if(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+  add_custom_command(TARGET _pycudaq POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:_pycudaq> $<TARGET_RUNTIME_DLLS:_pycudaq>
+    COMMAND_EXPAND_LISTS
+  )
+endif()
 install(TARGETS _pycudaq DESTINATION ${CMAKE_INSTALL_PREFIX})
 install(FILES cudaq.py DESTINATION ${CMAKE_INSTALL_PREFIX})
 install(FILES domains/chemistry.py DESTINATION ${CMAKE_INSTALL_PREFIX}/domains/)

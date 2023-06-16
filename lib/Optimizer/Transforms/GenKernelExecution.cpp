@@ -20,8 +20,8 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Transforms/Passes.h"
-#include <cxxabi.h>
 #include <regex>
+#include "llvm\Demangle\Demangle.h"
 
 #define DEBUG_TYPE "quake-kernel-exec"
 
@@ -818,10 +818,7 @@ public:
 
       // -------------
       // Check if this is a lambda mangled name
-      auto demangledPtr = abi::__cxa_demangle(
-          mangledAttr.getValue().str().c_str(), nullptr, nullptr, nullptr);
-      if (demangledPtr) {
-        std::string demangledName(demangledPtr);
+        std::string demangledName = llvm::demangle(mangledAttr.getValue().str());
         demangledName = std::regex_replace(demangledName,
                                            std::regex("::operator()(.*)"), "");
         if (demangledName.find("$_") != std::string::npos) {
@@ -857,7 +854,6 @@ public:
                                        cudaqRegisterLambdaName,
                                        ValueRange{castlambdaRef, castKernRef});
         }
-      }
       // -------------
 
       builder.create<LLVM::ReturnOp>(loc, ValueRange{});

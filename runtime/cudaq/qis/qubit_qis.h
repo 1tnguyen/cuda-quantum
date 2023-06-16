@@ -16,7 +16,11 @@
 #include "qvector.h"
 #include <functional>
 
+#if defined(_MSC_VER) and not defined(__clang__)
+#define __qpu__ 
+#else
 #define __qpu__ __attribute__((annotate("quantum")))
+#endif
 
 // This file describes the API for a default qubit logical instruction
 // set for CUDA Quantum kernels.
@@ -354,7 +358,7 @@ inline int64_t to_integer(std::vector<bool> bits) {
   int64_t ret = 0;
   for (std::size_t i = 0; i < bits.size(); i++) {
     if (bits[i]) {
-      ret |= 1UL << i;
+      ret |= 1ULL << i;
     }
   }
   return ret;

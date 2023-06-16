@@ -8,7 +8,7 @@
 
 #pragma once
 #include "Logger.h"
-#include <dlfcn.h>
+#include "DynamicLibrary.h"
 #include <mutex>
 #include <string_view>
 
@@ -25,9 +25,9 @@ PluginPointerType *getUniquePluginInstance(const std::string_view symbolName) {
   std::mutex m;
   std::lock_guard<std::mutex> l(m);
   using GetPluginFunction = PluginPointerType *(*)();
-  auto handle = dlopen(NULL, RTLD_LAZY);
-  GetPluginFunction fcn =
-      (GetPluginFunction)(intptr_t)dlsym(handle, symbolName.data());
+  auto handle = DynamicLibrary::DLOpen(NULL, /*Err=*/nullptr);
+  GetPluginFunction fcn = (GetPluginFunction)(intptr_t)DynamicLibrary::DLSym(
+      handle, symbolName.data());
   if (!fcn)
     throw std::runtime_error(
         "Could not load the requested plugin. (possible link error)");

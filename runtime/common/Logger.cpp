@@ -13,12 +13,19 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
-
+#if defined(_MSC_VER)
+#include <Windows.h>
+#include <Process.h>
+#endif
 namespace cudaq {
 /// @brief This function will run at startup and initialize
 /// the logger for the runtime to use. It will set the log
 /// level and optionally dump to file if specified.
-__attribute__((constructor)) void initializeLogger() {
+// TODO: add DllMain
+#if not defined(_MSC_VER)
+__attribute__((constructor))
+#endif
+void initializeLogger() {
   // Default to no logging
   spdlog::set_level(spdlog::level::off);
 
@@ -37,6 +44,13 @@ __attribute__((constructor)) void initializeLogger() {
     spdlog::flush_on(spdlog::get_level());
   }
 }
+
+#if defined(_MSC_VER)
+struct __initializeLogger_t_ {
+  __initializeLogger_t_(void) { initializeLogger(); }
+};
+//static __initializeLogger_t_ __initialize_logger_;
+#endif
 
 namespace details {
 void trace(const std::string_view msg) { spdlog::trace(msg); }

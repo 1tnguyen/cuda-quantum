@@ -8,12 +8,12 @@
 
 #pragma once
 
+#include "common/Demangle.h"
 #include "common/ExecutionContext.h"
 #include "common/NoiseModel.h"
 #include "common/ObserveResult.h"
 #include "cudaq/utils/cudaq_utils.h"
 #include <cstring>
-#include <cxxabi.h>
 #include <functional>
 #include <future>
 #include <memory>
@@ -31,6 +31,7 @@ using QubitConnectivity = std::vector<QubitEdge>;
 
 /// A sampling tasks takes no input arguments and returns
 /// a sample_result instance.
+using KernelExecutionTask = std::function<sample_result()>;
 using KernelExecutionTask = std::function<sample_result()>;
 
 /// An observation tasks takes no input arguments and returns
@@ -112,11 +113,9 @@ public:
   /// platform directory.
   static std::vector<std::string> list_platforms();
 
-  static std::string demangle(char const *mangled) {
-    auto ptr = std::unique_ptr<char, decltype(&std::free)>{
-        abi::__cxa_demangle(mangled, nullptr, nullptr, nullptr), std::free};
-    return {ptr.get()};
-  }
+  static std::string demangle(char const *mangled){
+    return cudaq::demangle(mangled);
+  };
 
   /// @brief Set the target backend, by default do nothing, let subclasses
   /// override

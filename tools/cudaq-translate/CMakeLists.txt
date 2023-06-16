@@ -11,7 +11,7 @@ set(LLVM_LINK_COMPONENTS Support ${LLVM_TARGETS_TO_BUILD})
 get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 get_property(translation_libs GLOBAL PROPERTY MLIR_TRANSLATION_LIBS)
 get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-type-limits")
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-type-limits")
 
 add_llvm_executable(cudaq-translate cudaq-translate.cpp)
 
@@ -42,5 +42,5 @@ target_link_libraries(cudaq-translate
 )
 
 mlir_check_all_link_libraries(cudaq-translate)
-
+target_add_compile_flags_if_supported(cudaq-translate PRIVATE -Wno-type-limits)
 install(TARGETS cudaq-translate DESTINATION bin)

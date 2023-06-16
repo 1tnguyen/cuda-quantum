@@ -8,7 +8,8 @@
 
 set(LIBRARY_NAME nvqir)
 
-set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-ctad-maybe-unsupported")
+#set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-ctad-maybe-unsupported")
+target_add_compile_flags_if_supported(${LIBRARY_NAME} PRIVATE -Wno-ctad-maybe-unsupported)
 
 set(INTERFACE_POSITION_INDEPENDENT_CODE ON)
 
@@ -27,7 +28,7 @@ target_include_directories(${LIBRARY_NAME}
 # and by keeping it private, others can specify the
 # backend library later on
 target_link_libraries(${LIBRARY_NAME}
-  PUBLIC cudaq-common cudaq-spin dl fmt::fmt-header-only)
+  PUBLIC cudaq-common cudaq-spin fmt::fmt-header-only)
 
   cudaq_library_set_rpath(${LIBRARY_NAME})
 

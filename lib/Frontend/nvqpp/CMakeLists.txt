@@ -11,7 +11,9 @@ set(LIBRARY_NAME cudaq-mlirgen)
 get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-switch")
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-switch")
+target_add_compile_flags_if_supported(${LIBRARY_NAME} PRIVATE -Wno-switch)
+
 add_mlir_library(${LIBRARY_NAME}
     # bridge from AST to Quake
     ASTBridge.cpp

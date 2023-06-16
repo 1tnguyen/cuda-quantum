@@ -16,6 +16,8 @@ set(COMMON_RUNTIME_SRC
   ServerHelper.cpp 
   Resources.cpp
   Future.cpp
+  DynamicLibrary.cpp
+  Demangle.cpp
 )
 
 # Create the cudaq-common library
@@ -29,7 +31,7 @@ target_include_directories(${LIBRARY_NAME}
         ${CMAKE_SOURCE_DIR}/runtime)
 
 # Link privately to all dependencies
-target_link_libraries(${LIBRARY_NAME} PUBLIC cudaq-spin PRIVATE spdlog::spdlog)
+target_link_libraries(${LIBRARY_NAME} PUBLIC cudaq-spin PRIVATE spdlog::spdlog LLVMDemangle)
 
 # Bug in GCC 12 leads to spurious warnings (-Wrestrict)
 # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=105329

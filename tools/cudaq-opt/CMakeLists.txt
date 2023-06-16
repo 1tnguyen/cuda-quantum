@@ -8,7 +8,7 @@
 
 get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-type-limits")
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-type-limits")
 
 add_llvm_executable(cudaq-opt cudaq-opt.cpp)
 
@@ -33,5 +33,6 @@ target_link_libraries(cudaq-opt
 
 export_executable_symbols_for_plugins(cudaq-opt)
 mlir_check_all_link_libraries(cudaq-opt)
+target_add_compile_flags_if_supported(cudaq-opt PRIVATE -Wno-type-limits)
 
 install(TARGETS cudaq-opt DESTINATION bin)

@@ -7,7 +7,9 @@
 # ============================================================================ #
 
 set(LIBRARY_NAME cudaq-spin)
-set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-ctad-maybe-unsupported")
+#set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-ctad-maybe-unsupported")
+target_add_compile_flags_if_supported(${LIBRARY_NAME} PRIVATE -Wno-ctad-maybe-unsupported)
+
 set(INTERFACE_POSITION_INDEPENDENT_CODE ON)
 
 set(CUDAQ_SPIN_SRC
@@ -27,6 +29,9 @@ target_include_directories(${LIBRARY_NAME}
 if (OpenMP_CXX_FOUND)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE CUDAQ_HAS_OPENMP)
   target_link_libraries(${LIBRARY_NAME} PRIVATE fmt::fmt-header-only OpenMP::OpenMP_CXX)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+    target_compile_options(${LIBRARY_NAME} PRIVATE "/openmp:llvm")
+  endif()
 else()
   target_link_libraries(${LIBRARY_NAME} PRIVATE fmt::fmt-header-only)
 endif()

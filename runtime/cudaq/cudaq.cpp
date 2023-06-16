@@ -12,7 +12,6 @@
 #include "common/Logger.h"
 #include "cudaq/platform.h"
 #include "cudaq/utils/registry.h"
-#include <dlfcn.h>
 #include <map>
 #include <regex>
 #include <string>

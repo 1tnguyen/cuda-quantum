@@ -197,5 +197,6 @@ CUDAQ_TEST(NoiseTest, checkBitFlipType) {
   EXPECT_EQ(2, counts.size());
   EXPECT_NEAR(counts.probability("0"), .1, .1);
   EXPECT_NEAR(counts.probability("1"), .9, .1);
+  cudaq::unset_noise();
 }
 #endif
