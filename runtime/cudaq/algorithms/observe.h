@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "common/ExecutionContext.h"
+#include "common/ObserveExperimentSetup.h"
 #include "common/ObserveResult.h"
 #include "cudaq/algorithms/broadcast.h"
 #include "cudaq/concepts.h"
@@ -55,12 +56,12 @@ namespace details {
 /// arguments and invokes the quantum kernel) and invoke the `spin_op`
 /// observation process.
 template <typename KernelFunctor>
-std::optional<observe_result>
-runObservation(KernelFunctor &&k, cudaq::spin_op &h, quantum_platform &platform,
-               int shots, const std::string &kernelName, std::size_t qpu_id = 0,
-               details::future *futureResult = nullptr,
-               std::size_t batchIteration = 0,
-               std::size_t totalBatchIters = 0) {
+std::optional<observe_result> runObservation(
+    KernelFunctor &&k, cudaq::spin_op &h, quantum_platform &platform, int shots,
+    const std::string &kernelName, std::size_t qpu_id = 0,
+    details::future *futureResult = nullptr, std::size_t batchIteration = 0,
+    std::size_t totalBatchIters = 0,
+    pauli_partition_strategy pauli_partition = pauli_partition_strategy::None) {
   auto ctx = std::make_unique<ExecutionContext>("observe", shots);
   ctx->kernelName = kernelName;
   ctx->spin = &h;
@@ -72,7 +73,11 @@ runObservation(KernelFunctor &&k, cudaq::spin_op &h, quantum_platform &platform,
 
   // Indicate that this is an asynchronous execution
   ctx->asyncExec = futureResult != nullptr;
-
+  std::unique_ptr<observe_experiment_setup> observe_setup;
+  if (pauli_partition != pauli_partition_strategy::None) {
+    observe_setup = std::make_unique<observe_experiment_setup>(pauli_partition);
+    ctx->observe_setup = observe_setup.get();
+  }
   platform.set_current_qpu(qpu_id);
   platform.set_exec_ctx(ctx.get(), qpu_id);
 
@@ -201,6 +206,36 @@ observe_result observe(QuantumKernel &&kernel, spin_op H, Args &&...args) {
              },
              H, platform, shots, kernelName)
       .value();
+}
+
+template <pauli_partition_strategy PartitionStrategy, typename QuantumKernel,
+          typename... Args>
+requires ObserveCallValid<QuantumKernel, Args...> observe_result
+observe(std::size_t shots, QuantumKernel &&kernel, spin_op H, Args &&...args) {
+  if (shots <= 0 && PartitionStrategy != pauli_partition_strategy::None) {
+    // If exact observation is set (no shots), pauli partition cannot be used
+    throw std::invalid_argument("A valid 'shots' value is required when using "
+                                "observable term grouping.");
+  }
+
+  if constexpr (PartitionStrategy == pauli_partition_strategy::None)
+    return observe(shots, kernel, H, args...);
+  else if constexpr (PartitionStrategy == pauli_partition_strategy::QWC) {
+    // Run this SHOTS times
+    auto &platform = cudaq::get_platform();
+    auto kernelName = cudaq::getKernelName(kernel);
+
+    return details::runObservation(
+               [&kernel, ... args = std::forward<Args>(args)]() mutable {
+                 kernel(args...);
+               },
+               H, platform, shots, kernelName, /*qpu_id*/ 0,
+               /*futureResult */ nullptr, /*batchIteration*/ 0,
+               /* totalBatchIters */ 0, PartitionStrategy)
+        .value();
+  } else
+    throw std::runtime_error(
+        "Unsupported cudaq::pauli_partition_strategy type.");
 }
 
 /// @brief Compute the expected value of `H` with respect to `kernel(Args...)`.

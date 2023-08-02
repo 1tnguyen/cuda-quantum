@@ -11,7 +11,8 @@
 #include <complex>
 #include <memory>
 #include <vector>
-
+#define DECLARE_CMAT_BINARY_OPERATOR_OVERLOAD(_op)                             \
+  complex_matrix _op(const complex_matrix &other) const;
 namespace cudaq {
 
 /// @brief The complex_matrix provides an abstraction for
@@ -60,7 +61,17 @@ public:
   /// @brief Multiply this matrix with the provided other matrix.
   /// This does not modify this matrix but instead returns a
   /// new matrix value.
-  complex_matrix operator*(complex_matrix &other) const;
+  DECLARE_CMAT_BINARY_OPERATOR_OVERLOAD(operator*);
+
+  /// @brief Add this matrix with the provided other matrix.
+  /// This does not modify this matrix but instead returns a
+  /// new matrix value.
+  DECLARE_CMAT_BINARY_OPERATOR_OVERLOAD(operator+);
+
+  /// @brief Minus this matrix with the provided other matrix.
+  /// This does not modify this matrix but instead returns a
+  /// new matrix value.
+  DECLARE_CMAT_BINARY_OPERATOR_OVERLOAD(operator-);
 
   /// @brief Multiply this matrix by a vector (A*x) such that
   /// x is provided as a std vector of the correct size.
@@ -83,9 +94,9 @@ public:
   void set_zero();
 
   /// @brief Print this matrix to the given output stream
-  void dump(std::ostream &os);
+  void dump(std::ostream &os) const;
 
   /// @brief Print this matrix to standard out
-  void dump();
+  void dump() const;
 };
 } // namespace cudaq

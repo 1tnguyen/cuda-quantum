@@ -17,7 +17,7 @@
 
 namespace cudaq {
 class spin_op;
-
+class observe_experiment_setup;
 // A State is the vector of data for the density matrix or state vector,
 // as well as the array shape (n,n) or (n)
 using State =
@@ -35,6 +35,11 @@ public:
 
   /// @brief An optional spin operator
   std::optional<cudaq::spin_op *> spin;
+
+  /// @brief An optional observe setup to send on to the QPU.
+  /// QPU, if supporting the required setup (term grouping), will populate the
+  /// necessary data for the CUDAQ runtime to retrieve the expectation value.
+  cudaq::observe_experiment_setup *observe_setup = nullptr;
 
   /// @brief Measurement counts for a CUDA Quantum kernel invocation
   sample_result result;

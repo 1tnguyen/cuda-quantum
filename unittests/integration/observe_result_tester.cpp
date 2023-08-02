@@ -62,3 +62,30 @@ CUDAQ_TEST(ObserveResult, checkSimple) {
   EXPECT_TRUE(x0x1Counts.size() == 4);
   platform.clear_shots();
 }
+
+CUDAQ_TEST(ObserveResult, checkQwcPartition) {
+  using namespace cudaq::spin;
+  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
+                     .21829 * z(0) - 6.125 * z(1);
+  auto ansatz = [](double theta) __qpu__ {
+    cudaq::qubit q, r;
+    x(q);
+    ry(theta, r);
+    x<cudaq::ctrl>(r, q);
+  };
+  cudaq::set_random_seed(123);
+  cudaq::observe_result result = cudaq::observe<cudaq::pauli_partition_strategy::QWC>(
+      1000000, ansatz, h, 0.59);
+  result.dump();
+  const auto all_reg_names = result.raw_data().register_names();
+  // Z0 and Z1 are combined into ZZ
+  EXPECT_TRUE(std::find(all_reg_names.begin(), all_reg_names.end(), "ZZ") !=
+              all_reg_names.end());
+  EXPECT_TRUE(std::find(all_reg_names.begin(), all_reg_names.end(), "XX") !=
+              all_reg_names.end());
+  EXPECT_TRUE(std::find(all_reg_names.begin(), all_reg_names.end(), "YY") !=
+              all_reg_names.end());
+  EXPECT_NEAR(result, -1.7487, 1e-2);
+  printf("Get energy from QWC term grouping as double %lf\n",
+         static_cast<double>(result));
+}

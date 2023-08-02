@@ -212,3 +212,50 @@ TEST(SpinOpTester, checkDistributeTerms) {
   EXPECT_EQ(distributed[0].num_terms(), 2);
   EXPECT_EQ(distributed[1].num_terms(), 3);
 }
+
+TEST(SpinOpTester, checkQwcPartition) {
+  auto H = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) + .21829 * z(0) -
+           6.125 * z(1);
+
+  const auto partition_map = H.partition_paulis(cudaq::pauli_partition_strategy::QWC);
+  // 3 groups (X0X1), (Y0Y1), (Z0, Z1) when checking QWC
+  EXPECT_EQ(partition_map.size(), 3);
+}
+
+TEST(SpinOpTester, checkCommutingPartition) {
+  auto H = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) + .21829 * z(0) -
+           6.125 * z(1);
+
+  const auto partition_map =
+      H.partition_paulis(cudaq::pauli_partition_strategy::CommutingTerms);
+  // 2 groups (X0X1, Y0Y1), (Z0, Z1) when checking the true commuting
+  // relationship since X0X1 and Y0Y1 commute!
+  EXPECT_EQ(partition_map.size(), 2);
+}
+
+TEST(SpinOpTester, checkPartitionRandomSpinOp) {
+  auto H = cudaq::spin_op::random(4, 50);
+  const auto partition_map =
+      H.partition_paulis(cudaq::pauli_partition_strategy::CommutingTerms);
+  for (const auto &[color_id, terms] : partition_map) {
+    // Perform verification that those terms in the same color group actually
+    // commute with each other.
+    for (auto iIter = terms.begin(), iIterEnd = terms.end(); iIter != iIterEnd;
+         ++iIter) {
+      for (auto jIter = std::next(iIter), jIterEnd = terms.end();
+           jIter != jIterEnd; ++jIter) {
+        cudaq::spin_op pauli_op1(*iIter, 1.0);
+        cudaq::spin_op pauli_op2(*jIter, 1.0);
+        const auto mat1 = pauli_op1.to_matrix();
+        const auto mat2 = pauli_op2.to_matrix();
+        // Commute: [P, Q] = PQ - QP == 0
+        const auto commute_mat = mat1 * mat2 - mat2 * mat1;
+        for (std::size_t idx = 0,
+                         length = commute_mat.rows() * commute_mat.cols();
+             idx < length; ++idx) {
+          EXPECT_NEAR(std::abs(commute_mat.data()[idx]), 0.0, 1e-12);
+        }
+      }
+    }
+  }
+}

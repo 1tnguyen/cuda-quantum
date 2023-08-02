@@ -25,6 +25,10 @@
 #include <utility>
 #include <vector>
 
+// FIXME: move this to a util lib so no need for boost dependency here.
+#include <boost/graph/adjacency_list.hpp>
+#include <boost/graph/sequential_vertex_coloring.hpp>
+
 namespace cudaq {
 
 namespace details {
@@ -247,6 +251,114 @@ spin_op spin_op::random(std::size_t nQubits, std::size_t nTerms) {
   }
 
   return spin_op(randomTerms, coeffs);
+}
+
+static std::vector<std::size_t>
+conflicting_qubits(const spin_op::spin_op_term &pauli_term_1,
+                   const spin_op::spin_op_term &pauli_term_2) {
+  std::vector<std::size_t> conflicts;
+  const auto nb_qubits1 = pauli_term_1.size() / 2;
+  const auto nb_qubits2 = pauli_term_2.size() / 2;
+  const auto min_nb_qubits = std::min(nb_qubits1, nb_qubits2);
+  for (std::size_t qId = 0; qId < min_nb_qubits; ++qId) {
+    // Either Pauli op @ qId in the first or second term is Identity =>
+    // non-conflicting
+    if ((!pauli_term_1[qId] && !pauli_term_1[qId + nb_qubits1]) ||
+        (!pauli_term_2[qId] && !pauli_term_2[qId + nb_qubits2]))
+      continue;
+
+    // Otherwise, if Pauli ops @ qId are different => conflicting.
+    // i.e., check that both the X and Z bits are equal.
+    if ((pauli_term_1[qId] != pauli_term_2[qId]) ||
+        (pauli_term_1[qId + nb_qubits1] != pauli_term_2[qId + nb_qubits2]))
+      conflicts.emplace_back(qId);
+  }
+  return conflicts;
+}
+
+static bool term_commutes(const spin_op::spin_op_term &pauli_term_1,
+                          const spin_op::spin_op_term &pauli_term_2) {
+  // Even number of conflicting Pauli ops => commute
+  return (conflicting_qubits(pauli_term_1, pauli_term_2).size() % 2) == 0;
+}
+
+std::unordered_map<std::size_t, std::vector<spin_op::spin_op_term>>
+spin_op::partition_paulis(pauli_partition_strategy strategy) const {
+  using Graph =
+      boost::adjacency_list<boost::listS, boost::vecS, boost::undirectedS>;
+  using vertex_colour_type = std::size_t;
+  using vertex_index_map =
+      boost::property_map<Graph, boost::vertex_index_t>::const_type;
+  using Edge = std::pair<int, int>;
+  std::vector<Edge> non_commuting_edges;
+  for (auto iIter = terms.begin(), iIterEnd = terms.end(); iIter != iIterEnd;
+       ++iIter) {
+    for (auto jIter = std::next(iIter), jIterEnd = terms.end();
+         jIter != jIterEnd; ++jIter) {
+      const auto &pauli1 = iIter->first;
+      const auto &pauli2 = jIter->first;
+      const bool terms_commute = [&]() {
+        switch (strategy) {
+        case pauli_partition_strategy::QWC:
+          // no conflicting qubits
+          // i.e., no need for diagonalizing observe circuit,
+          // => there exists a standard change-of-basis circuit to observe them
+          // all.
+          return conflicting_qubits(pauli1, pauli2).empty();
+        case pauli_partition_strategy::CommutingTerms:
+          // true commuting check
+          return term_commutes(pauli1, pauli2);
+        default:
+          __builtin_unreachable();
+        }
+      }();
+      // Add non-commuting edges
+      if (!terms_commute)
+        non_commuting_edges.emplace_back(
+            std::make_pair(std::distance(terms.begin(), iIter),
+                           std::distance(terms.begin(), jIter)));
+    }
+  }
+
+  // Construct the graph
+  Graph g(non_commuting_edges.begin(), non_commuting_edges.end(), terms.size());
+  std::vector<vertex_colour_type> colorVec(boost::num_vertices(g));
+  boost::iterator_property_map<vertex_colour_type *, vertex_index_map> color(
+      &colorVec.front(), get(boost::vertex_index, g));
+  const auto numColors = sequential_vertex_coloring(g, color);
+  auto colorIter = colorVec.begin();
+  std::unordered_map<std::size_t, std::vector<spin_op::spin_op_term>> colorMap;
+  colorMap.reserve(numColors);
+  for (auto termIter = terms.begin(), termIterEnd = terms.end();
+       termIter != termIterEnd; ++termIter, ++colorIter)
+    colorMap[*colorIter].emplace_back(termIter->first);
+
+  return colorMap;
+} 
+
+spin_op::spin_op_term spin_op::merge_qwc_terms(const std::vector<spin_op::spin_op_term> &terms,
+                                      bool validate) {
+  if (validate) {
+    for (auto iIter = terms.begin(), iIterEnd = terms.end(); iIter != iIterEnd;
+         ++iIter) {
+      for (auto jIter = std::next(iIter), jIterEnd = terms.end();
+           jIter != jIterEnd; ++jIter) {
+        if (!conflicting_qubits(*iIter, *jIter).empty())
+          throw std::runtime_error(
+              "Failed to validate qubit-wise commutativity between " +
+              spin_op(*iIter, 1.0).to_string(false) + " and " +
+              spin_op(*jIter, 1.0).to_string(false));
+      }
+    }
+  }
+  // Logical OR
+  spin_op::spin_op_term combined_term = terms.front();
+  // TODO: optimize this
+  for (std::size_t i = 1, iEnd = terms.size(); i < iEnd; ++i)
+    for (std::size_t bit_idx = 0, bit_length = combined_term.size();
+         bit_idx < bit_length; ++bit_idx)
+      combined_term[bit_idx] = combined_term[bit_idx] || terms[i][bit_idx];
+  return combined_term;
 }
 
 void spin_op::expandToNQubits(const std::size_t numQubits) {

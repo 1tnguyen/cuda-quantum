@@ -9,6 +9,7 @@
 #include "common/ExecutionContext.h"
 #include "common/Logger.h"
 #include "common/NoiseModel.h"
+#include "common/ObserveExperimentSetup.h"
 #include "cudaq/platform/qpu.h"
 #include "cudaq/platform/quantum_platform.h"
 #include "cudaq/qis/qubit_qis.h"
@@ -74,6 +75,64 @@ public:
         results.emplace_back(data.to_map(), H.to_string(false), exp);
         ctx->expectationValue = exp;
         ctx->result = cudaq::sample_result(results);
+      } else if (executionContext->observe_setup &&
+                 executionContext->observe_setup->get_partition_scheme() !=
+                     cudaq::pauli_partition_strategy::None) {
+        // FIXME: implement full commuting grouping (required diagonalizing
+        // circuit)
+
+        // Note: the gain (in terms of reducing the number of groups)
+        // from QWC -> exact commuting is not significant + extra CNOT gates in
+        // the diagonalizing circuit are undesirable for NISQ devices.
+        if (executionContext->observe_setup->get_partition_scheme() !=
+            cudaq::pauli_partition_strategy::QWC)
+          throw std::invalid_argument("Only QWC Pauli partition is supported.");
+        const auto partition_map = H.partition_paulis(
+            executionContext->observe_setup->get_partition_scheme());
+        for (const auto &[color_id, terms] : partition_map) {
+          const auto combined_term = cudaq::spin_op::merge_qwc_terms(terms);
+          cudaq::spin_op as_spin_op(combined_term, 1.0);
+          const auto term_reg_name = as_spin_op.to_string(false);
+          const auto bit_map_for_term =
+              [&combined_term](const cudaq::spin_op::spin_op_term &sub_term)
+              -> std::vector<std::size_t> {
+            std::vector<std::size_t> result;
+            for (std::size_t idx = 0, nbQubits = combined_term.size() / 2,
+                             measure_idx = 0;
+                 idx < nbQubits; ++idx) {
+              if (combined_term[idx] || combined_term[idx + nbQubits]) {
+                if (sub_term[idx] || sub_term[idx + nbQubits])
+                  result.emplace_back(measure_idx);
+                measure_idx++;
+              }
+            }
+            return result;
+          };
+          for (const auto &term : terms)
+            executionContext->observe_setup->add_result_mapping_for_term(
+                term, term_reg_name, bit_map_for_term(term));
+
+          // Observe the combined term
+          auto [exp, data] = cudaq::measure(as_spin_op);
+          results.emplace_back(data.to_map(), term_reg_name);
+        }
+
+        // Compute the expectation value
+        cudaq::sample_result grouping_result(results);
+        double sum = 0.0;
+        H.for_each_term([&](cudaq::spin_op &term) {
+          if (term.is_identity())
+            sum += term.get_coefficient().real();
+          else {
+            assert(term.num_terms() == 1 && "Expected a single term spin_op");
+            const double term_exp_val_from_group =
+                executionContext->observe_setup->retrieve_term_expectation(
+                    term.get_raw_data().first.front(), grouping_result);
+            sum += (term.get_coefficient().real() * term_exp_val_from_group);
+          }
+        });
+        ctx->expectationValue = sum;
+        ctx->result = cudaq::sample_result(sum, results);
       } else {
 
         // Loop over each term and compute coeff * <term>
