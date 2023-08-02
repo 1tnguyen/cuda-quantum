@@ -167,3 +167,38 @@ CUDAQ_TEST(H2MoleculeTester, checkHWE) {
     EXPECT_NEAR(-1.137, res, 1e-3);
   }
 }
+
+CUDAQ_TEST(H2MoleculeTester, checkHamiltonianPartition) {
+  {
+    cudaq::molecular_geometry geometry{{"H", {0., 0., 0.}},
+                                       {"H", {0., 0., .7474}}};
+    auto molecule = cudaq::create_molecule(geometry, "sto-3g", 1, 0);
+    molecule.hamiltonian.dump();
+    const auto partition_map = molecule.hamiltonian.partition_paulis(
+        cudaq::pauli_partition_strategy::QWC);
+
+    for (const auto &[color_id, terms] : partition_map) {
+      for (const auto &term : terms) {
+        std::cout << cudaq::spin_op(term, 1.0).to_string(false) << " ";
+      }
+      std::cout << "\n ======================== \n";
+    }
+    std::cout << "Num (non-identity) terms = " << molecule.hamiltonian.num_terms() - 1 << "; num groups = " << partition_map.size() << "\n";
+  }
+  {
+    cudaq::molecular_geometry geometry{{"Li", {0., 0., 0.}},
+                                       {"H", {0., 0., 1.6}}};
+    auto molecule = cudaq::create_molecule(geometry, "sto-3g", 1, 0);
+    molecule.hamiltonian.dump();
+    const auto partition_map = molecule.hamiltonian.partition_paulis(
+        cudaq::pauli_partition_strategy::QWC);
+
+    for (const auto &[color_id, terms] : partition_map) {
+      for (const auto &term : terms) {
+        std::cout << cudaq::spin_op(term, 1.0).to_string(false) << " ";
+      }
+      std::cout << "\n ======================== \n";
+    }
+    std::cout << "Num (non-identity) terms = " << molecule.hamiltonian.num_terms() - 1 << "; num groups = " << partition_map.size() << "\n";
+  }
+}

@@ -13,6 +13,7 @@
 #include <complex>
 #include <functional>
 #include <map>
+#include <unordered_map>
 
 // Define friend functions for operations between spin_op and scalars.
 #define CUDAQ_SPIN_SCALAR_OPERATIONS(op, U)                                    \
@@ -82,6 +83,29 @@ class spin_op;
 
 /// @brief Utility enum representing Paulis.
 enum class pauli { I, X, Y, Z };
+
+enum class pauli_partition_strategy {
+  /// No partitioning
+  None,
+  /// Qubit-wise commuting (QWC): if for *every* qubit id, either (at least
+  /// one local op is I) or (both local
+  /// ops are same Pauli), then the two pauli strings are QWC.
+  /// All Pauli terms partitioned by this strategy will have the *same*
+  /// observe circuit.
+  ///
+  QWC,
+  /// Partition the Pauli terms into sets of mutually commuting terms
+  // Note: QWC is sufficient for checking commutativity but not necessary.
+  // e.g., X0 Y1 and Y0 X1 --> *not* QWC, though they *do* commute:
+  // X0*Y0 = iZ0
+  // Y1*X1 = -iZ1
+  // (X0 Y1)*(Y0 X1) = -(-1) Z0 Z1
+  /// Note: Pauli terms partitioned in this way will require **specialized**
+  /// diagonalizing circuit, e.g.,
+  /// with CNOT gates, in order to observe the expectation values of all the
+  /// terms simultaneously with a single circuit.
+  CommutingTerms
+};
 
 namespace spin {
 
@@ -344,6 +368,11 @@ public:
   /// @brief Return a dense matrix representation of this
   /// spin_op.
   complex_matrix to_matrix() const;
+  
+  // Returned map {the colour value (as integers) => all the Pauli terms
+  // assigned that colour)
+  std::unordered_map<std::size_t, std::vector<spin_op_term>> partition_paulis(
+      pauli_partition_strategy strategy = pauli_partition_strategy::QWC) const;
 };
 
 /// @brief Add a double and a spin_op

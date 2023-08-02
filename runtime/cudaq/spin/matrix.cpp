@@ -11,6 +11,18 @@
 #include "common/FmtCore.h"
 #include <iostream>
 
+#define DEFINE_CMAT_BINARY_OPERATOR_OVERLOAD(_op)                              \
+  complex_matrix complex_matrix::_op(const complex_matrix &other) const {      \
+    Eigen::Map<Eigen::MatrixXcd> map(internalData, nRows, nCols);              \
+    Eigen::Map<Eigen::MatrixXcd> otherMap(other.data(), other.nRows,           \
+                                          other.nCols);                        \
+    /* forward to the corresponding operator in Eigen */                       \
+    Eigen::MatrixXcd ret = map._op(otherMap);                                  \
+    complex_matrix copy(ret.rows(), ret.cols());                               \
+    std::memcpy(copy.data(), ret.data(), sizeof(value_type) * ret.size());     \
+    return copy;                                                               \
+  }
+
 namespace cudaq {
 
 /// @brief Hash function for an Eigen::MatrixXcd
@@ -56,8 +68,8 @@ complex_matrix::value_type *complex_matrix::data() const {
   return internalData;
 }
 
-void complex_matrix::dump() { dump(std::cout); }
-void complex_matrix::dump(std::ostream &os) {
+void complex_matrix::dump() const { dump(std::cout); }
+void complex_matrix::dump(std::ostream &os) const {
   Eigen::Map<Eigen::MatrixXcd> map(internalData, nRows, nCols);
   os << map << "\n";
 }
@@ -66,15 +78,34 @@ void complex_matrix::set_zero() {
   Eigen::Map<Eigen::MatrixXcd> map(internalData, nRows, nCols);
   map.setZero();
 }
+DEFINE_CMAT_BINARY_OPERATOR_OVERLOAD(operator*);
+DEFINE_CMAT_BINARY_OPERATOR_OVERLOAD(operator+);
+DEFINE_CMAT_BINARY_OPERATOR_OVERLOAD(operator-);
+// complex_matrix complex_matrix::operator*(const complex_matrix &other) const {
+//   Eigen::Map<Eigen::MatrixXcd> map(internalData, nRows, nCols);
+//   Eigen::Map<Eigen::MatrixXcd> otherMap(other.data(), other.nRows, other.nCols);
+//   Eigen::MatrixXcd ret = map * otherMap;
+//   complex_matrix copy(ret.rows(), ret.cols());
+//   std::memcpy(copy.data(), ret.data(), sizeof(value_type) * ret.size());
+//   return copy;
+// }
 
-complex_matrix complex_matrix::operator*(complex_matrix &other) const {
-  Eigen::Map<Eigen::MatrixXcd> map(internalData, nRows, nCols);
-  Eigen::Map<Eigen::MatrixXcd> otherMap(other.data(), other.nRows, other.nCols);
-  Eigen::MatrixXcd ret = map * otherMap;
-  complex_matrix copy(ret.rows(), ret.cols());
-  std::memcpy(copy.data(), ret.data(), sizeof(value_type) * ret.size());
-  return copy;
-}
+// complex_matrix complex_matrix::operator+(const complex_matrix &other) const {
+//   Eigen::Map<Eigen::MatrixXcd> map(internalData, nRows, nCols);
+//   Eigen::Map<Eigen::MatrixXcd> otherMap(other.data(), other.nRows, other.nCols);
+//   Eigen::MatrixXcd ret = map + otherMap;
+//   complex_matrix copy(ret.rows(), ret.cols());
+//   std::memcpy(copy.data(), ret.data(), sizeof(value_type) * ret.size());
+//   return copy;
+// }
+// complex_matrix complex_matrix::operator-(const complex_matrix &other) const {
+//   Eigen::Map<Eigen::MatrixXcd> map(internalData, nRows, nCols);
+//   Eigen::Map<Eigen::MatrixXcd> otherMap(other.data(), other.nRows, other.nCols);
+//   Eigen::MatrixXcd ret = map - otherMap;
+//   complex_matrix copy(ret.rows(), ret.cols());
+//   std::memcpy(copy.data(), ret.data(), sizeof(value_type) * ret.size());
+//   return copy;
+// }
 
 complex_matrix complex_matrix::operator*(std::vector<value_type> &other) const {
   if (nCols != other.size())

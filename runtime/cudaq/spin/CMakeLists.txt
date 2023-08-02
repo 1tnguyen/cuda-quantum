@@ -16,6 +16,10 @@ set(CUDAQ_SPIN_SRC
 
 find_package(OpenMP)
 
+## TEMP
+find_package(Boost REQUIRED)
+## TEMP
+
 add_library(${LIBRARY_NAME} SHARED ${CUDAQ_SPIN_SRC})
 target_include_directories(${LIBRARY_NAME} 
     PUBLIC 
@@ -26,9 +30,9 @@ target_include_directories(${LIBRARY_NAME}
 
 if (OpenMP_CXX_FOUND)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE CUDAQ_HAS_OPENMP)
-  target_link_libraries(${LIBRARY_NAME} PRIVATE fmt::fmt-header-only OpenMP::OpenMP_CXX)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE fmt::fmt-header-only OpenMP::OpenMP_CXX Boost::headers)
 else()
-  target_link_libraries(${LIBRARY_NAME} PRIVATE fmt::fmt-header-only)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE fmt::fmt-header-only Boost::headers)
 endif()
 
 install(TARGETS ${LIBRARY_NAME} EXPORT cudaq-spin-targets DESTINATION lib)
