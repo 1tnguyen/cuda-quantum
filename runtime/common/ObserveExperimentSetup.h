@@ -29,6 +29,8 @@ public:
                                    double sign = 1.0);
   double retrieve_term_expectation(const spin_op::spin_op_term &term,
                                    sample_result &result) const;
+
+  double compute_exp_val(const spin_op &ham, sample_result &result) const;
   pauli_partition_strategy get_partition_scheme() const {
     return partition_scheme;
   }

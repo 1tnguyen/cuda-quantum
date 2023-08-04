@@ -117,22 +117,12 @@ public:
           results.emplace_back(data.to_map(), term_reg_name);
         }
 
-        // Compute the expectation value
+        // Compute the expectation value from grouping results
         cudaq::sample_result grouping_result(results);
-        double sum = 0.0;
-        H.for_each_term([&](cudaq::spin_op &term) {
-          if (term.is_identity())
-            sum += term.get_coefficient().real();
-          else {
-            assert(term.num_terms() == 1 && "Expected a single term spin_op");
-            const double term_exp_val_from_group =
-                executionContext->observe_setup->retrieve_term_expectation(
-                    term.get_raw_data().first.front(), grouping_result);
-            sum += (term.get_coefficient().real() * term_exp_val_from_group);
-          }
-        });
-        ctx->expectationValue = sum;
-        ctx->result = cudaq::sample_result(sum, results);
+        const double exp_val = executionContext->observe_setup->compute_exp_val(
+            H, grouping_result);
+        ctx->expectationValue = exp_val;
+        ctx->result = cudaq::sample_result(exp_val, results);
       } else {
 
         // Loop over each term and compute coeff * <term>

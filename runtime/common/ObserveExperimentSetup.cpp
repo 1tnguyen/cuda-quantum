@@ -37,4 +37,19 @@ double observe_experiment_setup::retrieve_term_expectation(
   const auto exp_val = counts.exp_val_z();
   return sign * exp_val;
 }
+double observe_experiment_setup::compute_exp_val(const spin_op &ham,
+                                                 sample_result &result) const {
+  double sum = 0.0;
+  ham.for_each_term([&](cudaq::spin_op &term) {
+    if (term.is_identity())
+      sum += term.get_coefficient().real();
+    else {
+      assert(term.num_terms() == 1 && "Expected a single term spin_op");
+      const double term_exp_val_from_group =
+          retrieve_term_expectation(term.get_raw_data().first.front(), result);
+      sum += (term.get_coefficient().real() * term_exp_val_from_group);
+    }
+  });
+  return sum;
+}
 } // namespace cudaq

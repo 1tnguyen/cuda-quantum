@@ -14,6 +14,7 @@
 #include "nvqpp_config.h"
 
 #include "common/FmtCore.h"
+#include "common/ObserveExperimentSetup.h"
 #include "common/RuntimeMLIR.h"
 #include "cudaq/platform/quantum_platform.h"
 #include <cudaq/spin_op.h>
@@ -312,33 +313,85 @@ public:
     std::vector<std::pair<std::string, ModuleOp>> modules;
     // Apply observations if necessary
     if (executionContext && executionContext->name == "observe") {
-
       cudaq::spin_op &spin = *executionContext->spin.value();
-      for (const auto &term : spin) {
-        if (term.is_identity())
-          continue;
+      // Get the ansatz
+      auto ansatz = moduleOp.lookupSymbol<func::FuncOp>(
+          std::string("__nvqpp__mlirgen__") + kernelName);
+      if (executionContext->observe_setup &&
+          executionContext->observe_setup->get_partition_scheme() !=
+              cudaq::pauli_partition_strategy::None) {
+        // FIXME: implement full commuting grouping (required diagonalizing
+        // circuit)
 
-        // Get the ansatz
-        auto ansatz = moduleOp.lookupSymbol<func::FuncOp>(
-            std::string("__nvqpp__mlirgen__") + kernelName);
+        // Note: the gain (in terms of reducing the number of groups)
+        // from QWC -> exact commuting is not significant + extra CNOT gates in
+        // the diagonalizing circuit are undesirable for NISQ devices.
+        if (executionContext->observe_setup->get_partition_scheme() !=
+            cudaq::pauli_partition_strategy::QWC)
+          throw std::invalid_argument("Only QWC Pauli partition is supported.");
+        const auto partition_map = spin.partition_paulis(
+            executionContext->observe_setup->get_partition_scheme());
+        for (const auto &[color_id, terms] : partition_map) {
+          const auto combined_term = cudaq::spin_op::merge_qwc_terms(terms);
+          cudaq::spin_op as_spin_op(combined_term, 1.0);
+          const auto term_reg_name = as_spin_op.to_string(false);
+          const auto bit_map_for_term =
+              [&combined_term](const cudaq::spin_op::spin_op_term &sub_term)
+              -> std::vector<std::size_t> {
+            std::vector<std::size_t> result;
+            for (std::size_t idx = 0, nbQubits = combined_term.size() / 2,
+                             measure_idx = 0;
+                 idx < nbQubits; ++idx) {
+              if (combined_term[idx] || combined_term[idx + nbQubits]) {
+                if (sub_term[idx] || sub_term[idx + nbQubits])
+                  result.emplace_back(measure_idx);
+                measure_idx++;
+              }
+            }
+            return result;
+          };
+          for (const auto &term : terms)
+            executionContext->observe_setup->add_result_mapping_for_term(
+                term, term_reg_name, bit_map_for_term(term));
+          
+          // Now add the measure circuit for the combined term
+          // Create a new Module to clone the ansatz into it
+          auto tmpModuleOp = builder.create<ModuleOp>();
+          tmpModuleOp.push_back(ansatz.clone());
+          // Create the pass manager, add the quake observe ansatz pass
+          // and run it followed by the canonicalizer
+          PassManager pm(&context);
+          OpPassManager &optPM = pm.nest<func::FuncOp>();
+          optPM.addPass(
+              cudaq::opt::createQuakeObserveAnsatzPass(combined_term));
+          if (failed(pm.run(tmpModuleOp)))
+            throw std::runtime_error("Could not apply measurements to ansatz.");
+          runPassPipeline("canonicalize", tmpModuleOp);
+          modules.emplace_back(term_reg_name, tmpModuleOp);
+        }
+      } else {
+        for (const auto &term : spin) {
+          if (term.is_identity())
+            continue;
 
-        // Create a new Module to clone the ansatz into it
-        auto tmpModuleOp = builder.create<ModuleOp>();
-        tmpModuleOp.push_back(ansatz.clone());
+          // Create a new Module to clone the ansatz into it
+          auto tmpModuleOp = builder.create<ModuleOp>();
+          tmpModuleOp.push_back(ansatz.clone());
 
-        // Extract the binary symplectic encoding
-        auto [binarySymplecticForm, coeffs] = term.get_raw_data();
+          // Extract the binary symplectic encoding
+          auto [binarySymplecticForm, coeffs] = term.get_raw_data();
 
-        // Create the pass manager, add the quake observe ansatz pass
-        // and run it followed by the canonicalizer
-        PassManager pm(&context);
-        OpPassManager &optPM = pm.nest<func::FuncOp>();
-        optPM.addPass(
-            cudaq::opt::createQuakeObserveAnsatzPass(binarySymplecticForm[0]));
-        if (failed(pm.run(tmpModuleOp)))
-          throw std::runtime_error("Could not apply measurements to ansatz.");
-        runPassPipeline("canonicalize", tmpModuleOp);
-        modules.emplace_back(term.to_string(false), tmpModuleOp);
+          // Create the pass manager, add the quake observe ansatz pass
+          // and run it followed by the canonicalizer
+          PassManager pm(&context);
+          OpPassManager &optPM = pm.nest<func::FuncOp>();
+          optPM.addPass(cudaq::opt::createQuakeObserveAnsatzPass(
+              binarySymplecticForm[0]));
+          if (failed(pm.run(tmpModuleOp)))
+            throw std::runtime_error("Could not apply measurements to ansatz.");
+          runPassPipeline("canonicalize", tmpModuleOp);
+          modules.emplace_back(term.to_string(false), tmpModuleOp);
+        }
       }
     } else
       modules.emplace_back(kernelName, moduleOp);

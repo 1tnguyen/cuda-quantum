@@ -194,7 +194,7 @@ protected:
 
 public:
   QuakeObserveAnsatzPass() = default;
-  QuakeObserveAnsatzPass(std::vector<bool> &bsfData)
+  QuakeObserveAnsatzPass(const std::vector<bool> &bsfData)
       : binarySymplecticForm(bsfData) {}
 
   void runOnOperation() override {
@@ -234,6 +234,6 @@ std::unique_ptr<mlir::Pass> cudaq::opt::createQuakeObserveAnsatzPass() {
 }
 
 std::unique_ptr<mlir::Pass>
-cudaq::opt::createQuakeObserveAnsatzPass(std::vector<bool> &bsfData) {
+cudaq::opt::createQuakeObserveAnsatzPass(const std::vector<bool> &bsfData) {
   return std::make_unique<QuakeObserveAnsatzPass>(bsfData);
 }

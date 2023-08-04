@@ -8,8 +8,8 @@
 
 #pragma once
 #include "MeasureCounts.h"
+#include "ObserveExperimentSetup.h"
 #include "ObserveResult.h"
-
 #include <functional>
 #include <future>
 #include <map>
@@ -96,11 +96,20 @@ protected:
   /// @brief A spin operator, used for observe future tasks
   spin_op *spinOp = nullptr;
 
+  /// @brief Infomation about the future result related to a spin_op observe
+  /// experiment.
+  // When running jobs asynchronously, we attach this info on the async_result
+  // to enable post-processing once the results are available.
+  // Using shared_ptr to keep this alive till the future result becomes available.
+  std::shared_ptr<cudaq::observe_experiment_setup> observe_jobs_setup;
+
 public:
   async_result() = default;
   async_result(spin_op *s) : spinOp(s) {}
-  async_result(details::future &&f, spin_op *op = nullptr)
-      : result(std::move(f)), spinOp(op) {}
+  async_result(
+      details::future &&f, spin_op *op = nullptr,
+      std::shared_ptr<cudaq::observe_experiment_setup> observe_setup = nullptr)
+      : result(std::move(f)), spinOp(op), observe_jobs_setup(observe_setup) {}
 
   /// @brief Return the asynchronously computed data, will
   /// wait until the data is ready.
@@ -119,6 +128,9 @@ public:
         throw std::runtime_error(
             "Returning an observe_result requires a spin_op.");
 
+      if (observe_jobs_setup)
+        return observe_result(
+            observe_jobs_setup->compute_exp_val(*spinOp, data), *spinOp, data);
       // this assumes we ran in shots mode.
       double sum = 0.0;
       spinOp->for_each_term([&](spin_op &term) {
