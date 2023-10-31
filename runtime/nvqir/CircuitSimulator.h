@@ -287,11 +287,11 @@ protected:
   /// matrix describing the quantum operation, a set of
   /// possible control qubit indices, and a set of target indices.
   struct GateApplicationTask {
-    const std::string operationName;
-    const std::vector<std::complex<ScalarType>> matrix;
-    const std::vector<std::size_t> controls;
-    const std::vector<std::size_t> targets;
-    const std::vector<ScalarType> parameters;
+    std::string operationName;
+    std::vector<std::complex<ScalarType>> matrix;
+    std::vector<std::size_t> controls;
+    std::vector<std::size_t> targets;
+    std::vector<ScalarType> parameters;
     GateApplicationTask(const std::string &name,
                         const std::vector<std::complex<ScalarType>> &m,
                         const std::vector<std::size_t> &c,
@@ -299,10 +299,32 @@ protected:
                         const std::vector<ScalarType> &params)
         : operationName(name), matrix(m), controls(c), targets(t),
           parameters(params) {}
+    bool operator==(const GateApplicationTask &other) const {
+      return operationName == other.operationName &&
+             controls == other.controls && targets == other.targets &&
+             parameters == other.parameters && matrix == other.matrix;
+    }
+    GateApplicationTask(const GateApplicationTask &) = default;
+    GateApplicationTask &operator=(const GateApplicationTask &) = default;
+  };
+
+  struct StateCache {
+    std::vector<GateApplicationTask> gates;
+    std::size_t numQubits;
   };
 
   /// @brief The current queue of operations to execute
   std::queue<GateApplicationTask> gateQueue;
+
+  /// @brief Flag to indicate gate queue has been flushed
+  ///
+  /// Under straight-line execution, the simulator will be queuing gates and
+  /// executing them altogether at resetExecutionContext. In other cases, e.g.,
+  /// mid-circuit measurement, the gate queue might be flushed multiple times
+  /// during the circuit execution. This flag enables smart state-caching if
+  /// possible.
+  bool gateQueueFlushed = false;
+  std::optional<StateCache> cachedStateConfig;
 
   /// @brief Get the name of the current circuit being executed.
   std::string getCircuitName() const { return currentCircuitName; }
@@ -593,8 +615,45 @@ protected:
   /// @brief Flush the gate queue, run all queued gate
   /// application tasks.
   void flushGateQueueImpl() override {
+    // We're about to flush a non-empty gate queue. Set the flag accordingly.
+    if (!gateQueue.empty())
+      gateQueueFlushed = true;
+    std::size_t cacheIpc = 0;
     while (!gateQueue.empty()) {
       auto &next = gateQueue.front();
+      if (cachedStateConfig.has_value()) {
+        if (cacheIpc < cachedStateConfig->gates.size()) {
+          if (cachedStateConfig->gates[cacheIpc] == next) {
+            // Match
+            cacheIpc++;
+            gateQueue.pop();
+            cudaq::info("Cache hit for gate: {}", next.operationName);
+            continue;
+          } else {
+            // Cache miss
+            cudaq::info("Cache miss: cached gate: {}; got {}",
+                        cachedStateConfig->gates[cacheIpc].operationName,
+                        next.operationName);
+            // reapply all the hits
+            cudaq::info(
+                "Cache miss: Reset the retained state. Start from zero state");
+            setToZeroState();
+            for (std::size_t i = 0; i < cacheIpc; ++i) {
+              auto &gateToFlush = cachedStateConfig->gates[i];
+              applyGate(gateToFlush);
+              if (executionContext && executionContext->noiseModel) {
+                std::vector<std::size_t> noiseQubits{
+                    gateToFlush.controls.begin(), gateToFlush.controls.end()};
+                noiseQubits.insert(noiseQubits.end(),
+                                   gateToFlush.targets.begin(),
+                                   gateToFlush.targets.end());
+                applyNoiseChannel(gateToFlush.operationName, noiseQubits);
+              }
+            }
+            cachedStateConfig.reset();
+          }
+        }
+      }
       applyGate(next);
       if (executionContext && executionContext->noiseModel) {
         std::vector<std::size_t> noiseQubits{next.controls.begin(),
@@ -684,6 +743,15 @@ public:
 
   /// @brief Allocate `count` qubits.
   std::vector<std::size_t> allocateQubits(std::size_t count) override {
+    if (executionContext && executionContext->retainSimulationData &&
+        cachedStateConfig.has_value()) {
+      assert(nQubitsAllocated == count);
+      assert(nQubitsAllocated == cachedStateConfig->numQubits);
+      std::vector<std::size_t> qubits(count);
+      std::iota(qubits.begin(), qubits.end(), 0);
+      return qubits;
+    }
+
     std::vector<std::size_t> qubits;
     for (std::size_t i = 0; i < count; i++)
       qubits.emplace_back(tracker.getNextIndex());
@@ -721,6 +789,8 @@ public:
   /// @brief Deallocate the qubit with give index
   void deallocate(const std::size_t qubitIdx) override {
     if (executionContext) {
+      if (executionContext->retainSimulationData)
+        return;
       cudaq::info("Deferring qubit {} deallocation", qubitIdx);
       deferredDeallocation.push_back(qubitIdx);
       return;
@@ -754,6 +824,9 @@ public:
       return;
 
     if (executionContext) {
+      if (executionContext->retainSimulationData)
+        return;
+
       for (auto &qubitIdx : qubits) {
         cudaq::info("Deferring qubit {} deallocation", qubitIdx);
         deferredDeallocation.push_back(qubitIdx);
@@ -833,8 +906,24 @@ public:
 
     // Set the state data if requested.
     if (executionContext->name == "extract-state") {
+      // We're about to flush the gate queue, determine if we need to cache the
+      // gate queue.
+      std::queue<GateApplicationTask> cached;
+      if (executionContext->retainSimulationData && !gateQueueFlushed) 
+        cached = gateQueue;
       flushGateQueue();
       executionContext->simulationData = getStateData();
+      if (executionContext->retainSimulationData) {
+        cachedStateConfig = StateCache();
+        cachedStateConfig->numQubits = nQubitsAllocated;
+        cachedStateConfig->gates.clear();
+        cachedStateConfig->gates.reserve(cached.size());
+
+        while (!cached.empty()) {
+          cachedStateConfig->gates.push_back(cached.front());
+          cached.pop();
+        }
+      }
     }
 
     // Deallocate the deferred qubits, but do so

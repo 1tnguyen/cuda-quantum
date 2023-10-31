@@ -63,7 +63,7 @@ namespace details {
 /// @brief Execute the given kernel functor and extract the
 /// state representation.
 template <typename KernelFunctor>
-state extractState(KernelFunctor &&kernel) {
+state extractState(KernelFunctor &&kernel, bool retainState = false) {
   // Get the platform.
   auto &platform = cudaq::get_platform();
 
@@ -74,7 +74,7 @@ state extractState(KernelFunctor &&kernel) {
   // Create an execution context, indicate this is for
   // extracting the state representation
   ExecutionContext context("extract-state");
-
+  context.retainSimulationData = retainState;
   // Perform the usual pattern set the context,
   // execute and then reset
   platform.set_exec_ctx(&context);

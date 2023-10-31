@@ -27,7 +27,7 @@ using State =
 /// how a CUDA Quantum kernel should be executed.
 class ExecutionContext {
 public:
-  /// @brief The name of the context ({basic, sampling, observe})
+  /// @brief The name of the context ({basic, sampling, observe, extract-state})
   const std::string name;
 
   /// @brief The number of execution shots
@@ -65,6 +65,16 @@ public:
   /// @brief simulationData provides a mechanism for
   /// simulation clients to extract the underlying simulation data.
   State simulationData;
+
+  /// @brief Flag to enable state caching if supported.
+  ///
+  ///
+  /// This flag hints the simulator that
+  /// we are running a progressive workflow, i.e., circuit is getting bigger as
+  /// we go by appending new gate layers, hence it should cache the state along
+  /// with the circuit generating that cached state for matching at a later
+  /// simulation.
+  bool retainSimulationData = false;
 
   /// @brief When run under the tracer context, persist the
   /// traced quantum resources here.

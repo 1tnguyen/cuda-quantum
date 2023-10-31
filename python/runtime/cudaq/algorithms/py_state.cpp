@@ -32,14 +32,14 @@ void extractStateData(py::buffer_info &info, complex *data) {
 }
 
 /// @brief Run `cudaq::get_state` on the provided kernel and spin operator.
-state pyGetState(kernel_builder<> &kernel, py::args args) {
+state pyGetState(kernel_builder<> &kernel, py::args args, bool retainState = false) {
   // Ensure the user input is correct.
   auto validatedArgs = validateInputArguments(kernel, args);
   kernel.jitCode();
   OpaqueArguments argData;
   packArgs(argData, validatedArgs);
   return details::extractState(
-      [&]() mutable { kernel.jitAndInvoke(argData.data()); });
+      [&]() mutable { kernel.jitAndInvoke(argData.data()); }, retainState);
 }
 
 /// @brief Bind the get_state cudaq function
@@ -172,8 +172,8 @@ index pair.
 
   mod.def(
       "get_state",
-      [](kernel_builder<> &kernel, py::args args) {
-        return pyGetState(kernel, args);
+      [](kernel_builder<> &kernel, py::args args, bool retain_state) {
+        return pyGetState(kernel, args, retain_state);
       },
       R"#(Return the :class:`State` of the system after execution of the provided `kernel`.
 
@@ -181,6 +181,7 @@ Args:
   kernel (:class:`Kernel`): The :class:`Kernel` to execute on the QPU.
   *arguments (Optional[Any]): The concrete values to evaluate the kernel 
     function at. Leave empty if the kernel doesn't accept any arguments.
+  retain_state (Optional[Bool]): The optional option to request the simulator to cache the state. Key-word only.
 
 .. code-block:: python
 
@@ -197,7 +198,7 @@ Args:
   # and, depending on the selected target, will return the state as a
   # vector or matrix.
   state = cudaq.get_state(kernel)
-  print(state))#");
+  print(state))#", py::arg("kernel"), py::kw_only(), py::arg("retain_state") = false);
 
   py::class_<async_state_result>(
       mod, "AsyncStateResult",
