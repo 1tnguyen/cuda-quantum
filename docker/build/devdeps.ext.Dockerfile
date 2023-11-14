@@ -183,3 +183,8 @@ ENV CUDA_ROOT="$CUDA_INSTALL_PREFIX"
 ENV CUDA_PATH="$CUDA_INSTALL_PREFIX"
 ENV PATH="${CUDA_INSTALL_PREFIX}/lib64/:${CUDA_INSTALL_PREFIX}/bin:${PATH}"
 
+# Active MPI support for the cuTensorNet library
+
+RUN cd "$CUQUANTUM_INSTALL_PREFIX/distributed_interfaces/" \
+    && bash activate_mpi.sh
+ENV CUTENSORNET_COMM_LIB="$CUQUANTUM_INSTALL_PREFIX/distributed_interfaces/libcutensornet_distributed_interface_mpi.so"
