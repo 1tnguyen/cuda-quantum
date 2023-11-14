@@ -164,7 +164,14 @@ To execute a program on the :code:`tensornet` target using a *single GPU*, use t
 
     If a target is set in the application code, this target will override the :code:`--target` command line flag given during program invocation.
 
-If you have *multiple GPUs* available on your system, you can use MPI to automatically distribute parallelization across the visible GPUs. Use the following commands to do so (adjust the value of the :code:`-np` flag as needed to reflect available GPU resources on your system):
+If you have *multiple GPUs* available on your system, you can use MPI to automatically distribute parallelization across the visible GPUs. 
+
+.. note::
+
+  If you installed the CUDA Quantum Python wheels, distribution across multiple GPUs is currently not supported for this backend.
+  We will add support for it in future releases. For more information, see this `GitHub issue <https://github.com/NVIDIA/cuda-quantum/issues/920>`__.
+
+Use the following commands to enable distribution across multiple GPUs (adjust the value of the :code:`-np` flag as needed to reflect available GPU resources on your system):
 
 .. tab:: C++
 
@@ -179,11 +186,6 @@ If you have *multiple GPUs* available on your system, you can use MPI to automat
 
         mpiexec -np 2 python3 program.py [...] --target tensornet
 
-    .. note::
-
-      If you installed CUDA Quantum via :code:`pip`, you will need to install the necessary MPI dependencies separately;
-      please follow the instructions for installing dependencies in the `Project Description <https://pypi.org/project/cuda-quantum/#description>`__.
-
     In addition to using MPI in the simulator, you can use it in your application code by installing `mpi4py <https://mpi4py.readthedocs.io/>`__, and 
     invoking the program with the command
 
@@ -194,10 +196,9 @@ If you have *multiple GPUs* available on your system, you can use MPI to automat
 .. note::
 
   If the `CUTENSORNET_COMM_LIB` environment variable is not set, MPI parallelization on the :code:`tensornet` backend may fail.
-  To enable distributed parallelization across multiple GPUs, `cuTensorNet`'s distributed interface needs to be 
-  `activated <https://docs.nvidia.com/cuda/cuquantum/latest/cutensornet/getting_started.html#install-cutensornet-from-nvidia-devzone>`__.
-  If you are using a CUDA Quantum container, this is already pre-configured. If you installed the CUDA Quantum Python wheels, 
-  please follow the instructions in the `project description <https://pypi.org/project/cuda-quantum/#description>`__ to configure the :code:`cuTensorNet` library.
+  If you are using a CUDA Quantum container, this variable is pre-configured and no additional setup is needed. If you are customizing your installation or have built CUDA Quantum from source, please follow the instructions for `activating the distributed interface <https://docs.nvidia.com/cuda/cuquantum/latest/cutensornet/getting_started.html#install-cutensornet-from-nvidia-devzone>`__ for the `cuTensorNet` library. This requires 
+  :ref:`installing CUDA development dependencies <additional-cuda-tools>`, and setting the `CUTENSORNET_COMM_LIB` to the
+  newly built `libcutensornet_distributed_interface_mpi.so` library.
 
 Specific aspects of the simulation can be configured by setting the following of environment variables:
 
