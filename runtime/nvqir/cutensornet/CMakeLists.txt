@@ -63,7 +63,7 @@ if (${CUTENSORNET_VERSION} VERSION_GREATER_EQUAL "2.3")
   target_link_libraries(tensornet-mpi-util PRIVATE cudaq-common fmt::fmt-header-only)
   # Note: only tensornet backend supports MPI at cutensornet level (distributed tensor computation)
   target_link_libraries(nvqir-tensornet PRIVATE tensornet-mpi-util)
-  
+  target_link_libraries(nvqir-tensornet-mps PRIVATE cudaq-em-default)
   # Check if the cutensornet plugin lib for expectation value is provided
   if(NOT CUDAQ_CUTENSORNET_PLUGIN_LIB AND EXISTS "$ENV{CUDAQ_CUTENSORNET_PLUGIN_LIB}")
     set(CUDAQ_CUTENSORNET_PLUGIN_LIB "$ENV{CUDAQ_CUTENSORNET_PLUGIN_LIB}")

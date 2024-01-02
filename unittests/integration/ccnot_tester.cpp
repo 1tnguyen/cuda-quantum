@@ -54,8 +54,6 @@ struct nested_ctrl {
   }
 };
 
-#ifndef CUDAQ_BACKEND_TENSORNET_MPS
-// MPS doesn't support gates on more than 2 qubits
 CUDAQ_TEST(CCNOTTester, checkSimple) {
   auto ccnot = []() {
     cudaq::qvector q(3);
@@ -80,6 +78,22 @@ CUDAQ_TEST(CCNOTTester, checkSimple) {
   auto counts3 = cudaq::sample(nested_ctrl{});
   EXPECT_EQ(1, counts3.size());
   EXPECT_TRUE(counts3.begin()->first == "101");
+
+  auto ccnot1 = []() {
+    cudaq::qvector q(5);
+
+    // Apply X to the following qubits
+    auto controlQubits = q.front(q.size() - 1);
+    x(controlQubits);
+
+    // Apply control X with q0 q1 as controls
+    x<cudaq::ctrl>(controlQubits, q.back());
+
+    mz(q);
+  };
+  auto counts4 = cudaq::sample(ccnot1);
+  EXPECT_EQ(1, counts4.size());
+  EXPECT_TRUE(counts4.begin()->first == "11111");
 }
 
 CUDAQ_TEST(FredkinTester, checkTruth) {
@@ -96,4 +110,3 @@ CUDAQ_TEST(FredkinTester, checkTruth) {
   EXPECT_EQ(counts.size(), 1);
   EXPECT_EQ(counts.begin()->first, "110");
 }
-#endif
