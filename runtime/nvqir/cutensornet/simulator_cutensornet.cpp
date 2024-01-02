@@ -94,6 +94,7 @@ void SimulatorTensorNetBase::applyGate(const GateApplicationTask &task) {
   for (const auto &qId : targets)
     qubits.emplace_back(qId);
   m_state->applyGate(qubits, m_gateDeviceMemCache[gateKey]);
+  m_appliedGates.emplace_back(std::make_tuple(qubits, gateKey, true));
 }
 
 /// @brief Reset the state of a given qubit to zero
@@ -135,6 +136,8 @@ void SimulatorTensorNetBase::resetQubit(const std::size_t qubitIdx) {
   }
 
   m_state->applyQubitProjector(m_gateDeviceMemCache[projKey], qubitIdx);
+  m_appliedGates.emplace_back(std::make_tuple(
+      std::vector<int32_t>{static_cast<int32_t>(qubitIdx)}, projKey, false));
 }
 
 /// @brief Perform a measurement on a given qubit
@@ -168,6 +171,8 @@ bool SimulatorTensorNetBase::measureQubit(const std::size_t qubitIdx) {
     m_gateDeviceMemCache[projKey] = d_gateProj;
   }
   m_state->applyQubitProjector(m_gateDeviceMemCache[projKey], qubitIdx);
+  m_appliedGates.emplace_back(std::make_tuple(
+      std::vector<int32_t>{static_cast<int32_t>(qubitIdx)}, projKey, false));
   return resultBool;
 }
 
@@ -266,16 +271,29 @@ void SimulatorTensorNetBase::addQubitsToState(std::size_t count) {
   LOG_API_TIME();
   if (!m_state)
     m_state = std::make_unique<TensorNetState>(count, m_cutnHandle);
-  else if (gateQueue.empty())
+  else {
     m_state = std::make_unique<TensorNetState>(m_state->getNumQubits() + count,
                                                m_cutnHandle);
-  else
-    throw std::runtime_error("Expand qubit register is not supported!");
+    if (!m_gateDeviceMemCache.empty()) {
+      for (const auto &[qubitIds, tensorName, unitary] : m_appliedGates) {
+        auto gateTensorIter = m_gateDeviceMemCache.find(tensorName);
+        assert(gateTensorIter != m_gateDeviceMemCache.end());
+        if (unitary)
+          m_state->applyGate(qubitIds, gateTensorIter->second);
+        else
+          m_state->applyQubitProjector(gateTensorIter->second, qubitIds[0]);
+      }
+    }
+  }
 }
+
 void SimulatorTensorNetBase::addQubitToState() { addQubitsToState(1); }
 
 /// @brief Destroy the entire qubit register
-void SimulatorTensorNetBase::deallocateStateImpl() { m_state.reset(); }
+void SimulatorTensorNetBase::deallocateStateImpl() {
+  m_state.reset();
+  m_appliedGates.clear();
+}
 
 /// @brief Reset all qubits to zero
 void SimulatorTensorNetBase::setToZeroState() {
@@ -288,6 +306,7 @@ void SimulatorTensorNetBase::setToZeroState() {
 
 SimulatorTensorNetBase::~SimulatorTensorNetBase() {
   m_state.reset();
+  m_appliedGates.clear();
   for (const auto &[key, dMem] : m_gateDeviceMemCache)
     HANDLE_CUDA_ERROR(cudaFree(dMem));
 

@@ -80,6 +80,7 @@ protected:
   cutensornetHandle_t m_cutnHandle;
   std::unique_ptr<TensorNetState> m_state;
   std::unordered_map<std::string, void *> m_gateDeviceMemCache;
+  std::vector<std::tuple<std::vector<int32_t>, std::string, bool>> m_appliedGates;
 };
 
 } // end namespace nvqir
