@@ -153,6 +153,11 @@ CUDAQ_TEST(NVQIRTester, checkQuantumIntrinsics) {
 }
 
 CUDAQ_TEST(NVQIRTester, checkReset) {
+#ifdef CUDAQ_BACKEND_TENSORNET
+  constexpr int numIters = 10;
+#else
+  constexpr int numIters = 100;
+#endif
   __quantum__rt__initialize(0, nullptr);
   auto qubits = __quantum__rt__qubit_allocate_array(2);
   Qubit *q0 = *reinterpret_cast<Qubit **>(
@@ -161,7 +166,7 @@ CUDAQ_TEST(NVQIRTester, checkReset) {
       __quantum__rt__array_get_element_ptr_1d(qubits, 1));
 
   // Make sure that the state vector doesn't grow with each additional reset
-  for (int i = 0; i < 100; i++) {
+  for (int i = 0; i < numIters; i++) {
     __quantum__qis__reset(q0);
     __quantum__qis__reset(q1);
     __quantum__qis__x(q1);

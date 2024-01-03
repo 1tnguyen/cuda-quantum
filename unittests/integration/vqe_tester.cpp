@@ -205,6 +205,9 @@ CUDAQ_TEST_F(VQETester, checkArgMapper) {
 
   cudaq::gradients::central_difference grad(ansatz, argMapper);
   cudaq::optimizers::lbfgs optimizer;
+  optimizer.initial_parameters = {0.359, 0.257};
+  optimizer.max_eval = 4;
+  optimizer.max_line_search_trials = 8;
   // Without the ArgMapper, this will not compile
   auto [opt_val_0, optpp] =
       cudaq::vqe(ansatz, grad, h3, optimizer, 2, argMapper);
@@ -239,7 +242,9 @@ CUDAQ_TEST_F(VQETester, checkThrowInvalidRuntimeArgs) {
   };
   cudaq::gradients::central_difference grad(ansatz, argMapper);
   cudaq::optimizers::lbfgs optimizer;
-
+  optimizer.initial_parameters = {0.359, 0.257};
+  optimizer.max_eval = 4;
+  optimizer.max_line_search_trials = 8;
   // Correct usage...
   auto [opt_val_0, xx] = cudaq::vqe(ansatz, grad, h3, optimizer, 2, argMapper);
   printf("<H3> = %lf\n", opt_val_0);

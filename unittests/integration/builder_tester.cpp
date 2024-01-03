@@ -568,7 +568,7 @@ CUDAQ_TEST(BuilderTester, checkSwap) {
 }
 
 // Conditional execution on the tensornet backend is slow for a large number of
-// shots.
+// shots and it doesn't support random seed (to make this test deterministic).
 #ifndef CUDAQ_BACKEND_TENSORNET
 CUDAQ_TEST(BuilderTester, checkConditional) {
   {
@@ -804,17 +804,22 @@ CUDAQ_TEST(BuilderTester, checkKernelAdjoint) {
   EXPECT_EQ(counts.begin()->first, "1");
 }
 
-// Conditional execution (including reset) on the tensornet backend is slow for
-// a large number of shots.
-#ifndef CUDAQ_BACKEND_TENSORNET
 CUDAQ_TEST(BuilderTester, checkReset) {
+  // Conditional execution (including reset) on the tensornet backend is slow
+  // for a large number of shots.
+#ifdef CUDAQ_BACKEND_TENSORNET
+  // These tests are deterministic, hence only need a few shots to validate.
+  constexpr std::size_t numShots = 10;
+#else
+  constexpr std::size_t numShots = 1000;
+#endif
   {
     auto entryPoint = cudaq::make_kernel();
     auto q = entryPoint.qalloc();
     entryPoint.x(q);
     entryPoint.reset(q);
     entryPoint.mz(q);
-    auto counts = cudaq::sample(entryPoint);
+    auto counts = cudaq::sample(numShots, entryPoint);
     EXPECT_EQ(counts.size(), 1);
     EXPECT_EQ(counts.begin()->first, "0");
   }
@@ -827,7 +832,7 @@ CUDAQ_TEST(BuilderTester, checkReset) {
     entryPoint.mz(q);
     printf("%s\n", entryPoint.to_quake().c_str());
 
-    auto counts = cudaq::sample(entryPoint);
+    auto counts = cudaq::sample(numShots, entryPoint);
     counts.dump();
     EXPECT_EQ(counts.size(), 1);
     EXPECT_EQ(counts.begin()->first, "00");
@@ -838,12 +843,11 @@ CUDAQ_TEST(BuilderTester, checkReset) {
     entryPoint.x(q);
     entryPoint.reset(q[0]);
     entryPoint.mz(q);
-    auto counts = cudaq::sample(entryPoint);
+    auto counts = cudaq::sample(numShots, entryPoint);
     EXPECT_EQ(counts.size(), 1);
     EXPECT_EQ(counts.begin()->first, "01");
   }
 }
-#endif
 
 CUDAQ_TEST(BuilderTester, checkForLoop) {
 
@@ -928,10 +932,16 @@ CUDAQ_TEST(BuilderTester, checkForLoop) {
   }
 }
 
-// Conditional execution (including reset) on the tensornet backend is slow for
-// a large number of shots.
-#ifndef CUDAQ_BACKEND_TENSORNET
 CUDAQ_TEST(BuilderTester, checkMidCircuitMeasure) {
+  // Conditional execution (including reset) on the tensornet backend is slow
+  // for a large number of shots.
+#ifdef CUDAQ_BACKEND_TENSORNET
+  // These tests are deterministic, hence only need a few shots to validate.
+  constexpr std::size_t numShots = 10;
+#else
+  constexpr std::size_t numShots = 1000;
+#endif
+
   {
     auto entryPoint = cudaq::make_kernel();
     auto qubit = entryPoint.qalloc();
@@ -939,7 +949,7 @@ CUDAQ_TEST(BuilderTester, checkMidCircuitMeasure) {
     entryPoint.mz(qubit, "c0");
     printf("%s\n", entryPoint.to_quake().c_str());
 
-    auto counts = cudaq::sample(entryPoint);
+    auto counts = cudaq::sample(numShots, entryPoint);
     counts.dump();
     EXPECT_EQ(counts.register_names().size(), 2); // includes synthetic global
     EXPECT_EQ(counts.register_names()[0], "__global__");
@@ -956,7 +966,7 @@ CUDAQ_TEST(BuilderTester, checkMidCircuitMeasure) {
 
     printf("%s\n", entryPoint.to_quake().c_str());
 
-    auto counts = cudaq::sample(entryPoint);
+    auto counts = cudaq::sample(numShots, entryPoint);
     counts.dump();
     EXPECT_EQ(counts.register_names().size(), 3); // includes synthetic global
     auto regNames = counts.register_names();
@@ -965,8 +975,8 @@ CUDAQ_TEST(BuilderTester, checkMidCircuitMeasure) {
     EXPECT_TRUE(std::find(regNames.begin(), regNames.end(), "c1") !=
                 regNames.end());
 
-    EXPECT_EQ(counts.count("0", "c1"), 1000);
-    EXPECT_EQ(counts.count("1", "c0"), 1000);
+    EXPECT_EQ(counts.count("0", "c1"), numShots);
+    EXPECT_EQ(counts.count("1", "c0"), numShots);
   }
 
   {
@@ -978,16 +988,15 @@ CUDAQ_TEST(BuilderTester, checkMidCircuitMeasure) {
     entryPoint.mz(q[1], "hello2");
 
     printf("%s\n", entryPoint.to_quake().c_str());
-    auto counts = cudaq::sample(entryPoint);
+    auto counts = cudaq::sample(numShots, entryPoint);
     counts.dump();
 
-    EXPECT_EQ(counts.count("1", "hello"), 1000);
+    EXPECT_EQ(counts.count("1", "hello"), numShots);
     EXPECT_EQ(counts.count("0", "hello"), 0);
     EXPECT_EQ(counts.count("1", "hello2"), 0);
-    EXPECT_EQ(counts.count("0", "hello2"), 1000);
+    EXPECT_EQ(counts.count("0", "hello2"), numShots);
   }
 }
-#endif
 
 CUDAQ_TEST(BuilderTester, checkNestedKernelCall) {
   auto [kernel1, qubit1] = cudaq::make_kernel<cudaq::qubit>();
