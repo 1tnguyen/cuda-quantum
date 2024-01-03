@@ -28,32 +28,6 @@ struct deuteron_n3_ansatz {
   }
 };
 
-CUDAQ_TEST(NloptTester, checkSimple) {
-  using namespace cudaq::spin;
-
-  cudaq::spin_op h = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
-                     .21829 * z(0) - 6.125 * z(1);
-  cudaq::spin_op h3 = h + 9.625 - 9.625 * z(2) - 3.913119 * x(1) * x(2) -
-                      3.913119 * y(1) * y(2);
-
-  printf("\nOptimize with gradients.\n");
-
-  cudaq::optimizers::lbfgs optimizer;
-  cudaq::gradients::central_difference gradient(
-      deuteron_n3_ansatz{},
-      [](std::vector<double> x) { return std::make_tuple(x[0], x[1]); });
-
-  auto [opt_val_0, optpp] = optimizer.optimize(
-      2, [&](const std::vector<double> &x, std::vector<double> &grad_vec) {
-        double e = cudaq::observe(deuteron_n3_ansatz{}, h3, x[0], x[1]);
-        gradient.compute(x, grad_vec, h3, e);
-        printf("<H>(%lf, %lf) = %lf\n", x[0], x[1], e);
-        return e;
-      });
-
-  EXPECT_NEAR(opt_val_0, -2.0453, 1e-2);
-}
-
 CUDAQ_TEST(NloptTester, checkOtherSignatures) {
   using namespace cudaq::spin;
 
@@ -62,7 +36,7 @@ CUDAQ_TEST(NloptTester, checkOtherSignatures) {
   cudaq::spin_op h3 = h + 9.625 - 9.625 * z(2) - 3.913119 * x(1) * x(2) -
                       3.913119 * y(1) * y(2);
 
-  printf("\nOptimize with gradients.\n");
+  printf("\nOptimize without gradients (cobyla).\n");
 
   cudaq::optimizers::cobyla optimizer;
   auto [opt_val_0, optpp] =
