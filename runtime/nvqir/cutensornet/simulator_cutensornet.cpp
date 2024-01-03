@@ -261,9 +261,16 @@ cudaq::State SimulatorTensorNetBase::getStateData() {
   // Handle empty state (e.g., no qubit allocation)
   if (!m_state)
     return cudaq::State{{0}, {}};
-
-  const uint64_t svDim = 1ull << m_state->getNumQubits();
-  return cudaq::State{{svDim}, m_state->getStateVector()};
+  if (nQubitsAllocated < m_state->getNumQubits()) {
+    std::vector<int32_t> projectedModes;
+    for (std::size_t q = nQubitsAllocated; q < m_state->getNumQubits(); ++q)
+      projectedModes.emplace_back(q);
+    const uint64_t svDim = 1ull << nQubitsAllocated;
+    return cudaq::State{{svDim}, m_state->getStateVector(projectedModes)};
+  } else {
+    const uint64_t svDim = 1ull << m_state->getNumQubits();
+    return cudaq::State{{svDim}, m_state->getStateVector()};
+  }
 }
 
 nvqir::CircuitSimulator *SimulatorTensorNetBase::clone() { return nullptr; }

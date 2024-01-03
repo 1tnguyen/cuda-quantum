@@ -5,8 +5,6 @@
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
-
-#include "cudaq/qis/qubit_qis.h"
 #include "simulator_cutensornet.h"
 #include <charconv>
 namespace nvqir {
@@ -124,6 +122,7 @@ public:
     h({}, target);
   }
 
+  /// Collects the list of control qubits into auxiliarly qubits.
   void collectControls(const std::vector<std::size_t> &ctls,
                        const std::vector<std::size_t> &aux, int adjustment) {
     for (int i = 0; i <= static_cast<int>(ctls.size()) - 2; i += 2)
@@ -133,6 +132,8 @@ public:
       phaseCcx(aux[i * 2], aux[(i * 2) + 1], aux[i + ctls.size() / 2]);
   }
 
+  /// Adjustment for uneven number of original control qubits: the second to
+  /// last auxiliary will be collected into the last auxiliary.
   void adjustForSingleControl(const std::vector<std::size_t> &ctls,
                               const std::vector<std::size_t> &aux) {
     if (ctls.size() % 2 != 0)
@@ -160,7 +161,6 @@ public:
   void mapPauli(std::size_t qubit, cudaq::pauli from, cudaq::pauli to) {
     if (from == to)
       return;
-
     if ((from == cudaq::pauli::Z && to == cudaq::pauli::X) ||
         (from == cudaq::pauli::X && to == cudaq::pauli::Z)) {
       h({}, qubit);
@@ -182,27 +182,28 @@ public:
   }
 
   void ccnot(std::size_t control1, std::size_t control2, std::size_t target) {
-    cudaq::compute_action(
-        [&]() { mapPauli(target, cudaq::pauli::Z, cudaq::pauli::X); },
-        [&]() { ccz(control1, control2, target); });
+    mapPauli(target, cudaq::pauli::Z, cudaq::pauli::X);
+    ccz(control1, control2, target);
+    mapPauli(target, cudaq::pauli::X, cudaq::pauli::Z);
   }
 
   void ccy(std::size_t control1, std::size_t control2, std::size_t target) {
-    cudaq::compute_action(
-        [&]() { mapPauli(target, cudaq::pauli::Z, cudaq::pauli::Y); },
-        [&]() { ccz(control1, control2, target); });
+    mapPauli(target, cudaq::pauli::Z, cudaq::pauli::Y);
+    ccz(control1, control2, target);
+    mapPauli(target, cudaq::pauli::Y, cudaq::pauli::Z);
   }
 
   void cch(std::size_t control1, std::size_t control2, std::size_t target) {
-    cudaq::compute_action(
-        [&]() {
-          s({}, target);
-          h({}, target);
-          t({}, target);
-        },
-        [&]() { ccnot(control1, control2, target); });
+    s({}, target);
+    h({}, target);
+    t({}, target);
+    ccnot(control1, control2, target);
+    t({}, target);
+    h({}, target);
+    s({}, target);
   }
 
+  /// @brief  Override general X gate with multi-control decomposition.
   virtual void x(const std::vector<std::size_t> &controls,
                  const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
@@ -210,22 +211,21 @@ public:
     if (controls.size() == 2) {
       return ccnot(controls[0], controls[1], qubitIdx);
     } else {
-      cudaq::qvector auxReg(controls.size() - 2);
-      std::vector<std::size_t> aux;
-      for (auto &q : auxReg)
-        aux.emplace_back(q.id());
-      cudaq::compute_action(
-          [&]() { collectControls(controls, aux, 1 - (controls.size() % 2)); },
-          [&]() {
-            if (controls.size() % 2 != 0)
-              ccnot(controls.back(), aux[controls.size() - 3], qubitIdx);
-            else
-              ccnot(aux[controls.size() - 3], aux[controls.size() - 4],
-                    qubitIdx);
-          });
+      auto aux = allocateQubits(controls.size() - 2);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+      if (controls.size() % 2 != 0)
+        ccnot(controls.back(), aux[controls.size() - 3], qubitIdx);
+      else
+        ccnot(aux[controls.size() - 3], aux[controls.size() - 4], qubitIdx);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+      for (const auto &qId : aux) {
+        tracker.returnIndex(qId);
+        --nQubitsAllocated;
+      }
     }
   }
 
+  /// @brief  Override general Y gate with multi-control decomposition.
   virtual void y(const std::vector<std::size_t> &controls,
                  const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
@@ -233,21 +233,22 @@ public:
     if (controls.size() == 2) {
       return ccy(controls[0], controls[1], qubitIdx);
     } else {
-      cudaq::qvector auxReg(controls.size() - 2);
-      std::vector<std::size_t> aux;
-      for (auto &q : auxReg)
-        aux.emplace_back(q.id());
-      cudaq::compute_action(
-          [&]() { collectControls(controls, aux, 1 - (controls.size() % 2)); },
-          [&]() {
-            if (controls.size() % 2 != 0)
-              ccy(controls.back(), aux[controls.size() - 3], qubitIdx);
-            else
-              ccy(aux[controls.size() - 3], aux[controls.size() - 4], qubitIdx);
-          });
+      auto aux = allocateQubits(controls.size() - 2);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+
+      if (controls.size() % 2 != 0)
+        ccy(controls.back(), aux[controls.size() - 3], qubitIdx);
+      else
+        ccy(aux[controls.size() - 3], aux[controls.size() - 4], qubitIdx);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+      for (const auto &qId : aux) {
+        tracker.returnIndex(qId);
+        --nQubitsAllocated;
+      }
     }
   }
 
+  /// @brief  Override general Z gate with multi-control decomposition.
   virtual void z(const std::vector<std::size_t> &controls,
                  const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
@@ -255,21 +256,21 @@ public:
     if (controls.size() == 2) {
       return ccz(controls[0], controls[1], qubitIdx);
     } else {
-      cudaq::qvector auxReg(controls.size() - 2);
-      std::vector<std::size_t> aux;
-      for (auto &q : auxReg)
-        aux.emplace_back(q.id());
-      cudaq::compute_action(
-          [&]() { collectControls(controls, aux, 1 - (controls.size() % 2)); },
-          [&]() {
-            if (controls.size() % 2 != 0)
-              ccz(controls.back(), aux[controls.size() - 3], qubitIdx);
-            else
-              ccz(aux[controls.size() - 3], aux[controls.size() - 4], qubitIdx);
-          });
+      auto aux = allocateQubits(controls.size() - 2);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+      if (controls.size() % 2 != 0)
+        ccz(controls.back(), aux[controls.size() - 3], qubitIdx);
+      else
+        ccz(aux[controls.size() - 3], aux[controls.size() - 4], qubitIdx);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+      for (const auto &qId : aux) {
+        tracker.returnIndex(qId);
+        --nQubitsAllocated;
+      }
     }
   }
 
+  /// @brief  Override general H gate with multi-control decomposition.
   virtual void h(const std::vector<std::size_t> &controls,
                  const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
@@ -277,139 +278,146 @@ public:
     if (controls.size() == 2) {
       return cch(controls[0], controls[1], qubitIdx);
     } else {
-      cudaq::qvector auxReg(controls.size() - 2);
-      std::vector<std::size_t> aux;
-      for (auto &q : auxReg)
-        aux.emplace_back(q.id());
-      cudaq::compute_action(
-          [&]() { collectControls(controls, aux, 1 - (controls.size() % 2)); },
-          [&]() {
-            if (controls.size() % 2 != 0)
-              cch(controls.back(), aux[controls.size() - 3], qubitIdx);
-            else
-              cch(aux[controls.size() - 3], aux[controls.size() - 4], qubitIdx);
-          });
+      auto aux = allocateQubits(controls.size() - 2);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+      if (controls.size() % 2 != 0)
+        cch(controls.back(), aux[controls.size() - 3], qubitIdx);
+      else
+        cch(aux[controls.size() - 3], aux[controls.size() - 4], qubitIdx);
+      collectControls(controls, aux, 1 - (controls.size() % 2));
+      for (const auto &qId : aux) {
+        tracker.returnIndex(qId);
+        --nQubitsAllocated;
+      }
     }
   }
 
-  virtual void rx(double angle, const std::vector<std::size_t> &controls,
+  /// @brief  Override general RX gate with multi-control decomposition.
+  virtual void rx(const double angle, const std::vector<std::size_t> &controls,
                   const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
       return SimulatorTensorNetBase::rx(angle, controls, qubitIdx);
     else {
-      cudaq::compute_action(
-          [&]() { mapPauli(qubitIdx, cudaq::pauli::Z, cudaq::pauli::X); },
-          [&]() {
-            return SimulatorTensorNetBase::rz(angle, controls, qubitIdx);
-          });
+      mapPauli(qubitIdx, cudaq::pauli::Z, cudaq::pauli::X);
+      rz(angle, controls, qubitIdx);
+      mapPauli(qubitIdx, cudaq::pauli::X, cudaq::pauli::Z);
     }
   }
-  virtual void ry(double angle, const std::vector<std::size_t> &controls,
+
+  /// @brief  Override general RY gate with multi-control decomposition.
+  virtual void ry(const double angle, const std::vector<std::size_t> &controls,
                   const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
       return SimulatorTensorNetBase::ry(angle, controls, qubitIdx);
     else {
-      cudaq::compute_action(
-          [&]() { mapPauli(qubitIdx, cudaq::pauli::Z, cudaq::pauli::Y); },
-          [&]() {
-            return SimulatorTensorNetBase::rz(angle, controls, qubitIdx);
-          });
+      mapPauli(qubitIdx, cudaq::pauli::Z, cudaq::pauli::Y);
+      rz(angle, controls, qubitIdx);
+      mapPauli(qubitIdx, cudaq::pauli::Y, cudaq::pauli::Z);
     }
   }
-  virtual void rz(double angle, const std::vector<std::size_t> &controls,
+
+  /// @brief  Override general RZ gate with multi-control decomposition.
+  virtual void rz(const double angle, const std::vector<std::size_t> &controls,
                   const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
       return SimulatorTensorNetBase::rz(angle, controls, qubitIdx);
     else {
-      cudaq::qvector auxReg(controls.size() - 1);
-      std::vector<std::size_t> aux;
-      for (auto &q : auxReg)
-        aux.emplace_back(q.id());
-      cudaq::compute_action(
-          [&]() {
-            collectControls(controls, aux, 0);
-            adjustForSingleControl(controls, aux);
-          },
-          [&]() {
-            return SimulatorTensorNetBase::rz(angle, {aux[controls.size() - 2]},
-                                              qubitIdx);
-          });
+      auto aux = allocateQubits(controls.size() - 1);
+      collectControls(controls, aux, 0);
+      adjustForSingleControl(controls, aux);
+      SimulatorTensorNetBase::rz(angle, {aux[controls.size() - 2]}, qubitIdx);
+      adjustForSingleControl(controls, aux);
+      collectControls(controls, aux, 0);
+      for (const auto &qId : aux) {
+        tracker.returnIndex(qId);
+        --nQubitsAllocated;
+      }
     }
   }
-  virtual void r1(double angle, const std::vector<std::size_t> &controls,
+
+  /// @brief  Override general R1 gate with multi-control decomposition.
+  virtual void r1(const double angle, const std::vector<std::size_t> &controls,
                   const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
       return SimulatorTensorNetBase::r1(angle, controls, qubitIdx);
     else {
-      cudaq::qvector auxReg(controls.size() - 1);
-      std::vector<std::size_t> aux;
-      for (auto &q : auxReg)
-        aux.emplace_back(q.id());
-      cudaq::compute_action(
-          [&]() {
-            collectControls(controls, aux, 0);
-            adjustForSingleControl(controls, aux);
-          },
-          [&]() {
-            return SimulatorTensorNetBase::r1(angle, {aux[controls.size() - 2]},
-                                              qubitIdx);
-          });
+      auto aux = allocateQubits(controls.size() - 1);
+      collectControls(controls, aux, 0);
+      adjustForSingleControl(controls, aux);
+      SimulatorTensorNetBase::r1(angle, {aux[controls.size() - 2]}, qubitIdx);
+      adjustForSingleControl(controls, aux);
+      collectControls(controls, aux, 0);
+      for (const auto &qId : aux) {
+        tracker.returnIndex(qId);
+        --nQubitsAllocated;
+      }
     }
   }
 
-  virtual void u1(double angle, const std::vector<std::size_t> &controls,
+  /// @brief  Override general U1 gate
+  /// Delegate to R1 with multi-control decomposition support.
+  virtual void u1(const double angle, const std::vector<std::size_t> &controls,
                   const std::size_t qubitIdx) override {
     return r1(angle, controls, qubitIdx);
   }
-  virtual void u3(double theta, double phi, double lambda,
+
+  /// @brief  Override general U3 gate with multi-control decomposition.
+  virtual void u3(const double theta, const double phi, const double lambda,
                   const std::vector<std::size_t> &controls,
                   const std::size_t qubitIdx) override {
     if (controls.size() <= 1)
       return SimulatorTensorNetBase::u3(theta, phi, lambda, controls, qubitIdx);
     else {
-      cudaq::qvector auxReg(controls.size() - 1);
-      std::vector<std::size_t> aux;
-      for (auto &q : auxReg)
-        aux.emplace_back(q.id());
-      cudaq::compute_action(
-          [&]() {
-            collectControls(controls, aux, 0);
-            adjustForSingleControl(controls, aux);
-          },
-          [&]() {
-            return SimulatorTensorNetBase::u3(
-                theta, phi, lambda, {aux[controls.size() - 2]}, qubitIdx);
-          });
+      auto aux = allocateQubits(controls.size() - 1);
+      collectControls(controls, aux, 0);
+      adjustForSingleControl(controls, aux);
+      SimulatorTensorNetBase::u3(theta, phi, lambda, {aux[controls.size() - 2]},
+                                 qubitIdx);
+      adjustForSingleControl(controls, aux);
+      collectControls(controls, aux, 0);
+      for (const auto &qId : aux) {
+        tracker.returnIndex(qId);
+        --nQubitsAllocated;
+      }
     }
   }
+
+  /// @brief  Override general T gate
+  /// Delegate to R1 with multi-control decomposition support.
   virtual void t(const std::vector<std::size_t> &controls,
                  const std::size_t qubitIdx) override {
     return r1(M_PI_4, controls, qubitIdx);
   }
+  /// @brief  Override general Tdg gate
+  /// Delegate to R1 with multi-control decomposition support.
   virtual void tdg(const std::vector<std::size_t> &controls,
                    const std::size_t qubitIdx) override {
     return r1(-M_PI_4, controls, qubitIdx);
   }
+  /// @brief  Override general S gate
+  /// Delegate to R1 with multi-control decomposition support.
   virtual void s(const std::vector<std::size_t> &controls,
                  const std::size_t qubitIdx) override {
     return r1(M_PI_2, controls, qubitIdx);
   }
+  /// @brief  Override general Sdg gate
+  /// Delegate to R1 with multi-control decomposition support.
   virtual void sdg(const std::vector<std::size_t> &controls,
                    const std::size_t qubitIdx) override {
     return r1(-M_PI_2, controls, qubitIdx);
   }
+  /// @brief  Override general swap gate with multi-control decomposition.
   virtual void swap(const std::vector<std::size_t> &controls,
                     const std::size_t qubitIdx1,
                     const std::size_t qubitIdx2) override {
     if (controls.empty()) {
       return SimulatorTensorNetBase::swap(controls, qubitIdx1, qubitIdx2);
     } else {
-      cudaq::compute_action([&]() { x({qubitIdx1}, qubitIdx2); },
-                            [&]() {
-                              auto ctls = controls;
-                              ctls.emplace_back(qubitIdx2);
-                              x(ctls, qubitIdx1);
-                            });
+      x({qubitIdx1}, qubitIdx2);
+      auto ctls = controls;
+      ctls.emplace_back(qubitIdx2);
+      x(ctls, qubitIdx1);
+      x({qubitIdx1}, qubitIdx2);
     }
   }
 };

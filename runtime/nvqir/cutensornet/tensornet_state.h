@@ -45,7 +45,8 @@ public:
 
   /// @brief Contract the tensor network representation to retrieve the state
   /// vector.
-  std::vector<std::complex<double>> getStateVector();
+  std::vector<std::complex<double>>
+  getStateVector(const std::vector<int32_t> &projectedQubits = {});
 
   /// @brief Compute the reduce density matrix on a set of qubits
   ///
