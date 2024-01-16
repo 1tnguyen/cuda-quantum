@@ -38,6 +38,10 @@
 #include "common/RestClient.h"
 #include "cudaq.h"
 
+
+#include <iostream>
+
+
 namespace {
 using namespace mlir;
 class RemoteRestRuntimeClient : public cudaq::RemoteRuntimeClient {
@@ -151,11 +155,10 @@ public:
     }
   }
 
-  virtual bool
-  sendRequest(MLIRContext &mlirContext, cudaq::ExecutionContext &io_context,
-              const std::string &backendSimName, const std::string &kernelName,
-              void (*kernelFunc)(void *), void *kernelArgs,
-              std::uint64_t argsSize, std::string *optionalErrorMsg) override {
+  cudaq::RestRequest constructJobRequest(
+      MLIRContext &mlirContext, cudaq::ExecutionContext &io_context,
+      const std::string &backendSimName, const std::string &kernelName,
+      void (*kernelFunc)(void *), void *kernelArgs, std::uint64_t argsSize) {
     cudaq::RestRequest request(io_context);
     request.entryPoint = kernelName;
     if (cudaq::__internal__::isLibraryMode(kernelName)) {
@@ -165,7 +168,6 @@ public:
         request.args.resize(argsSize);
         std::memcpy(request.args.data(), kernelArgs, argsSize);
       }
-
       if (kernelFunc) {
         ::Dl_info info;
         ::dladdr(reinterpret_cast<void *>(kernelFunc), &info);
@@ -181,6 +183,20 @@ public:
 
     request.code = constructKernelPayload(mlirContext, kernelName, kernelFunc,
                                           kernelArgs, argsSize);
+    request.simulator = backendSimName;
+    request.seed = cudaq::get_random_seed();
+    return request;
+  }
+
+  virtual bool
+  sendRequest(MLIRContext &mlirContext, cudaq::ExecutionContext &io_context,
+              const std::string &backendSimName, const std::string &kernelName,
+              void (*kernelFunc)(void *), void *kernelArgs,
+              std::uint64_t argsSize, std::string *optionalErrorMsg) override {
+    cudaq::RestRequest request =
+        constructJobRequest(mlirContext, io_context, backendSimName, kernelName,
+                            kernelFunc, kernelArgs, argsSize);
+
     if (request.code.empty()) {
       if (optionalErrorMsg)
         *optionalErrorMsg =
@@ -189,8 +205,6 @@ public:
             kernelName;
       return false;
     }
-    request.simulator = backendSimName;
-    request.seed = cudaq::get_random_seed();
     // Don't let curl adding "Expect: 100-continue" header, which is not
     // suitable for large requests, e.g., bitcode in the JSON request.
     //  Ref: https://gms.tf/when-curl-sends-100-continue.html
@@ -217,6 +231,66 @@ public:
     }
   }
 };
+
+class NvcfRuntimeClient : public RemoteRestRuntimeClient {
+  std::string m_apiKey;
+  // FIXME: test functionId
+  static inline const std::string m_functionId =
+      "0165c8c2-355c-4e39-8171-c4ccdffffb09";
+  static inline const std::string m_baseUrl = "api.nvcf.nvidia.com/v2";
+  std::string nvcfUrl() const {
+    return fmt::format("https://{}/nvcf/exec/functions/{}", m_baseUrl,
+                       m_functionId);
+  }
+
+public:
+  virtual void setConfig(
+      const std::unordered_map<std::string, std::string> &configs) override {
+    const auto apiKeyIter = configs.find("api-key");
+    if (apiKeyIter != configs.end())
+      m_apiKey = apiKeyIter->second;
+    if (m_apiKey.empty())
+      throw std::runtime_error("No NVCF API key is provided.");
+  }
+  virtual bool
+  sendRequest(MLIRContext &mlirContext, cudaq::ExecutionContext &io_context,
+              const std::string &backendSimName, const std::string &kernelName,
+              void (*kernelFunc)(void *), void *kernelArgs,
+              std::uint64_t argsSize, std::string *optionalErrorMsg) override {
+    cudaq::RestRequest request =
+        constructJobRequest(mlirContext, io_context, backendSimName, kernelName,
+                            kernelFunc, kernelArgs, argsSize);
+
+    if (request.code.empty()) {
+      if (optionalErrorMsg)
+        *optionalErrorMsg =
+            std::string(
+                "Failed to construct/retrieve kernel IR for kernel named ") +
+            kernelName;
+      return false;
+    }
+    std::map<std::string, std::string> headers{
+        {"Authorization", fmt::format("Bearer {}", m_apiKey)},
+        {"Content-type", "application/json"}};
+    json requestJson;
+    requestJson["requestBody"] = request;
+    try {
+      static thread_local cudaq::RestClient restClient;
+      std::cout << "sending request to: " << nvcfUrl() << "\n";
+      auto resultJs =
+          restClient.post(nvcfUrl(), "", requestJson, headers, true);
+
+      std::cout << "Response: \n" << resultJs.dump() << "\n";
+      return true;
+    } catch (std::exception &e) {
+      if (optionalErrorMsg)
+        *optionalErrorMsg = e.what();
+      return false;
+    }
+  }
+};
 } // namespace
 
 CUDAQ_REGISTER_TYPE(cudaq::RemoteRuntimeClient, RemoteRestRuntimeClient, rest)
+CUDAQ_REGISTER_TYPE(cudaq::RemoteRuntimeClient, NvcfRuntimeClient, NVCF)
+
