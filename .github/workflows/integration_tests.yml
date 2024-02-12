@@ -293,6 +293,39 @@ jobs:
               ;;
             esac
           done
+
+          # Test C++ examples
+          for filename in `find examples/cpp/providers/ -name 'nvcf_*.cpp'`; do
+            echo "$filename"
+            nvcf_config=""
+            # Look for a --nvcf-backend flag to nvq++ in the 
+            intended_target=`sed -e '/^$/,$d' $filename | grep -oP -m 1 '^//\s*nvq++.+--nvcf-backend\s+\K\S+'`
+            if [ -n "$intended_target" ]; then
+              echo "Intended for execution on '$intended_target' backend."
+              nvcf_config="$nvcf_config --nvcf-backend $intended_target"
+            fi
+            # Look for a --nvcf-nqpus flag to nvq++ in the 
+            num_qpus=`sed -e '/^$/,$d' $filename | grep -oP -m 1 '^//\s*nvq++.+--nvcf-nqpus\s+\K\S+'`
+            if [ -n "$num_qpus" ]; then
+              echo "Intended to run on '$num_qpus' QPUs."
+              nvcf_config="$nvcf_config --nvcf-nqpus $num_qpus"
+            fi
+            nvq++ $filename --target nvcf $nvcf_config
+            test_status=$?
+            if [ $test_status -eq 0 ]; then
+              ./a.out
+              test_status=$?
+              if [ $test_status -eq 0 ]; then
+                echo ":white_check_mark: Successfully ran test: $filename" >> $GITHUB_STEP_SUMMARY
+              else
+                echo ":x: Test failed (failed to execute): $filename" >> $GITHUB_STEP_SUMMARY
+                test_err_sum=$((test_err_sum+1))
+              fi
+            else
+                echo ":x: Test failed (failed to compile): $filename" >> $GITHUB_STEP_SUMMARY
+                test_err_sum=$((test_err_sum+1))
+            fi
+          done
           set -e # Re-enable exit code error checking
           if [ ! $test_err_sum -eq 0 ]; then
             echo "::error::${test_err_sum} tests failed. See step summary for a list of failures"
