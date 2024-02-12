@@ -75,6 +75,7 @@ class RemoteRestRuntimeClient : public cudaq::RemoteRuntimeClient {
       "inline",
       "canonicalize",
       "apply-op-specialization",
+      "func.func(apply-control-negations)",
       "func.func(memtoreg{quantum=0})",
       "canonicalize",
       "expand-measurements",
