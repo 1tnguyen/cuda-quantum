@@ -275,7 +275,7 @@ jobs:
             case $filename in
               targettests/nvcf/*)
                 [ -e "$filename" ] || echo "::error::Couldn't find files ($filename)"
-                nvq++ -v $filename --target nvcf
+                nvq++ -v $filename --target nvcf --enable-mlir
                 test_status=$?
                 if [ $test_status -eq 0 ]; then
                   ./a.out
