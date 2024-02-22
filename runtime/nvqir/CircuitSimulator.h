@@ -1063,8 +1063,14 @@ public:
     // Return the result
     return measureResult;
   }
-}; // namespace nvqir
+};
 } // namespace nvqir
+
+// Opaque structure to capture ownership of the simulator instance.
+struct nvqirSimulatorHandle {
+  // user-owned simulator instance
+  std::unique_ptr<nvqir::CircuitSimulator> simulator;
+};
 
 #define CONCAT(a, b) CONCAT_INNER(a, b)
 #define CONCAT_INNER(a, b) a##b
@@ -1079,6 +1085,13 @@ public:
     thread_local static std::unique_ptr<nvqir::CircuitSimulator> simulator =   \
         std::make_unique<CLASSNAME>();                                         \
     return simulator.get();                                                    \
+  }                                                                            \
+  bool createUniqueSimulatorInstance(nvqirSimulatorHandle *handle) {           \
+    if (!handle) {                                                             \
+      return false;                                                            \
+    }                                                                          \
+    handle->simulator = std::make_unique<CLASSNAME>();                         \
+    return true;                                                               \
   }                                                                            \
   }
 

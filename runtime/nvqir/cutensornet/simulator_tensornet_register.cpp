@@ -68,4 +68,12 @@ nvqir::CircuitSimulator *getCircuitSimulator_tensornet() {
 nvqir::CircuitSimulator *getCircuitSimulator() {
   return getCircuitSimulator_tensornet();
 }
+bool createUniqueSimulatorInstance(nvqirSimulatorHandle *handle) {
+  if (!handle) {
+    printf("Invalid handle is passed.\n");
+    return false;
+  }
+  handle->simulator = std::make_unique<nvqir::SimulatorTensorNet>();
+  return true;
+}
 }

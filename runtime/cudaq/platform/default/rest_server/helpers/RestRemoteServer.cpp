@@ -49,7 +49,7 @@
 #include <filesystem>
 #include <fstream>
 #include <streambuf>
-
+#include <iostream>
 extern "C" {
 void __nvqir__setCircuitSimulator(nvqir::CircuitSimulator *);
 }
@@ -60,6 +60,57 @@ using namespace mlir;
 struct SimulatorHandle {
   std::string name;
   void *libHandle;
+  nvqirSimulatorHandle simHandle;
+  SimulatorHandle(const std::string &simulatorName)
+      : name(simulatorName), libHandle(nullptr) {
+    const std::filesystem::path cudaqLibPath{cudaq::getCUDAQLibraryPath()};
+#if defined(__APPLE__) && defined(__MACH__)
+    const auto libSuffix = "dylib";
+#else
+    const auto libSuffix = "so";
+#endif
+    const auto simLibPath =
+        cudaqLibPath.parent_path() /
+        fmt::format("libnvqir-{}.{}", simulatorName, libSuffix);
+    cudaq::info("Request simulator {} at {}", simulatorName,
+                simLibPath.c_str());
+    libHandle = dlopen(simLibPath.c_str(), RTLD_GLOBAL | RTLD_NOW);
+    if (!libHandle) {
+      char *error_msg = dlerror();
+      throw std::runtime_error(fmt::format(
+          "Failed to open simulator backend library: {}.",
+          error_msg ? std::string(error_msg) : std::string("Unknown error")));
+    }
+
+    using CreateHandleFunction = bool *(*)(nvqirSimulatorHandle *);
+    CreateHandleFunction fcn = (CreateHandleFunction)(intptr_t)dlsym(
+        libHandle, "createUniqueSimulatorInstance");
+    if (!fcn)
+      throw std::runtime_error(fmt::format(
+          "Could not load the requested plugin. \n{}\n", dlerror()));
+    simHandle.simulator = nullptr;
+    const bool createdOk = fcn(&simHandle);
+
+    if (!createdOk || !simHandle.simulator)
+      throw std::runtime_error("Failed to create simulator instance");
+    
+    std::cout << "Set sim: " << (void*) simHandle.simulator.get() << "\n";
+    __nvqir__setCircuitSimulator(simHandle.simulator.get());
+  }
+  ~SimulatorHandle() {
+    try {
+      if (simHandle.simulator) {
+        std::cout << "Destroy sim: " << (void *)simHandle.simulator.get()
+                  << "\n";
+        simHandle.simulator.reset();
+        simHandle.simulator = nullptr;
+      }
+      if (libHandle)
+        dlclose(libHandle);
+    } catch (std::exception &e) {
+      std::cerr << "EXCEPTION: " << e.what() << "\n";
+    }
+  }
 };
 
 class RemoteRestRuntimeServer : public cudaq::RemoteRuntimeServer {
@@ -73,7 +124,7 @@ class RemoteRestRuntimeServer : public cudaq::RemoteRuntimeServer {
   };
   std::unordered_map<std::size_t, CodeTransformInfo> m_codeTransform;
   // Currently-loaded NVQIR simulator.
-  SimulatorHandle m_simHandle;
+  std::unique_ptr<SimulatorHandle> m_simHandle;
   // Default backend for initialization.
   // Note: we always need to preload a default backend on the server runtime
   // since cudaq runtime relies on that.
@@ -93,8 +144,8 @@ protected:
 public:
   RemoteRestRuntimeServer()
       : cudaq::RemoteRuntimeServer(),
-        m_simHandle(DEFAULT_NVQIR_SIMULATION_BACKEND,
-                    loadNvqirSimLib(DEFAULT_NVQIR_SIMULATION_BACKEND)) {}
+        m_simHandle(std::make_unique<SimulatorHandle>(
+            DEFAULT_NVQIR_SIMULATION_BACKEND)) {}
   virtual void
   init(const std::unordered_map<std::string, std::string> &configs) override {
     const auto portIter = configs.find("port");
@@ -220,14 +271,12 @@ public:
                              void *kernelArgs, std::uint64_t argsSize,
                              std::size_t seed) override {
 
+    std::cerr << "handleRequest " << "\n";
     // If we're changing the backend, load the new simulator library from file.
-    if (m_simHandle.name != backendSimName) {
-      if (m_simHandle.libHandle)
-        dlclose(m_simHandle.libHandle);
-
-      m_simHandle =
-          SimulatorHandle(backendSimName, loadNvqirSimLib(backendSimName));
-    }
+    // This will unload and clean up the previous simulator instance.
+    try {
+    m_simHandle = std::make_unique<SimulatorHandle>(backendSimName);
+    cudaq::resetExecutionManager();
     if (seed != 0)
       cudaq::set_random_seed(seed);
     auto &platform = cudaq::get_platform();
@@ -281,32 +330,39 @@ public:
                                    argsSize);
       }
     } else {
-      platform.set_exec_ctx(&io_context);
-      if (io_context.name == "sample" &&
-          io_context.hasConditionalsOnMeasureResults) {
-        // Need to run simulation shot-by-shot
-        cudaq::sample_result counts;
-        invokeMlirKernel(m_mlirContext, ir, requestInfo.passes,
-                         std::string(kernelName), io_context.shots,
-                         [&](std::size_t i) {
-                           // Reset the context and get the single
-                           // measure result, add it to the
-                           // sample_result and clear the context
-                           // result
-                           platform.reset_exec_ctx();
-                           counts += io_context.result;
-                           io_context.result.clear();
-                           if (i != (io_context.shots - 1))
-                             platform.set_exec_ctx(&io_context);
-                         });
-        io_context.result = counts;
+      
         platform.set_exec_ctx(&io_context);
-      } else {
-        invokeMlirKernel(m_mlirContext, ir, requestInfo.passes,
-                         std::string(kernelName));
-      }
+        if (io_context.name == "sample" &&
+            io_context.hasConditionalsOnMeasureResults) {
+          // Need to run simulation shot-by-shot
+          cudaq::sample_result counts;
+          invokeMlirKernel(m_mlirContext, ir, requestInfo.passes,
+                           std::string(kernelName), io_context.shots,
+                           [&](std::size_t i) {
+                             // Reset the context and get the single
+                             // measure result, add it to the
+                             // sample_result and clear the context
+                             // result
+                             platform.reset_exec_ctx();
+                             counts += io_context.result;
+                             io_context.result.clear();
+                             if (i != (io_context.shots - 1))
+                               platform.set_exec_ctx(&io_context);
+                           });
+          io_context.result = counts;
+          platform.set_exec_ctx(&io_context);
+        } else {
+          invokeMlirKernel(m_mlirContext, ir, requestInfo.passes,
+                           std::string(kernelName));
+        }
+
+        platform.reset_exec_ctx();
+      
+    }} catch (std::exception& e) {
+      std::cerr << "HODDD\n";
+      m_simHandle = std::make_unique<SimulatorHandle>(DEFAULT_NVQIR_SIMULATION_BACKEND);
+      throw std::runtime_error(e.what());
     }
-    platform.reset_exec_ctx();
   }
 
 private:
@@ -408,31 +464,31 @@ private:
     }
   }
 
-  void *loadNvqirSimLib(const std::string &simulatorName) {
-    const std::filesystem::path cudaqLibPath{cudaq::getCUDAQLibraryPath()};
-#if defined(__APPLE__) && defined(__MACH__)
-    const auto libSuffix = "dylib";
-#else
-    const auto libSuffix = "so";
-#endif
-    const auto simLibPath =
-        cudaqLibPath.parent_path() /
-        fmt::format("libnvqir-{}.{}", simulatorName, libSuffix);
-    cudaq::info("Request simulator {} at {}", simulatorName,
-                simLibPath.c_str());
-    void *simLibHandle = dlopen(simLibPath.c_str(), RTLD_GLOBAL | RTLD_NOW);
-    if (!simLibHandle) {
-      char *error_msg = dlerror();
-      throw std::runtime_error(fmt::format(
-          "Failed to open simulator backend library: {}.",
-          error_msg ? std::string(error_msg) : std::string("Unknown error")));
-    }
-    auto *sim = cudaq::getUniquePluginInstance<nvqir::CircuitSimulator>(
-        std::string("getCircuitSimulator"), simLibPath.c_str());
-    __nvqir__setCircuitSimulator(sim);
+//   void *loadNvqirSimLib(const std::string &simulatorName) {
+//     const std::filesystem::path cudaqLibPath{cudaq::getCUDAQLibraryPath()};
+// #if defined(__APPLE__) && defined(__MACH__)
+//     const auto libSuffix = "dylib";
+// #else
+//     const auto libSuffix = "so";
+// #endif
+//     const auto simLibPath =
+//         cudaqLibPath.parent_path() /
+//         fmt::format("libnvqir-{}.{}", simulatorName, libSuffix);
+//     cudaq::info("Request simulator {} at {}", simulatorName,
+//                 simLibPath.c_str());
+//     void *simLibHandle = dlopen(simLibPath.c_str(), RTLD_GLOBAL | RTLD_NOW);
+//     if (!simLibHandle) {
+//       char *error_msg = dlerror();
+//       throw std::runtime_error(fmt::format(
+//           "Failed to open simulator backend library: {}.",
+//           error_msg ? std::string(error_msg) : std::string("Unknown error")));
+//     }
+//     auto *sim = cudaq::getUniquePluginInstance<nvqir::CircuitSimulator>(
+//         std::string("getCircuitSimulator"), simLibPath.c_str());
+//     __nvqir__setCircuitSimulator(sim);
 
-    return simLibHandle;
-  }
+//     return simLibHandle;
+//   }
 
   json processRequest(const std::string &reqBody) {
     try {
