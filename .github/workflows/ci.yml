@@ -194,6 +194,7 @@ jobs:
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_READONLY_TOKEN: ${{ secrets.DOCKERHUB_READONLY_TOKEN }}
+      NVQC_SERVICE_KEY: ${{ secrets.NVQC_SERVICE_KEY }}
     with:
       platforms: linux/${{ matrix.platform }}
       devdeps_image: ${{ fromJson(needs.config.outputs.json).image_hash[format('{0}-llvm', matrix.platform)] }}

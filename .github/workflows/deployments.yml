@@ -367,6 +367,7 @@ jobs:
       NGC_CREDENTIALS: ${{ secrets.NGC_CREDENTIALS }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_READONLY_TOKEN: ${{ secrets.DOCKERHUB_READONLY_TOKEN }}
+      NVQC_SERVICE_KEY: ${{ secrets.NVQC_SERVICE_KEY }}
     with:
       platforms: ${{ fromJson(needs.metadata.outputs.multi_platform || needs.metadata.outputs.platforms)[format('{0}', matrix.platform)].docker_flag }}
       ompidev_image: ${{ fromJson(needs.config.outputs.json).image_hash[format('{0}-ompi', matrix.platform)] }}

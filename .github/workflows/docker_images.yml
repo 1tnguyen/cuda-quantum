@@ -31,6 +31,9 @@ on:
         required: true
       DOCKERHUB_READONLY_TOKEN:
         required: true
+      NVQC_SERVICE_KEY:
+        description: 'Credentials for NVQC testing.'
+        required: true
 
 name: Docker images
 
@@ -758,8 +761,6 @@ jobs:
           fail-on-cache-miss: true
 
       - name: Validate cuda-quantum image
-        # FIXME: add NVQC_SERVICE_KEY to the CI environment
-        environment: ghcr-deployment
         run: |
           if ${{ steps.restore.outcome != 'skipped' }}; then
             load_output=`docker load --input "${{ needs.cudaq_image.outputs.tar_archive }}"`
