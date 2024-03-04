@@ -190,7 +190,6 @@ jobs:
       matrix:
         platform: [amd64, arm64]
       fail-fast: false
-    environment: ghcr-deployment
     uses: ./.github/workflows/docker_images.yml
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
