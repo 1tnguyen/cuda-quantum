@@ -325,8 +325,8 @@ public:
         // Need to run simulation shot-by-shot
         cudaq::sample_result counts;
         invokeMlirKernel(m_mlirContext, ir, requestInfo.passes,
-                         std::string(kernelName), io_context.shots,
-                         [&](std::size_t i) {
+                         std::string(kernelName), kernelArgs, argsSize,
+                         io_context.shots, [&](std::size_t i) {
                            // Reset the context and get the single
                            // measure result, add it to the
                            // sample_result and clear the context
@@ -341,7 +341,7 @@ public:
         platform.set_exec_ctx(&io_context);
       } else {
         invokeMlirKernel(m_mlirContext, ir, requestInfo.passes,
-                         std::string(kernelName));
+                         std::string(kernelName), kernelArgs, argsSize);
       }
     }
     platform.reset_exec_ctx();
@@ -439,12 +439,11 @@ protected:
     return uniqueJit;
   }
 
-  void
-  invokeMlirKernel(std::unique_ptr<MLIRContext> &contextPtr,
-                   std::string_view irString,
-                   const std::vector<std::string> &passes,
-                   const std::string &entryPointFn, std::size_t numTimes = 1,
-                   std::function<void(std::size_t)> postExecCallback = {}) {
+  void invokeMlirKernel(
+      std::unique_ptr<MLIRContext> &contextPtr, std::string_view irString,
+      const std::vector<std::string> &passes, const std::string &entryPointFn,
+      void *args, std::uint64_t argsSize, std::size_t numTimes = 1,
+      std::function<void(std::size_t)> postExecCallback = {}) {
     llvm::SourceMgr sourceMgr;
     sourceMgr.AddNewSourceBuffer(llvm::MemoryBuffer::getMemBufferCopy(irString),
                                  llvm::SMLoc());
@@ -460,11 +459,26 @@ protected:
     if (!fnPtr)
       throw std::runtime_error("Failed to get entry function");
 
-    auto fn = reinterpret_cast<void (*)()>(fnPtr);
+    // auto fn = reinterpret_cast<void (*)()>(fnPtr);
+
+    //  Extract the entry point, which we named.
+    auto thunkName = entryPointFn + ".thunk";
+    auto thunkPtr =
+        getValueOrThrow(engine->lookup(thunkName),
+                        "Failed to look up thunk function for entry-point");
+    if (!thunkPtr) {
+      throw std::runtime_error("Failed to get thunk function");
+    }
+
+    // Invoke and free the args memory.
+    auto thunk = reinterpret_cast<void (*)(void *)>(thunkPtr);
+
     simulationStart = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < numTimes; ++i) {
       // Invoke the kernel
-      fn();
+      cudaq::altLaunchKernel(entryPointFn.data(), thunk, args, argsSize,
+                             argsSize);
+
       if (postExecCallback) {
         postExecCallback(i);
       }

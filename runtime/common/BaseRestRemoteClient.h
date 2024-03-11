@@ -166,17 +166,18 @@ public:
         auto funcOp = dyn_cast<func::FuncOp>(op);
         // Add quantum kernels defined in the module.
         if (funcOp && (funcOp->hasAttr(cudaq::kernelAttrName) ||
-                       funcOp.getName().startswith("__nvqpp__mlirgen__")))
+                       funcOp.getName().startswith("__nvqpp__mlirgen__") || 
+                       funcOp.getName().startswith(name)))
           moduleOp.push_back(funcOp.clone());
       }
 
-      if (args) {
-        cudaq::info("Run Quake Synth.\n");
-        PassManager pm(&mlirContext);
-        pm.addPass(cudaq::opt::createQuakeSynthesizer(name, args));
-        if (failed(pm.run(moduleOp)))
-          throw std::runtime_error("Could not successfully apply quake-synth.");
-      }
+      // if (args) {
+      //   cudaq::info("Run Quake Synth.\n");
+      //   PassManager pm(&mlirContext);
+      //   pm.addPass(cudaq::opt::createQuakeSynthesizer(name, args));
+      //   if (failed(pm.run(moduleOp)))
+      //     throw std::runtime_error("Could not successfully apply quake-synth.");
+      // }
 
       // Client-side passes
       if (!clientPasses.empty()) {
@@ -233,6 +234,11 @@ public:
     } else {
       request.passes = serverPasses;
       request.format = cudaq::CodeFormat::MLIR;
+      if (kernelArgs && argsSize > 0) {
+        cudaq::info("Serialize {} bytes of args.", argsSize);
+        request.args.resize(argsSize);
+        std::memcpy(request.args.data(), kernelArgs, argsSize);
+      }
     }
 
     request.code = constructKernelPayload(mlirContext, kernelName, kernelFunc,
