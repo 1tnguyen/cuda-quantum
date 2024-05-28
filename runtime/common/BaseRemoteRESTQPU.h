@@ -19,6 +19,7 @@
 #include "cudaq/Optimizer/CodeGen/Passes.h"
 #include "cudaq/Optimizer/Dialect/CC/CCDialect.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeDialect.h"
+#include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Optimizer/Transforms/Passes.h"
 #include "cudaq/Support/Plugin.h"
 #include "cudaq/platform/qpu.h"
@@ -375,6 +376,24 @@ public:
     // FIXME this should be added to the builder.
     if (!func->hasAttr(cudaq::entryPointAttrName))
       func->setAttr(cudaq::entryPointAttrName, builder.getUnitAttr());
+    // Verify that we don't have Quake's `init_state` in the IR.
+    // Note: we don't allow emulation as well since current QIR profiles cannot
+    // handle complex types.
+    bool hasQuakeInit = false;
+    func.walk([&](mlir::Operation *op) {
+      if (isa<quake::InitializeStateOp>(*op)) {
+        hasQuakeInit = true;
+        return mlir::WalkResult::interrupt();
+      }
+      return mlir::WalkResult::advance();
+    });
+
+    if (hasQuakeInit)
+      throw std::runtime_error(
+          fmt::format("function '{}' is not compatible with NVQIR for remote "
+                      "REST QPU: state "
+                      "initialization is not supported.",
+                      func.getName()));
     auto moduleOp = builder.create<mlir::ModuleOp>();
     moduleOp.push_back(func.clone());
     moduleOp->setAttrs(m_module->getAttrDictionary());
