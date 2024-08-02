@@ -297,3 +297,5 @@ void finalize();
 #include "cudaq/algorithms/observe.h"
 // Users should get get_state by default
 #include "cudaq/algorithms/get_state.h"
+
+#include "cudaq/algorithms/run.h"
