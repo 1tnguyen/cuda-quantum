@@ -26,20 +26,37 @@ struct Result {
   Result(OtherT &&val,
          std::enable_if_t<std::is_convertible_v<OtherT, T>> * = nullptr)
       : hasError(false), resultStorage(val) {}
-  Result(const std::exception &e) : hasError(true), errorMsg(strdup(e.what())) {}
+  Result(const std::exception &e)
+      : hasError(true), errorMsg(strdup(e.what())) {}
+
+  Result(const Result &other) : hasError(other.hasError) {
+    if (hasError)
+      errorMsg = strdup(other.errorMsg);
+    else
+      resultStorage = other.resultStorage;
+  }
+
+  Result &operator=(Result other) {
+    hasError = other.hasError;
+    if (hasError)
+      std::swap(errorMsg, other.errorMsg);
+    else
+      std::swap(resultStorage, other.resultStorage);
+    return *this;
+  }
 
   ~Result() {
     if (hasError)
       delete errorMsg;
   }
-  
+
   T get() const {
     if (hasError)
       throw std::runtime_error("Attempt to access a failed result");
     return resultStorage; 
   }
   bool isOk() const { return !hasError; }
-  std::string getError() const { return hasError ? errorMsg : ""; }
+  std::string getError() const { return hasError ? std::string(errorMsg) : ""; }
 };
 
 template <class KernelTy, class... Args>
