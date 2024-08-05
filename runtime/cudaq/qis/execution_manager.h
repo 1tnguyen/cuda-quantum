@@ -55,6 +55,8 @@ public:
 
   operator int() { return result; }
   operator bool() { return __nvqpp__MeasureResultBoolConversion(result); }
+  operator int() const { return result; }
+  operator bool() const { return __nvqpp__MeasureResultBoolConversion(result); }
 };
 #else
 /// When compiling with MLIR, we default to a boolean.

@@ -81,6 +81,11 @@ public:
   /// traced quantum resources here.
   Trace kernelTrace;
 
+  /// @brief Bit generator for trace mode.
+  // This can be used to explore different paths of the execution.
+  std::function<int(const cudaq::QuditInfo &, const std::string &)>
+      traceMeasureGen;
+
   /// @brief The name of the kernel being executed.
   std::string kernelName = "";
 
