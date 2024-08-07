@@ -6,6 +6,14 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
+/**
+ * @file
+ *
+ * Kernel run API
+ *
+ * This header defines the API for kernel execution with return values
+ */
+
 #pragma once
 
 #include "common/ExecutionContext.h"
@@ -19,9 +27,9 @@ namespace cudaq {
 ///
 /// In a batched execution, there could be scenarios whereby some
 /// executions failed, e.g., kernels that throw as part of their algorithm
-/// design (repeat until sucsess with a fixed max retries), or backend runtime
+/// design (repeat until success with a fixed max retries), or backend runtime
 /// errors when a certain dynamical code path being invoked. Hence, we support
-/// error proparation as part of the return type wrapper.
+/// error propagation as part of the return type wrapper.
 template <typename T>
 class Result {
 private:
