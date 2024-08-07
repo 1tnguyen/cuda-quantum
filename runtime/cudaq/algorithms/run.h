@@ -7,7 +7,9 @@
  ******************************************************************************/
 
 #pragma once
+
 #include "common/ExecutionContext.h"
+#include "cudaq/platform/QuantumExecutionQueue.h"
 #include <type_traits>
 #include <vector>
 
@@ -122,6 +124,8 @@ std::vector<
 run(std::size_t shots, KernelTy &&f, Args &&...args) {
   using resultTy = Result<
       std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
+  if (shots < 1)
+    throw std::invalid_argument("The number of shots must be greater than 0.");
   std::vector<resultTy> results;
   results.reserve(shots);
   for (std::size_t i = 0; i < shots; ++i) {
@@ -133,4 +137,107 @@ run(std::size_t shots, KernelTy &&f, Args &&...args) {
   }
   return results;
 }
+
+template <class KernelTy, class... Args>
+std::vector<
+    Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+run(std::size_t shots, cudaq::noise_model &noise_model, KernelTy &&f,
+    Args &&...args) {
+  using resultTy = Result<
+      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
+
+  if (shots < 1)
+    throw std::invalid_argument("The number of shots must be greater than 0.");
+  auto &platform = cudaq::get_platform();
+  platform.set_noise(&noise_model);
+  std::vector<resultTy> results;
+  results.reserve(shots);
+  for (std::size_t i = 0; i < shots; ++i) {
+    try {
+      results.emplace_back(resultTy(f(args...)));
+    } catch (std::exception &e) {
+      results.emplace_back(resultTy(e));
+    }
+  }
+  platform.reset_noise();
+  return results;
+}
+
+template<class T>
+using async_run_result = std::future<std::vector<Result<T>>>;
+
+template <class KernelTy, class... Args>
+async_run_result<
+    std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>
+run_async(std::size_t qpu_id, std::size_t shots, KernelTy &&f, Args &&...args) {
+  using resultTy = Result<
+      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
+  if (shots < 1)
+    throw std::invalid_argument("The number of shots must be greater than 0.");
+  auto &platform = cudaq::get_platform();
+  if (qpu_id >= platform.num_qpus())
+    throw std::invalid_argument(
+        "Provided qpu_id is invalid (must be <= to platform.num_qpus()).");
+
+  std::promise<std::vector<resultTy>> promise;
+  auto fut = promise.get_future();
+  // Wrapped it as a generic (returning void) function
+  QuantumTask wrapped = detail::make_copyable_function(
+      [p = std::move(promise), qpu_id, shots, &platform, &f,
+       args = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+        std::vector<resultTy> results;
+        results.reserve(shots);
+        for (std::size_t i = 0; i < shots; ++i) {
+          try {
+            results.emplace_back(resultTy(std::apply(f, args)));
+          } catch (std::exception &e) {
+            results.emplace_back(resultTy(e));
+          }
+        }
+        p.set_value(std::move(results));
+      });
+
+  platform.enqueueAsyncTask(qpu_id, wrapped);
+  return fut;
+}
+
+template <class KernelTy, class... Args>
+async_run_result<
+    std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>
+run_async(std::size_t qpu_id, std::size_t shots,
+          cudaq::noise_model &noise_model, KernelTy &&f, Args &&...args) {
+  using resultTy = Result<
+      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
+  if (shots < 1)
+    throw std::invalid_argument("The number of shots must be greater than 0.");
+  auto &platform = cudaq::get_platform();
+  if (qpu_id >= platform.num_qpus())
+    throw std::invalid_argument(
+        "Provided qpu_id is invalid (must be <= to platform.num_qpus()).");
+
+  std::promise<std::vector<resultTy>> promise;
+  auto fut = promise.get_future();
+  // Wrapped it as a generic (returning void) function
+  QuantumTask wrapped = detail::make_copyable_function(
+      [p = std::move(promise), qpu_id, shots, noise_model, &platform, &f,
+       args = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+        std::vector<resultTy> results;
+        results.reserve(shots);
+        assert(platform.get_current_qpu() == qpu_id);
+        platform.set_noise(&noise_model);
+        for (std::size_t i = 0; i < shots; ++i) {
+          try {
+            results.emplace_back(resultTy(std::apply(f, args)));
+          } catch (std::exception &e) {
+            results.emplace_back(resultTy(e));
+          }
+        }
+        platform.reset_noise();
+        p.set_value(std::move(results));
+      });
+
+  platform.enqueueAsyncTask(qpu_id, wrapped);
+  return fut;
+}
+
 } // namespace cudaq
