@@ -12,7 +12,7 @@
 // ```
 
 #include <cudaq.h>
-
+#include <iostream>
 // Here we demonstrate an algorithm expressed as a CUDA-Q kernel
 // that incorporates non-trivial control flow and conditional
 // quantum instruction invocation.
@@ -58,9 +58,7 @@ int main() {
   double mu = 0.7951, sigma = 0.6065;
   auto phases = cudaq::run(100, rwpe{}, n_iterations, mu, sigma);
   for (const auto& phase: phases) {
-    if (phase.isOk())
-      printf("Phase = %lf\n", phase.get());
-    else
-      printf("Error\n");
+    // printf("Phase = %lf\n", (double)phase);
+    std::cout << "Phase = " << phase << "\n";
   }
 }

@@ -1,0 +1,25 @@
+var searchData=
+[
+  ['random_0',['random',['../classcudaq_1_1spin__op.html#a86568d7681059dc9f0cc3eb13d3286ed',1,'cudaq::spin_op']]],
+  ['rank_1',['rank',['../classcudaq_1_1MPIPlugin.html#a84e9bc90c22691e0eeedd6458dca891c',1,'cudaq::MPIPlugin']]],
+  ['raw_5fdata_2',['raw_data',['../classcudaq_1_1observe__result.html#a1220b104814b47514af78f957cd3a543',1,'cudaq::observe_result']]],
+  ['register_5fnames_3',['register_names',['../classcudaq_1_1sample__result.html#acf4d522001068f239b866577b2f66cb6',1,'cudaq::sample_result']]],
+  ['registeroperation_4',['registerOperation',['../classcudaq_1_1ExecutionManager.html#ae8921a16b6e28c3ad5c0f24f64212655',1,'cudaq::ExecutionManager']]],
+  ['remotecapabilities_5',['RemoteCapabilities',['../structcudaq_1_1RemoteCapabilities.html#a436f02286cef89972c62bc8e3cc98122',1,'cudaq::RemoteCapabilities']]],
+  ['remotesimulationstate_6',['RemoteSimulationState',['../classcudaq_1_1RemoteSimulationState.html#ac6cae2fff7612e793b01f5f9dd82dfc3',1,'cudaq::RemoteSimulationState']]],
+  ['reorder_7',['reorder',['../classcudaq_1_1sample__result.html#af47dab420f03957899761a4c98ed8d7f',1,'cudaq::sample_result']]],
+  ['requiresgradients_8',['requiresGradients',['../classcudaq_1_1optimizer.html#a872567d3394d98475967a00fdade1e7f',1,'cudaq::optimizer']]],
+  ['reset_9',['reset',['../classcudaq_1_1ExecutionManager.html#a10e5947aa41d832b81b054762a2a5dc7',1,'cudaq::ExecutionManager::reset()'],['../classcudaq_1_1BasicExecutionManager.html#ad1d0676e7676fc39ca5ae13786444ab1',1,'cudaq::BasicExecutionManager::reset()']]],
+  ['reset_5fexec_5fctx_10',['reset_exec_ctx',['../classcudaq_1_1quantum__platform.html#ac98cd229d35948309412a2139ec5fc80',1,'cudaq::quantum_platform']]],
+  ['reset_5fnoise_11',['reset_noise',['../classcudaq_1_1quantum__platform.html#a39b49eb99f389ffbf2d6aa64698e6110',1,'cudaq::quantum_platform']]],
+  ['resetexecutioncontext_12',['resetExecutionContext',['../classcudaq_1_1BasicExecutionManager.html#a5e59dbb0fb7da36b23637124205a414e',1,'cudaq::BasicExecutionManager::resetExecutionContext()'],['../classnvqir_1_1CircuitSimulatorBase.html#a3c8c85f8f92fcc5a6bdf8c6ba73a4339',1,'nvqir::CircuitSimulatorBase::resetExecutionContext()'],['../classnvqir_1_1CircuitSimulator.html#ad3d30f87fa79e77ed6cb601db01357d4',1,'nvqir::CircuitSimulator::resetExecutionContext()'],['../classcudaq_1_1QPU.html#af4a531bc79686767ffe8b412c22567e2',1,'cudaq::QPU::resetExecutionContext()'],['../classcudaq_1_1BaseRemoteSimulatorQPU.html#a9f7224a05d7dced3273b48af20862193',1,'cudaq::BaseRemoteSimulatorQPU::resetExecutionContext()'],['../classcudaq_1_1BaseRemoteRESTQPU.html#a8370ff64db5a09002ba5ea716179abef',1,'cudaq::BaseRemoteRESTQPU::resetExecutionContext()'],['../classcudaq_1_1ExecutionManager.html#a293326b0dfa46a55214b9d019efbf12b',1,'cudaq::ExecutionManager::resetExecutionContext()']]],
+  ['resetlogstream_13',['resetLogStream',['../classcudaq_1_1quantum__platform.html#a02bbc42f21f59ca9fa992db36e9dfd7b',1,'cudaq::quantum_platform']]],
+  ['resetqubit_14',['resetQubit',['../classnvqir_1_1CircuitSimulator.html#a70f47166da5758fbf736f6296ade3b67',1,'nvqir::CircuitSimulator::resetQubit()'],['../classnvqir_1_1SimulatorTensorNetBase.html#a8a0ea4c1ca0f33b0034a99fbbcedbfbd',1,'nvqir::SimulatorTensorNetBase::resetQubit()']]],
+  ['resetqudit_15',['resetQudit',['../classcudaq_1_1BasicExecutionManager.html#a4636ce9a201fb3d63d3cfcede3a8b1c6',1,'cudaq::BasicExecutionManager']]],
+  ['restclient_16',['RestClient',['../classcudaq_1_1RestClient.html#a4da5156d0a5c050730aaed2a8d378873',1,'cudaq::RestClient']]],
+  ['result_17',['Result',['../classcudaq_1_1Result.html#a049632ef56c6dafe95d90a76931fa3ef',1,'cudaq::Result::Result(OtherT &amp;&amp;val, std::enable_if_t&lt; std::is_convertible_v&lt; OtherT, T &gt; &gt; *=nullptr)'],['../classcudaq_1_1Result.html#a9b96c90effb5ae3cb0492daa8930efa5',1,'cudaq::Result::Result(Result &amp;&amp;Other)'],['../classcudaq_1_1Result.html#adf634fb98a43bf5ebdfcbeaac1374381',1,'cudaq::Result::Result(const std::exception &amp;e)']]],
+  ['returnindex_18',['returnIndex',['../classcudaq_1_1QuditIdTracker.html#ad21e71fb6ae7844e3e32c6dbf4c612f1',1,'cudaq::QuditIdTracker::returnIndex()'],['../classcudaq_1_1ExecutionManager.html#a4c004da129d7b6b92fc413d17d6da6dd',1,'cudaq::ExecutionManager::returnIndex(std::size_t idx)']]],
+  ['returnqudit_19',['returnQudit',['../classcudaq_1_1ExecutionManager.html#a34e5c2f1d693d781699144944f2c6585',1,'cudaq::ExecutionManager::returnQudit()'],['../classcudaq_1_1BasicExecutionManager.html#a7a14bb27ddaf1a4f3d94d0a33e4ff5a4',1,'cudaq::BasicExecutionManager::returnQudit()']]],
+  ['reversequbitorder_20',['reverseQubitOrder',['../classnvqir_1_1TensorNetState.html#a6a3be59d83800c7a18fe83712ac222c4',1,'nvqir::TensorNetState']]],
+  ['rows_21',['rows',['../classcudaq_1_1complex__matrix.html#a46f26ea0e1b0ab761b8bc16a25dc753c',1,'cudaq::complex_matrix']]]
+];
