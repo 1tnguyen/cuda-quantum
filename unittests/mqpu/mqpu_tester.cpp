@@ -124,3 +124,73 @@ TEST(MQPUTester, checkAsyncWithKernelBuilder) {
     EXPECT_NEAR(std::abs(gotState[1] - expectedState[1]), 0.0, 1e-6);
   }
 }
+
+struct iqft {
+  void operator()(cudaq::qview<> &q) __qpu__ {
+    int N = q.size();
+    // Swap qubits
+    for (int i = 0; i < N / 2; ++i) {
+      swap(q[i], q[N - i - 1]);
+    }
+
+    for (int i = 0; i < N - 1; ++i) {
+      h(q[i]);
+      int j = i + 1;
+      for (int y = i; y >= 0; --y) {
+        const double theta = -M_PI / std::pow(2.0, j - y);
+        r1<cudaq::ctrl>(theta, q[j], q[y]);
+      }
+    }
+
+    h(q[N - 1]);
+  }
+};
+
+struct qpe {
+  double operator()(const int n_c, const int n_q) __qpu__ {
+    // Allocate a register of qubits
+    cudaq::qvector q(n_c + n_q);
+
+    // Extract sub-registers, one for the counting qubits
+    // another for the eigenstate register
+    auto counting_qubits = q.front(n_c);
+
+    auto &state_register = q.back();
+
+    // Prepare the eigenstate
+    x(state_register);
+
+    // Put the counting register into uniform superposition
+    h(counting_qubits);
+
+    // Perform ctrl-U^j
+    for (int i = 0; i < n_c; ++i) {
+      for (int j = 0; j < std::pow(2, i); ++j) {
+        t<cudaq::ctrl>(counting_qubits[i], state_register);
+      }
+    }
+
+    // Apply inverse quantum fourier transform
+    iqft{}(counting_qubits);
+    // Measure and compute the phase...
+    return cudaq::to_integer(mz(counting_qubits)) / std::pow(2, n_c);
+  }
+};
+
+TEST(MQPUTester, checkRunAsync) {
+  // Query the number of QPUs in the system
+  auto &platform = cudaq::get_platform();
+  auto num_qpus = platform.num_qpus();
+  printf("Number of QPUs: %zu\n", num_qpus);
+
+  for (int qpu_id = 0; qpu_id < num_qpus; ++qpu_id) {
+    const int numCountingQubits = 3 + qpu_id;
+    auto phases_future =
+        cudaq::run_async(qpu_id, 1, qpe{}, numCountingQubits, 1);
+    for (const auto &phase : phases_future.get()) {
+      printf("Phase = %lf\n", phase.get());
+      EXPECT_TRUE(phase.isOk());
+      EXPECT_NEAR(phase.get(), .125, 1e-4);
+    }
+  }
+}
