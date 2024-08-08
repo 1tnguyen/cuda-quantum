@@ -149,6 +149,32 @@ private:
   }
 };
 
+namespace __internal {
+// Helper function to execute the run loop.
+// Make this a lambda-like function class so that it can be used with
+// std::apply.
+struct executeRun {
+  template <class KernelTy, class... Args>
+  std::vector<Result<
+      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+  operator()(std::size_t shots, KernelTy &&f, Args &&...args) {
+    using resultTy = Result<
+        std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
+
+    std::vector<resultTy> results;
+    results.reserve(shots);
+    for (std::size_t i = 0; i < shots; ++i) {
+      try {
+        results.emplace_back(resultTy(f(args...)));
+      } catch (std::exception &e) {
+        results.emplace_back(resultTy(e));
+      }
+    }
+    return results;
+  }
+};
+} // namespace __internal
+
 /// @brief Run a kernel multiple times, returning a collection of results or any
 /// failures
 /// @tparam KernelTy Quantum kernel type
@@ -162,20 +188,10 @@ template <class KernelTy, class... Args>
 std::vector<
     Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
 run(std::size_t shots, KernelTy &&f, Args &&...args) {
-  using resultTy = Result<
-      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
   if (shots < 1)
     throw std::invalid_argument("The number of shots must be greater than 0.");
-  std::vector<resultTy> results;
-  results.reserve(shots);
-  for (std::size_t i = 0; i < shots; ++i) {
-    try {
-      results.emplace_back(resultTy(f(args...)));
-    } catch (std::exception &e) {
-      results.emplace_back(resultTy(e));
-    }
-  }
-  return results;
+  return __internal::executeRun{}(shots, std::forward<KernelTy>(f),
+                                  std::forward<Args>(args)...);
 }
 
 /// @brief Run a kernel multiple times with noise, returning a collection of
@@ -193,22 +209,12 @@ std::vector<
     Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
 run(std::size_t shots, cudaq::noise_model &noise_model, KernelTy &&f,
     Args &&...args) {
-  using resultTy = Result<
-      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
-
   if (shots < 1)
     throw std::invalid_argument("The number of shots must be greater than 0.");
   auto &platform = cudaq::get_platform();
   platform.set_noise(&noise_model);
-  std::vector<resultTy> results;
-  results.reserve(shots);
-  for (std::size_t i = 0; i < shots; ++i) {
-    try {
-      results.emplace_back(resultTy(f(args...)));
-    } catch (std::exception &e) {
-      results.emplace_back(resultTy(e));
-    }
-  }
+  auto results = __internal::executeRun{}(shots, std::forward<KernelTy>(f),
+                                          std::forward<Args>(args)...);
   platform.reset_noise();
   return results;
 }
@@ -231,30 +237,23 @@ template <class KernelTy, class... Args>
 async_run_result<
     std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>
 run_async(std::size_t qpu_id, std::size_t shots, KernelTy &&f, Args &&...args) {
-  using resultTy = Result<
-      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
   if (shots < 1)
     throw std::invalid_argument("The number of shots must be greater than 0.");
   auto &platform = cudaq::get_platform();
   if (qpu_id >= platform.num_qpus())
     throw std::invalid_argument(
         "Provided qpu_id is invalid (must be <= to platform.num_qpus()).");
-
+  using resultTy = Result<
+      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
   std::promise<std::vector<resultTy>> promise;
   auto fut = promise.get_future();
   // Wrapped it as a generic (returning void) function
   QuantumTask wrapped = detail::make_copyable_function(
       [p = std::move(promise), qpu_id, shots, &platform, &f,
        args = std::make_tuple(std::forward<Args>(args)...)]() mutable {
-        std::vector<resultTy> results;
-        results.reserve(shots);
-        for (std::size_t i = 0; i < shots; ++i) {
-          try {
-            results.emplace_back(resultTy(std::apply(f, args)));
-          } catch (std::exception &e) {
-            results.emplace_back(resultTy(e));
-          }
-        }
+        std::tuple<std::size_t, KernelTy> prependArgs(shots, f);
+        auto fullArgs = std::tuple_cat(prependArgs, args);
+        auto results = std::apply(__internal::executeRun{}, fullArgs);
         p.set_value(std::move(results));
       });
 
@@ -294,17 +293,11 @@ run_async(std::size_t qpu_id, std::size_t shots,
   QuantumTask wrapped = detail::make_copyable_function(
       [p = std::move(promise), qpu_id, shots, noise_model, &platform, &f,
        args = std::make_tuple(std::forward<Args>(args)...)]() mutable {
-        std::vector<resultTy> results;
-        results.reserve(shots);
         assert(platform.get_current_qpu() == qpu_id);
         platform.set_noise(&noise_model);
-        for (std::size_t i = 0; i < shots; ++i) {
-          try {
-            results.emplace_back(resultTy(std::apply(f, args)));
-          } catch (std::exception &e) {
-            results.emplace_back(resultTy(e));
-          }
-        }
+        std::tuple<std::size_t, KernelTy> prependArgs(shots, f);
+        auto fullArgs = std::tuple_cat(prependArgs, args);
+        auto results = std::apply(__internal::executeRun{}, fullArgs);
         platform.reset_noise();
         p.set_value(std::move(results));
       });
