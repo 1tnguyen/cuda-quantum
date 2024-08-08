@@ -361,6 +361,90 @@ public:
   }
 };
 
+template <typename T>
+struct SerializeRunResult {
+  bool hasValue = false;
+  T value{};
+  std::vector<char> errorMessage;
+};
+
+// Serialization for Result<T> type
+template <class T>
+class SerializeArgImpl<SerializeRunResult<T>> {
+public:
+  static size_t size(const SerializeRunResult<T> &runResult) {
+    size_t size = SerializeArgs<bool>::size(runResult.hasValue);
+    if (runResult.hasValue)
+      size += SerializeArgs<T>::size(runResult.value);
+    else
+      size += SerializeArgs<std::vector<char>>::size(runResult.errorMessage);
+    return size;
+  }
+
+  static bool serialize(SerializeOutputBuffer &buf,
+                        const SerializeRunResult<T> &runResult) {
+    if (!SerializeArgs<bool>::serialize(buf, runResult.hasValue))
+      return false;
+
+    if (runResult.hasValue)
+      return SerializeArgs<T>::serialize(buf, runResult.value);
+
+    return SerializeArgs<std::vector<char>>::serialize(buf,
+                                                       runResult.errorMessage);
+  }
+
+  static bool deserialize(SerializeInputBuffer &buf,
+                          SerializeRunResult<T> &runResult) {
+    if (!SerializeArgs<bool>::deserialize(buf, runResult.hasValue))
+      return false;
+
+    if (runResult.hasValue)
+      return SerializeArgs<T>::deserialize(buf, runResult.value);
+
+    return SerializeArgs<std::vector<char>>::deserialize(
+        buf, runResult.errorMessage);
+  }
+};
+
+template <class T>
+class SerializeArgImpl<std::vector<SerializeRunResult<T>>> {
+public:
+  static std::size_t size(const std::vector<SerializeRunResult<T>> &vec) {
+    std::size_t size =
+        SerializeArgs<uint64_t>::size(static_cast<uint64_t>(vec.size()));
+    for (const auto &el : vec) {
+      size += SerializeArgs<std::vector<T>>::size(el);
+    }
+    return size;
+  }
+
+  static bool serialize(SerializeOutputBuffer &buf,
+                        const std::vector<SerializeRunResult<T>> &vec) {
+    if (!SerializeArgs<uint64_t>::serialize(buf,
+                                            static_cast<uint64_t>(vec.size())))
+      return false;
+    for (const auto &el : vec)
+      if (!SerializeArgs<SerializeRunResult<T>>::serialize(buf, el))
+        return false;
+    return true;
+  }
+
+  static bool deserialize(SerializeInputBuffer &buf,
+                          std::vector<SerializeRunResult<T>> &vec) {
+    uint64_t size;
+    if (!SerializeArgs<uint64_t>::deserialize(buf, size))
+      return false;
+    vec.reserve(size);
+    for (size_t i = 0; i != size; ++i) {
+      SerializeRunResult<T> el;
+      if (!SerializeArgs<SerializeRunResult<T>>::deserialize(buf, el))
+        return false;
+      vec.emplace_back(el);
+    }
+    return true;
+  }
+};
+
 //===----------------------------------------------------------------------===//
 //
 // Utilities to check `SerializeArgImpl` exists
@@ -513,7 +597,7 @@ void invokeCallableWithSerializedArgs_vec(const std::vector<double> &vec_parms,
 template <typename QuantumKernel, typename... Args>
 std::invoke_result_t<QuantumKernel, Args...> invokeKernel(QuantumKernel &&fn,
                                                           Args &&...args) {
-#if defined(CUDAQ_REMOTE_SIM) && defined(CUDAQ_LIBRARY_MODE)
+#if defined(CUDAQ_REMOTE_SIM) && defined(CUDAQ_LbufRARY_MODE)
   if constexpr (has_name<QuantumKernel>::value) {
     // kernel_builder kernel: it always has quake representation; hence, no need
     // to wrap the kernel (run as MLIR mode).
@@ -559,9 +643,9 @@ std::invoke_result_t<QuantumKernel, Args...> invokeKernel(QuantumKernel &&fn,
 // ```
 // __qpu__ void kernel() {}
 // auto wrapped = [&](){invokeKernel(kernel);};
-// cudaq::observe(H, wrapped);
+// cudaq::orunResultrve(H, wrapped);
 // ```
-// Since `cudaq::observe` again uses `invokeKernel` to execute the callable (a
+// Since `cudaq::orunResultrve` again uses `invokeKernel` to execute the callable (a
 // `std::function`), we want to pass it through.
 template <typename Signature, typename... Args>
 std::invoke_result_t<std::function<Signature>, Args...>

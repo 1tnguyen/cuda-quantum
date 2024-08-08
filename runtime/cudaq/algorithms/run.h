@@ -16,10 +16,13 @@
 
 #pragma once
 
-#include "common/ExecutionContext.h"
-#include "cudaq/platform/QuantumExecutionQueue.h"
 #include <type_traits>
 #include <vector>
+
+#include "common/ExecutionContext.h"
+#include "common/KernelWrapper.h"
+#include "cudaq/platform.h"
+#include "cudaq/platform/QuantumExecutionQueue.h"
 
 namespace cudaq {
 
@@ -90,6 +93,23 @@ public:
 
   /// @brief Get the error message if any. Return an empty string otherwise.
   std::string getError() const { return hasError ? *getErrorStorage() : ""; }
+
+  SerializeRunResult<T> toSerializable() const {
+    SerializeRunResult<T> result;
+    result.hasValue = !hasError;
+    if (hasError)
+      result.errorMessage = getError();
+    else
+      result.value = get();
+    return result;
+  }
+
+  static Result<T>
+  fromSerializable(const SerializeRunResult<T> &serializedData) {
+    if (serializedData.hasValue)
+      return Result<T>(serializedData.value);
+    return Result<T>(std::exception(serializedData.errorMessage));
+  }
 
 private:
   template <class OtherT>

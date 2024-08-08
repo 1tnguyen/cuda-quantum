@@ -12,10 +12,12 @@
 #include "common/FmtCore.h"
 #include "common/SerializedCodeExecutionContext.h"
 #include "cudaq/Support/Version.h"
+#include "cudaq/algorithms/run.h"
 #include "cudaq/gradients.h"
 #include "cudaq/optimizers.h"
 #include "cudaq/simulators.h"
 #include "nlohmann/json.hpp"
+
 /*! \file
     \brief Utility to support JSON serialization between the client and server.
 */
