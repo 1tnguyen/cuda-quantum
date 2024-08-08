@@ -6,6 +6,14 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
+/**
+ * @file
+ *
+ * Kernel run API
+ *
+ * This header defines the API for kernel execution with return values
+ */
+
 #pragma once
 
 #include "common/ExecutionContext.h"
@@ -16,6 +24,12 @@
 namespace cudaq {
 
 /// @brief Kernel result holder: this can hold either a T or an error string.
+///
+/// In a batched execution, there could be scenarios whereby some
+/// executions failed, e.g., kernels that throw as part of their algorithm
+/// design (repeat until success with a fixed max retries), or backend runtime
+/// errors when a certain dynamical code path being invoked. Hence, we support
+/// error propagation as part of the return type wrapper.
 template <typename T>
 class Result {
 private:
@@ -29,41 +43,70 @@ private:
   using ErrorTy = std::string;
 
 public:
+  /// @brief Construct a valid result
+  /// @tparam OtherT The actual type of input value (convertible to the expected
+  /// return type)
+  /// @param val Result value to be stored
   template <typename OtherT>
   Result(OtherT &&val,
          std::enable_if_t<std::is_convertible_v<OtherT, T>> * = nullptr)
       : hasError(false) {
     new (getStorage()) T(std::forward<OtherT>(val));
   }
+
+  /// @brief Construct an error result
+  /// @param e The exception to be captured
   Result(const std::exception &e) : hasError(true) {
     new (getErrorStorage()) std::string(e.what());
   }
 
+  /// @brief Move constructor
   Result(Result &&Other) { moveConstruct(std::move(Other)); }
 
-  template <class OtherT>
-  Result(Result<OtherT> &&Other,
-         std::enable_if_t<std::is_convertible_v<OtherT, T>> * = nullptr) {
-    moveConstruct(std::move(Other));
-  }
-
-  template <class OtherT>
-  explicit Result(
-      Result<OtherT> &&Other,
-      std::enable_if_t<!std::is_convertible_v<OtherT, T>> * = nullptr) {
-    moveConstruct(std::move(Other));
-  }
-
+  /// @brief Move assignment operator
   Result &operator=(Result &&Other) {
     moveAssign(std::move(Other));
     return *this;
   }
 
+  /// @brief Destructor
   ~Result() {
     if (hasError)
       getErrorStorage()->~ErrorTy();
     else
       getStorage()->~T();
+  }
+
+  /// @brief Return true if this contains a valid result.
+  bool isOk() const { return !hasError; }
+
+  /// @brief Get the result value
+  /// @return  Result value if valid. Throw otherwise.
+  const T &get() const { return *getStorage(); }
+
+  /// @brief Conversion to the result type.
+  /// This will throw if this is an error result.
+  operator T() const { return get(); }
+
+  /// @brief Get the error message if any. Return an empty string otherwise.
+  std::string getError() const { return hasError ? *getErrorStorage() : ""; }
+
+private:
+  template <class OtherT>
+  void moveConstruct(Result<OtherT> &&Other) {
+    hasError = Other.hasError;
+    if (!hasError)
+      new (getStorage()) T(std::move(*Other.getStorage()));
+    else
+      new (getErrorStorage()) ErrorTy(std::move(*Other.getErrorStorage()));
+  }
+
+  template <class OtherT>
+  void moveAssign(Result<OtherT> &&Other) {
+    if (this == &Other)
+      return;
+    this->~Result();
+    new (this) Result(std::move(Other));
   }
 
   T *getStorage() {
@@ -84,40 +127,17 @@ public:
     assert(hasError && "Cannot get error when no error exists!");
     return reinterpret_cast<std::string *>(&alignedErrorStorage);
   }
-
-  const T &get() const { return *getStorage(); }
-  bool isOk() const { return !hasError; }
-  std::string getError() const { return hasError ? *getErrorStorage() : ""; }
-
-private:
-  template <class OtherT>
-  void moveConstruct(Result<OtherT> &&Other) {
-    hasError = Other.hasError;
-    if (!hasError)
-      new (getStorage()) T(std::move(*Other.getStorage()));
-    else
-      new (getErrorStorage()) ErrorTy(std::move(*Other.getErrorStorage()));
-  }
-  template <class T1>
-  static bool compareThisIfSameType(const T1 &a, const T1 &b) {
-    return &a == &b;
-  }
-
-  template <class T1, class T2>
-  static bool compareThisIfSameType(const T1 &, const T2 &) {
-    return false;
-  }
-  template <class OtherT>
-  void moveAssign(Result<OtherT> &&Other) {
-    if (compareThisIfSameType(*this, Other))
-      return;
-    this->~Result();
-    new (this) Result(std::move(Other));
-  }
 };
 
-/// Run a kernel multiple times, returning a collection of results or any
-/// failure.
+/// @brief Run a kernel multiple times, returning a collection of results or any
+/// failures
+/// @tparam KernelTy Quantum kernel type
+/// @tparam ...Args Quantum kernel argument types
+/// @param shots Number of shots to run
+/// @param f Quantum kernel
+/// @param ...args Kernel arguments
+/// @return A vector of `cudaq::Result`'s encapsulating the execution results.
+/// The number of elements is equal to the number of shots.
 template <class KernelTy, class... Args>
 std::vector<
     Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
@@ -138,6 +158,16 @@ run(std::size_t shots, KernelTy &&f, Args &&...args) {
   return results;
 }
 
+/// @brief Run a kernel multiple times with noise, returning a collection of
+/// results or any failures
+/// @tparam KernelTy KernelTy Quantum kernel type
+/// @tparam ...Args Quantum kernel argument types
+/// @param shots Number of shots to run
+/// @param noise_model Noise model to use for noisy simulation
+/// @param f Quantum kernel
+/// @param ...args Kernel arguments
+/// @return A vector of `cudaq::Result`'s encapsulating the execution results.
+/// The number of elements is equal to the number of shots.
 template <class KernelTy, class... Args>
 std::vector<
     Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
@@ -163,9 +193,20 @@ run(std::size_t shots, cudaq::noise_model &noise_model, KernelTy &&f,
   return results;
 }
 
-template<class T>
+template <class T>
 using async_run_result = std::future<std::vector<Result<T>>>;
 
+/// @brief Launch a run of a kernel for multiple times on a specific
+/// QPU, returning a handle to a collection of results or any failures
+/// @tparam KernelTy KernelTy Quantum kernel type
+/// @tparam ...Args Quantum kernel argument types
+/// @param qpu_id QPU to launch
+/// @param shots Number of shots to run
+/// @param f Quantum kernel
+/// @param ...args Kernel arguments
+/// @return A handle (`std::future`) to a vector of `cudaq::Result`'s
+/// encapsulating the execution results. The number of elements is equal to the
+/// number of shots.
 template <class KernelTy, class... Args>
 async_run_result<
     std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>
@@ -201,6 +242,18 @@ run_async(std::size_t qpu_id, std::size_t shots, KernelTy &&f, Args &&...args) {
   return fut;
 }
 
+/// @brief Launch a run of a kernel for multiple times with noise on a specific
+/// QPU, returning a handle to a collection of results or any failures
+/// @tparam KernelTy KernelTy Quantum kernel type
+/// @tparam ...Args Quantum kernel argument types
+/// @param qpu_id QPU to launch
+/// @param shots Number of shots to run
+/// @param noise_model Noise model to use for noisy simulation
+/// @param f Quantum kernel
+/// @param ...args Kernel arguments
+/// @return A handle (`std::future`) to a vector of `cudaq::Result`'s
+/// encapsulating the execution results. The number of elements is equal to the
+/// number of shots.
 template <class KernelTy, class... Args>
 async_run_result<
     std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>
