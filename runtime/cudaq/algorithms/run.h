@@ -108,7 +108,7 @@ public:
   fromSerializable(const SerializeRunResult<T> &serializedData) {
     if (serializedData.hasValue)
       return Result<T>(serializedData.value);
-    return Result<T>(std::exception(serializedData.errorMessage));
+    return Result<T>(std::runtime_error(serializedData.errorMessage.data()));
   }
 
 private:
@@ -150,6 +150,42 @@ private:
 };
 
 namespace __internal {
+template <class KernelTy, class... Args>
+std::vector<
+    Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+remote_run(cudaq::quantum_platform &platform, std::size_t shots, KernelTy &&f,
+           Args &&...args) {
+  ExecutionContext ctx("run", shots);
+  ctx.kernelName = cudaq::getKernelName(f);
+  platform.set_exec_ctx(&ctx);
+  auto serializedArgsBuffer = serializeArgs(args...);
+  platform.launchKernel(ctx.kernelName, nullptr,
+                        (void *)serializedArgsBuffer.data(),
+                        serializedArgsBuffer.size(), 0);
+  platform.reset_exec_ctx();
+  if (ctx.invocationResultBuffer.empty())
+    return {};
+
+  std::vector<SerializeRunResult<
+      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+      results;
+  SerializeArgs<decltype(results)> serializer;
+  SerializeInputBuffer buf(ctx.invocationResultBuffer.data(),
+                           ctx.invocationResultBuffer.size());
+  serializer.deserialize(buf, results);
+
+  std::vector<Result<
+      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+      resultVector;
+
+  for (const auto &runResult : results)
+    resultVector.emplace_back(
+        Result<std::invoke_result_t<std::decay_t<KernelTy>,
+                                    std::decay_t<Args>...>>::
+            fromSerializable(runResult));
+  return resultVector;
+}
+
 // Helper function to execute the run loop.
 // Make this a lambda-like function class so that it can be used with
 // std::apply.
@@ -160,7 +196,12 @@ struct executeRun {
   operator()(std::size_t shots, KernelTy &&f, Args &&...args) {
     using resultTy = Result<
         std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
-
+    auto &platform = cudaq::get_platform();
+    if (platform.get_remote_capabilities().samplingRunExec &&
+        !cudaq::get_quake_by_name(cudaq::getKernelName(f), false).empty()) {
+      printf("Remote sampling run execution is supported\n");
+      return remote_run(platform, shots, f, args...);
+    }
     std::vector<resultTy> results;
     results.reserve(shots);
     for (std::size_t i = 0; i < shots; ++i) {

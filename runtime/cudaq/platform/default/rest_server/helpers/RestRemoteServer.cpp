@@ -441,6 +441,11 @@ public:
                          });
         io_context.result = counts;
         platform.set_exec_ctx(&io_context);
+      } else if (io_context.name == "run" || io_context.name == "altLaunch") {
+        platform.reset_exec_ctx();
+        invokeMlirKernel(io_context, m_mlirContext, ir, requestInfo.passes,
+                         std::string(kernelName), io_context.shots);
+        platform.set_exec_ctx(&io_context);
       } else {
         invokeMlirKernel(io_context, m_mlirContext, ir, requestInfo.passes,
                          std::string(kernelName));
@@ -542,6 +547,51 @@ protected:
     return uniqueJit;
   }
 
+  template <typename ReturnTy>
+  void runMlirKernel(cudaq::ExecutionContext &io_context,
+                     ExecutionEngine &engine, const std::string &entryPointFunc,
+                     std::size_t numShots) {
+    using RunResultTy = cudaq::SerializeRunResult<ReturnTy>;
+    std::vector<RunResultTy> resultVec;
+    simulationStart = std::chrono::high_resolution_clock::now();
+    for (std::size_t i = 0; i < numShots; ++i) {
+      llvm::SmallVector<void *> returnArg;
+      ReturnTy returnVal{};
+      returnArg.emplace_back(&returnVal);
+      try {
+        RunResultTy result;
+        llvm::Error error = engine.invokePacked(entryPointFunc, returnArg);
+        if (error) {
+          const std::string errMsg = "JIT invocation failed";
+          result.errorMessage = std::vector<char>(errMsg.begin(), errMsg.end());
+        } else {
+          result.hasValue = true;
+          result.value = returnVal;
+        }
+        resultVec.emplace_back(std::move(result));
+      } catch (const std::exception &e) {
+        RunResultTy result;
+        const std::string errMsg = std::string("Exception: ") + e.what();
+        result.errorMessage = std::vector<char>(errMsg.begin(), errMsg.end());
+        resultVec.emplace_back(std::move(result));
+      }
+    }
+    if (io_context.name == "run") {
+      io_context.invocationResultBuffer = cudaq::serializeArgs(resultVec);
+    } else if (io_context.name == "altLaunch") {
+      assert(numShots == 1);
+      const auto &result = resultVec[0];
+      if (!result.hasValue)
+        throw std::runtime_error("JIT invocation failed");
+      io_context.invocationResultBuffer.resize(sizeof(ReturnTy));
+      std::memcpy(io_context.invocationResultBuffer.data(), &result.value,
+                  sizeof(ReturnTy));
+    } else {
+      throw std::runtime_error("Invalid execution context name");
+    }
+    return;
+  }
+
   void
   invokeMlirKernel(cudaq::ExecutionContext &io_context,
                    std::unique_ptr<MLIRContext> &contextPtr,
@@ -559,54 +609,55 @@ protected:
     llvm::SmallVector<void *> returnArg;
     const std::string entryPointFunc =
         std::string(cudaq::runtime::cudaqGenPrefixName) + entryPointFn;
-    if (auto funcOp = module->lookupSymbol<LLVM::LLVMFuncOp>(entryPointFunc)) {
-      auto funcTy = funcOp.getFunctionType();
-      auto returnTy = funcTy.getReturnType();
-      // These are the returned types that we support.
-      if (returnTy.isF32()) {
-        io_context.invocationResultBuffer.resize(sizeof(float));
-        returnArg.push_back(io_context.invocationResultBuffer.data());
-      } else if (returnTy.isF64()) {
-        io_context.invocationResultBuffer.resize(sizeof(double));
-        returnArg.push_back(io_context.invocationResultBuffer.data());
-      } else if (returnTy.isInteger(1)) {
-        static_assert(sizeof(bool) == sizeof(char),
-                      "Incompatible boolean data type. CUDA-Q kernels expect "
-                      "sizeof(bool) == sizeof(char).");
-        io_context.invocationResultBuffer.resize(sizeof(bool));
-        returnArg.push_back(io_context.invocationResultBuffer.data());
-      } else if (returnTy.isIntOrIndex()) {
-        io_context.invocationResultBuffer.resize(
-            (returnTy.getIntOrFloatBitWidth() + 7) / 8);
-        returnArg.push_back(io_context.invocationResultBuffer.data());
+    if (io_context.name == "run" || io_context.name == "altLaunch") {
+      if (auto funcOp =
+              module->lookupSymbol<LLVM::LLVMFuncOp>(entryPointFunc)) {
+        auto funcTy = funcOp.getFunctionType();
+        auto returnTy = funcTy.getReturnType();
+        // These are the returned types that we support.
+        if (returnTy.isF32()) {
+          runMlirKernel<float>(io_context, *engine, entryPointFunc, numTimes);
+        } else if (returnTy.isF64()) {
+          runMlirKernel<double>(io_context, *engine, entryPointFunc, numTimes);
+        } else if (returnTy.isInteger(1)) {
+          static_assert(sizeof(bool) == sizeof(char),
+                        "Incompatible boolean data type. CUDA-Q kernels expect "
+                        "sizeof(bool) == sizeof(char).");
+          runMlirKernel<bool>(io_context, *engine, entryPointFunc, numTimes);
+        } else if (returnTy.isIntOrIndex()) {
+          if (returnTy.isInteger(8)) {
+            runMlirKernel<uint8_t>(io_context, *engine, entryPointFunc,
+                                   numTimes);
+          } else if (returnTy.isInteger(16)) {
+            runMlirKernel<uint16_t>(io_context, *engine, entryPointFunc,
+                                    numTimes);
+          } else if (returnTy.isInteger(32)) {
+            runMlirKernel<uint32_t>(io_context, *engine, entryPointFunc,
+                                    numTimes);
+          }
+        } else if (returnTy.isInteger(64)) {
+          runMlirKernel<uint64_t>(io_context, *engine, entryPointFunc,
+                                  numTimes);
+        } else {
+          throw std::runtime_error("Unsupported return type");
+        }
       }
+      return;
     }
 
-    // Note: currently, we only return data from kernel on single-shot
-    // execution. Once we enable arbitrary sample return type, we can run this
-    // in a loop and return a vector of return type.
-    if (numTimes == 1 && !returnArg.empty()) {
-      simulationStart = std::chrono::high_resolution_clock::now();
-      llvm::Error error = engine->invokePacked(entryPointFunc, returnArg);
-      if (error)
-        throw std::runtime_error("JIT invocation failed");
-      if (postExecCallback)
-        postExecCallback(0);
-    } else {
-      auto fnPtr =
-          getValueOrThrow(engine->lookup(entryPointFunc),
-                          "Failed to look up entry-point function symbol");
-      if (!fnPtr)
-        throw std::runtime_error("Failed to get entry function");
+    auto fnPtr =
+        getValueOrThrow(engine->lookup(entryPointFunc),
+                        "Failed to look up entry-point function symbol");
+    if (!fnPtr)
+      throw std::runtime_error("Failed to get entry function");
 
-      auto fn = reinterpret_cast<void (*)()>(fnPtr);
-      simulationStart = std::chrono::high_resolution_clock::now();
-      for (std::size_t i = 0; i < numTimes; ++i) {
-        // Invoke the kernel
-        fn();
-        if (postExecCallback)
-          postExecCallback(i);
-      }
+    auto fn = reinterpret_cast<void (*)()>(fnPtr);
+    simulationStart = std::chrono::high_resolution_clock::now();
+    for (std::size_t i = 0; i < numTimes; ++i) {
+      // Invoke the kernel
+      fn();
+      if (postExecCallback)
+        postExecCallback(i);
     }
   }
 

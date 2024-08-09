@@ -898,6 +898,9 @@ public:
         (funcEnv.majorVersion >= 1 && funcEnv.minorVersion >= 1);
     capabilities.vqe = funcEnv.majorVersion > 1 ||
                        (funcEnv.majorVersion >= 1 && funcEnv.minorVersion >= 1);
+    capabilities.samplingRunExec =
+        funcEnv.majorVersion > 1 ||
+        (funcEnv.majorVersion >= 1 && funcEnv.minorVersion >= 1);
     return capabilities;
   }
 

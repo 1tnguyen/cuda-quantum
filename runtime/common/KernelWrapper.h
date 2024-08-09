@@ -413,7 +413,7 @@ public:
     std::size_t size =
         SerializeArgs<uint64_t>::size(static_cast<uint64_t>(vec.size()));
     for (const auto &el : vec) {
-      size += SerializeArgs<std::vector<T>>::size(el);
+      size += SerializeArgs<SerializeRunResult<T>>::size(el);
     }
     return size;
   }
