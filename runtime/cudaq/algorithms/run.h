@@ -39,8 +39,8 @@ private:
   /// Union of result or error.
   // For efficiency, we use union, i.e., only one extra boolean is required.
   union {
-    std::aligned_union_t<1, T> alignedResultStorage;
-    std::aligned_union_t<1, std::string> alignedErrorStorage;
+    alignas(T) std::byte alignedResultStorage[sizeof(T)];
+    alignas(std::string) std::byte alignedErrorStorage[sizeof(std::string)];
   };
   bool hasError = true;
   using ErrorTy = std::string;
