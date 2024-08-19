@@ -34,7 +34,7 @@ namespace cudaq {
 /// errors when a certain dynamical code path being invoked. Hence, we support
 /// error propagation as part of the return type wrapper.
 template <typename T>
-class Result {
+class RunResult {
 private:
   /// Union of result or error.
   // For efficiency, we use union, i.e., only one extra boolean is required.
@@ -49,9 +49,9 @@ public:
   /// @brief Construct a valid result
   /// @tparam OtherT The actual type of input value (convertible to the expected
   /// return type)
-  /// @param val Result value to be stored
+  /// @param val RunResult value to be stored
   template <typename OtherT>
-  Result(OtherT &&val,
+  RunResult(OtherT &&val,
          std::enable_if_t<std::is_convertible_v<OtherT, T>> * = nullptr)
       : hasError(false) {
     new (getStorage()) T(std::forward<OtherT>(val));
@@ -59,21 +59,21 @@ public:
 
   /// @brief Construct an error result
   /// @param e The exception to be captured
-  Result(const std::exception &e) : hasError(true) {
+  RunResult(const std::exception &e) : hasError(true) {
     new (getErrorStorage()) std::string(e.what());
   }
 
   /// @brief Move constructor
-  Result(Result &&Other) { moveConstruct(std::move(Other)); }
+  RunResult(RunResult &&Other) { moveConstruct(std::move(Other)); }
 
   /// @brief Move assignment operator
-  Result &operator=(Result &&Other) {
+  RunResult &operator=(RunResult &&Other) {
     moveAssign(std::move(Other));
     return *this;
   }
 
   /// @brief Destructor
-  ~Result() {
+  ~RunResult() {
     if (hasError)
       getErrorStorage()->~ErrorTy();
     else
@@ -84,7 +84,7 @@ public:
   bool isOk() const { return !hasError; }
 
   /// @brief Get the result value
-  /// @return  Result value if valid. Throw otherwise.
+  /// @return  RunResult value if valid. Throw otherwise.
   const T &get() const { return *getStorage(); }
 
   /// @brief Conversion to the result type.
@@ -104,16 +104,16 @@ public:
     return result;
   }
 
-  static Result<T>
+  static RunResult<T>
   fromSerializable(const SerializeRunResult<T> &serializedData) {
     if (serializedData.hasValue)
-      return Result<T>(serializedData.value);
-    return Result<T>(std::runtime_error(serializedData.errorMessage.data()));
+      return RunResult<T>(serializedData.value);
+    return RunResult<T>(std::runtime_error(serializedData.errorMessage.data()));
   }
 
 private:
   template <class OtherT>
-  void moveConstruct(Result<OtherT> &&Other) {
+  void moveConstruct(RunResult<OtherT> &&Other) {
     hasError = Other.hasError;
     if (!hasError)
       new (getStorage()) T(std::move(*Other.getStorage()));
@@ -122,11 +122,11 @@ private:
   }
 
   template <class OtherT>
-  void moveAssign(Result<OtherT> &&Other) {
+  void moveAssign(RunResult<OtherT> &&Other) {
     if (this == &Other)
       return;
-    this->~Result();
-    new (this) Result(std::move(Other));
+    this->~RunResult();
+    new (this) RunResult(std::move(Other));
   }
 
   T *getStorage() {
@@ -152,7 +152,7 @@ private:
 namespace __internal {
 template <class KernelTy, class... Args>
 std::vector<
-    Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+    RunResult<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
 remote_run(cudaq::quantum_platform &platform, std::size_t shots, KernelTy &&f,
            Args &&...args) {
   ExecutionContext ctx("run", shots);
@@ -174,13 +174,13 @@ remote_run(cudaq::quantum_platform &platform, std::size_t shots, KernelTy &&f,
                            ctx.invocationResultBuffer.size());
   serializer.deserialize(buf, results);
 
-  std::vector<Result<
+  std::vector<RunResult<
       std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
       resultVector;
 
   for (const auto &runResult : results)
     resultVector.emplace_back(
-        Result<std::invoke_result_t<std::decay_t<KernelTy>,
+        RunResult<std::invoke_result_t<std::decay_t<KernelTy>,
                                     std::decay_t<Args>...>>::
             fromSerializable(runResult));
   return resultVector;
@@ -191,15 +191,14 @@ remote_run(cudaq::quantum_platform &platform, std::size_t shots, KernelTy &&f,
 // std::apply.
 struct executeRun {
   template <class KernelTy, class... Args>
-  std::vector<Result<
+  std::vector<RunResult<
       std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
   operator()(std::size_t shots, KernelTy &&f, Args &&...args) {
-    using resultTy = Result<
+    using resultTy = RunResult<
         std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
     auto &platform = cudaq::get_platform();
     if (platform.get_remote_capabilities().samplingRunExec &&
         !cudaq::get_quake_by_name(cudaq::getKernelName(f), false).empty()) {
-      printf("Remote sampling run execution is supported\n");
       return remote_run(platform, shots, f, args...);
     }
     std::vector<resultTy> results;
@@ -223,11 +222,11 @@ struct executeRun {
 /// @param shots Number of shots to run
 /// @param f Quantum kernel
 /// @param ...args Kernel arguments
-/// @return A vector of `cudaq::Result`'s encapsulating the execution results.
+/// @return A vector of `cudaq::RunResult`'s encapsulating the execution results.
 /// The number of elements is equal to the number of shots.
 template <class KernelTy, class... Args>
 std::vector<
-    Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+    RunResult<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
 run(std::size_t shots, KernelTy &&f, Args &&...args) {
   if (shots < 1)
     throw std::invalid_argument("The number of shots must be greater than 0.");
@@ -243,11 +242,11 @@ run(std::size_t shots, KernelTy &&f, Args &&...args) {
 /// @param noise_model Noise model to use for noisy simulation
 /// @param f Quantum kernel
 /// @param ...args Kernel arguments
-/// @return A vector of `cudaq::Result`'s encapsulating the execution results.
+/// @return A vector of `cudaq::RunResult`'s encapsulating the execution results.
 /// The number of elements is equal to the number of shots.
 template <class KernelTy, class... Args>
 std::vector<
-    Result<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+    RunResult<std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
 run(std::size_t shots, cudaq::noise_model &noise_model, KernelTy &&f,
     Args &&...args) {
   if (shots < 1)
@@ -261,7 +260,7 @@ run(std::size_t shots, cudaq::noise_model &noise_model, KernelTy &&f,
 }
 
 template <class T>
-using async_run_result = std::future<std::vector<Result<T>>>;
+using async_run_result = std::future<std::vector<RunResult<T>>>;
 
 /// @brief Launch a run of a kernel for multiple times on a specific
 /// QPU, returning a handle to a collection of results or any failures
@@ -271,7 +270,7 @@ using async_run_result = std::future<std::vector<Result<T>>>;
 /// @param shots Number of shots to run
 /// @param f Quantum kernel
 /// @param ...args Kernel arguments
-/// @return A handle (`std::future`) to a vector of `cudaq::Result`'s
+/// @return A handle (`std::future`) to a vector of `cudaq::RunResult`'s
 /// encapsulating the execution results. The number of elements is equal to the
 /// number of shots.
 template <class KernelTy, class... Args>
@@ -284,7 +283,7 @@ run_async(std::size_t qpu_id, std::size_t shots, KernelTy &&f, Args &&...args) {
   if (qpu_id >= platform.num_qpus())
     throw std::invalid_argument(
         "Provided qpu_id is invalid (must be <= to platform.num_qpus()).");
-  using resultTy = Result<
+  using resultTy = RunResult<
       std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
   std::promise<std::vector<resultTy>> promise;
   auto fut = promise.get_future();
@@ -311,7 +310,7 @@ run_async(std::size_t qpu_id, std::size_t shots, KernelTy &&f, Args &&...args) {
 /// @param noise_model Noise model to use for noisy simulation
 /// @param f Quantum kernel
 /// @param ...args Kernel arguments
-/// @return A handle (`std::future`) to a vector of `cudaq::Result`'s
+/// @return A handle (`std::future`) to a vector of `cudaq::RunResult`'s
 /// encapsulating the execution results. The number of elements is equal to the
 /// number of shots.
 template <class KernelTy, class... Args>
@@ -319,7 +318,7 @@ async_run_result<
     std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>
 run_async(std::size_t qpu_id, std::size_t shots,
           cudaq::noise_model &noise_model, KernelTy &&f, Args &&...args) {
-  using resultTy = Result<
+  using resultTy = RunResult<
       std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>;
   if (shots < 1)
     throw std::invalid_argument("The number of shots must be greater than 0.");

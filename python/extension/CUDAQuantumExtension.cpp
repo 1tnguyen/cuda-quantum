@@ -16,6 +16,7 @@
 #include "runtime/common/py_SampleResult.h"
 #include "runtime/cudaq/algorithms/py_draw.h"
 #include "runtime/cudaq/algorithms/py_observe_async.h"
+#include "runtime/cudaq/algorithms/py_run_async.h"
 #include "runtime/cudaq/algorithms/py_optimizer.h"
 #include "runtime/cudaq/algorithms/py_sample_async.h"
 #include "runtime/cudaq/algorithms/py_state.h"
@@ -100,6 +101,7 @@ PYBIND11_MODULE(_quakeDialects, m) {
   cudaq::bindPyTranslate(cudaqRuntime);
   cudaq::bindSampleAsync(cudaqRuntime);
   cudaq::bindObserveAsync(cudaqRuntime);
+  cudaq::bindRunAsync(cudaqRuntime);
   cudaq::bindVQE(cudaqRuntime);
   cudaq::bindAltLaunchKernel(cudaqRuntime);
   cudaq::bindTestUtils(cudaqRuntime, *holder.get());

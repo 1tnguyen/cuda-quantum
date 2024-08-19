@@ -45,6 +45,7 @@ from .kernel.kernel_builder import make_kernel, QuakeValue, PyKernel
 from .kernel.ast_bridge import globalAstRegistry, globalKernelRegistry, globalRegisteredOperations
 from .runtime.sample import sample
 from .runtime.observe import observe
+from .runtime.run import run
 from .runtime.state import to_cupy
 from .kernel.register_op import register_operation
 
@@ -110,6 +111,7 @@ BitFlipChannel = cudaq_runtime.BitFlipChannel
 # Functions
 sample_async = cudaq_runtime.sample_async
 observe_async = cudaq_runtime.observe_async
+run_async = cudaq_runtime.run_async
 get_state = cudaq_runtime.get_state
 get_state_async = cudaq_runtime.get_state_async
 SampleResult = cudaq_runtime.SampleResult
@@ -117,6 +119,8 @@ ObserveResult = cudaq_runtime.ObserveResult
 AsyncSampleResult = cudaq_runtime.AsyncSampleResult
 AsyncObserveResult = cudaq_runtime.AsyncObserveResult
 AsyncStateResult = cudaq_runtime.AsyncStateResult
+RunResult = cudaq_runtime.RunResult
+AsyncRunResult = cudaq_runtime.AsyncRunResult
 vqe = cudaq_runtime.vqe
 draw = cudaq_runtime.draw
 translate = cudaq_runtime.translate
