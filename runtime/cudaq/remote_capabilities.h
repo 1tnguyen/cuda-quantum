@@ -21,6 +21,9 @@ struct RemoteCapabilities {
   /// True if the remote can perform an entire VQE operation without and
   /// back-and-forth client/server communications.
   bool vqe = false;
+  /// True if execution is performed on a remote simulator - i.e. IR generation
+  /// (including synthesis) and execution are performed in different processes.
+  bool isRemoteSimulator = false;
   /// True if the remote can perform an entire sampling run loop for kernels
   /// that return values without and
   /// back-and-forth client/server communications.
@@ -28,7 +31,7 @@ struct RemoteCapabilities {
   /// Constructor that broadcasts \p initValue to all fields.
   RemoteCapabilities(bool initValue)
       : stateOverlap(initValue), serializedCodeExec(initValue), vqe(initValue),
-        samplingRunExec(initValue) {}
+        isRemoteSimulator(initValue), samplingRunExec(initValue) {}
 };
 
 } // namespace cudaq
