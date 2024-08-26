@@ -18,7 +18,7 @@
 // quantum instruction invocation.
 
 struct rwpe {
-  double operator()(const int n_iter, double mu, double sigma) __qpu__ {
+  double operator()(int64_t n_iter, double mu, double sigma) __qpu__ {
     int iteration = 0;
 
     // Allocate the qubits
@@ -54,9 +54,9 @@ struct rwpe {
 };
 
 int main() {
-  int n_iterations = 24;
+  int64_t n_iterations = 20;
   double mu = 0.7951, sigma = 0.6065;
-  auto phases = cudaq::run(100, rwpe{}, n_iterations, mu, sigma);
+  auto phases = cudaq::run(4, rwpe{}, n_iterations, mu, sigma);
   for (const auto& phase: phases) {
     if (phase.isOk())
       printf("Phase = %lf\n", phase.get());

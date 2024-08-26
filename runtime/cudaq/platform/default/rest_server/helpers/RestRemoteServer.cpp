@@ -9,6 +9,7 @@
 #include "common/JIT.h"
 #include "common/JsonConvert.h"
 #include "common/Logger.h"
+#include "common/OutputRecording.h"
 #include "common/PluginUtils.h"
 #include "common/RemoteKernelExecutor.h"
 #include "common/RuntimeMLIR.h"
@@ -51,6 +52,7 @@
 #include <filesystem>
 #include <fstream>
 #include <streambuf>
+#include <iostream>
 
 extern "C" {
 void __nvqir__setCircuitSimulator(nvqir::CircuitSimulator *);
@@ -553,6 +555,7 @@ protected:
                      std::size_t numShots) {
     using RunResultTy = cudaq::SerializeRunResult<ReturnTy>;
     std::vector<RunResultTy> resultVec;
+    std::vector<ReturnTy> results;
     simulationStart = std::chrono::high_resolution_clock::now();
     for (std::size_t i = 0; i < numShots; ++i) {
       llvm::SmallVector<void *> returnArg;
@@ -568,6 +571,7 @@ protected:
           result.hasValue = true;
           result.value = returnVal;
         }
+        results.emplace_back(returnVal);
         resultVec.emplace_back(std::move(result));
       } catch (const std::exception &e) {
         RunResultTy result;
@@ -577,7 +581,11 @@ protected:
       }
     }
     if (io_context.name == "run") {
-      io_context.invocationResultBuffer = cudaq::serializeArgs(resultVec);
+      // io_context.invocationResultBuffer = cudaq::serializeArgs(resultVec);
+      cudaq::qir::OutputRecorder recorder;
+      recorder.record(results);
+      const auto outputStream = recorder.getOutput() ;
+      io_context.invocationResultBuffer = std::vector<char>(outputStream.begin(), outputStream.end());
     } else if (io_context.name == "altLaunch") {
       assert(numShots == 1);
       const auto &result = resultVec[0];
