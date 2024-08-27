@@ -165,25 +165,49 @@ remote_run(cudaq::quantum_platform &platform, std::size_t shots, KernelTy &&f,
   platform.reset_exec_ctx();
   if (ctx.invocationResultBuffer.empty())
     return {};
+  const std::string stringResult = std::string(
+      ctx.invocationResultBuffer.data(), ctx.invocationResultBuffer.size());
+  std::istringstream ss(stringResult);
+  const auto lines = cudaq::split(stringResult, '\n');
+  if (!lines.empty()) {
+    const auto arrayOutput = cudaq::split(lines[0], '\t');
+    if (arrayOutput.size() < 3 || arrayOutput[1] != "ARRAY")
+      throw std::runtime_error("Invalid output format: " + stringResult);
+    const auto resultCount = std::stoi(arrayOutput[2]);
+    std::vector<RunResult<
+        std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+        resultVector;
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+      const auto valueOutput = cudaq::split(lines[i], '\t');
+      if (valueOutput.size() < 3)
+        throw std::runtime_error("Invalid output format: " + stringResult);
+      const auto val = std::strtod(valueOutput[2].c_str(), nullptr);
+      resultVector.emplace_back(
+          RunResult<std::invoke_result_t<std::decay_t<KernelTy>,
+                                         std::decay_t<Args>...>>(val));
+    }
+    return resultVector;
+  }
 
-  std::vector<SerializeRunResult<
-      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
-      results;
-  SerializeArgs<decltype(results)> serializer;
-  SerializeInputBuffer buf(ctx.invocationResultBuffer.data(),
-                           ctx.invocationResultBuffer.size());
-  serializer.deserialize(buf, results);
+  // std::vector<SerializeRunResult<
+  //     std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+  //     results;
+  // SerializeArgs<decltype(results)> serializer;
+  // SerializeInputBuffer buf(ctx.invocationResultBuffer.data(),
+  //                          ctx.invocationResultBuffer.size());
+  // serializer.deserialize(buf, results);
 
-  std::vector<RunResult<
-      std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
-      resultVector;
+  // std::vector<RunResult<
+  //     std::invoke_result_t<std::decay_t<KernelTy>, std::decay_t<Args>...>>>
+  //     resultVector;
 
-  for (const auto &runResult : results)
-    resultVector.emplace_back(
-        RunResult<std::invoke_result_t<std::decay_t<KernelTy>,
-                                    std::decay_t<Args>...>>::
-            fromSerializable(runResult));
-  return resultVector;
+  // for (const auto &runResult : results)
+  //   resultVector.emplace_back(
+  //       RunResult<std::invoke_result_t<std::decay_t<KernelTy>,
+  //                                   std::decay_t<Args>...>>::
+  //           fromSerializable(runResult));
+  // return resultVector;
+  return {};
 }
 
 // Helper function to execute the run loop.
