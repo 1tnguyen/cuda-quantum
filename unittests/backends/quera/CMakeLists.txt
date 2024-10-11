@@ -6,14 +6,16 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-find_package(Python COMPONENTS Interpreter)
-if (OPENSSL_FOUND AND CUDAQ_ENABLE_PYTHON AND CUDAQ_TEST_MOCK_SERVERS)
-  add_subdirectory(anyon)
-  add_subdirectory(oqc)
-  add_subdirectory(quantinuum)
-  add_subdirectory(ionq)
-  add_subdirectory(iqm)
-endif()
-add_subdirectory(qpp_observe)
-add_subdirectory(quera)
+add_executable(test_quera JsonPayloadTester.cpp)
 
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+  target_link_options(test_quera PRIVATE -Wl,--no-as-needed)
+endif()
+target_include_directories(test_quera PRIVATE ../..)
+target_link_libraries(test_quera PRIVATE 
+    fmt::fmt-header-only 
+    cudaq-common 
+    gtest_main
+)
+
+gtest_discover_tests(test_quera)
