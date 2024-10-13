@@ -18,11 +18,13 @@ using json = nlohmann::json;
 #define TO_JSON_HELPER(field) j[#field] = p.field
 #define FROM_JSON_HELPER(field) j[#field].get_to(p.field)
 
+/// @brief Convert a double to a JSON string.
 inline std::string doubleAsJsonString(double d) {
   json j = d;
   return j.dump();
 }
 
+/// @brief Convert a vector of strings to a vector of doubles.
 inline std::vector<double>
 doubleFromStr(const std::vector<std::string> &stringList) {
   std::vector<double> result;
@@ -33,6 +35,7 @@ doubleFromStr(const std::vector<std::string> &stringList) {
   return result;
 }
 
+/// @brief Convert a vector of doubles to a vector of strings.
 inline std::vector<std::string>
 strFromDouble(const std::vector<double> &doubleList) {
   std::vector<std::string> result;
@@ -43,11 +46,14 @@ strFromDouble(const std::vector<double> &doubleList) {
   return result;
 }
 
+/// @brief Represents the arrangement of atoms in terms of coordinates and their
+/// filling (filled or vacant).
 struct AtomArrangement {
   std::vector<std::vector<double>> sites;
   std::vector<int> filling;
   friend void to_json(json &j, const AtomArrangement &p) {
     TO_JSON_HELPER(filling);
+    // Note: the schema expects floating point numbers as strings
     std::vector<std::vector<std::string>> floatAsStrings;
     for (const auto &site : p.sites)
       floatAsStrings.push_back(strFromDouble(site));
@@ -113,6 +119,9 @@ struct TimeSeries {
   }
 };
 
+/// @brief Represents the pattern of a control field.
+// This can be a pattern name, e.g., 'uniform', or a vector of scaling
+// coefficients (value between 0.0 and 1.0), one value for each atom site.
 struct FieldPattern {
   FieldPattern() : patternStr("uniform") {}
   FieldPattern(const std::string &patternName) : patternStr(patternName) {}
