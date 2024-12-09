@@ -12,6 +12,7 @@ from typing import Sequence
 from cupy.cuda.memory import MemoryPointer, UnownedMemory
 from ..mlir._mlir_libs._quakeDialects import cudaq_runtime
 
+from mpi4py import MPI
 
 # Wrap state data (on device memory) as a `cupy` array.
 # Note: the `cupy` array only holds a reference to the GPU memory buffer, no copy.
@@ -35,7 +36,24 @@ class CuDensityMatState(object):
 
     def __init__(self, data):
         if self.__ctx is None:
-            self.__ctx = WorkStream()
+            NUM_DEVICES = cupy.cuda.runtime.getDeviceCount()
+            rank = MPI.COMM_WORLD.Get_rank()
+            dev = cupy.cuda.Device(rank % NUM_DEVICES)
+            dev.use()
+            props = cupy.cuda.runtime.getDeviceProperties(dev.id)
+            print("===== device info ======")
+            print("GPU-local-id:", dev.id)
+            print("GPU-name:", props["name"].decode())
+            print("GPU-clock:", props["clockRate"])
+            print("GPU-memoryClock:", props["memoryClockRate"])
+            print("GPU-nSM:", props["multiProcessorCount"])
+            print("GPU-major:", props["major"])
+            print("GPU-minor:", props["minor"])
+            print("========================")
+                        
+            self.__ctx = WorkStream(device_id=dev.id)
+            self.__ctx.set_communicator(comm=MPI.COMM_WORLD.Dup(), provider="MPI")
+
 
         self.hilbert_space_dims = None
         if isinstance(data, DenseMixedState) or isinstance(
@@ -67,6 +85,8 @@ class CuDensityMatState(object):
                                                 self.hilbert_space_dims,
                                                 batch_size=1,
                                                 dtype="complex128")
+                    required_buffer_size = self.state.storage_size
+                    print("required_buffer_size =", required_buffer_size)
                     self.state.attach_storage(self.raw_data)
                 except:
                     raise ValueError(
