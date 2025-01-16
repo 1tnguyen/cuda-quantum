@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -8,6 +8,9 @@
 
 #include "CUDAQTestUtils.h"
 #include <cudaq/algorithm.h>
+
+// Rotational gates not supported in Stim.
+#ifndef CUDAQ_BACKEND_STIM
 
 struct deuteron_n3_ansatz {
   void operator()(double x0, double x1) __qpu__ {
@@ -23,7 +26,6 @@ struct deuteron_n3_ansatz {
   }
 };
 
-#ifndef CUDAQ_BACKEND_TENSORNET
 CUDAQ_TEST(ObserveResult, checkSimple) {
 
   using namespace cudaq::spin;

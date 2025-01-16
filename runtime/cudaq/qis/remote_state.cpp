@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -184,7 +184,8 @@ RemoteSimulationState::overlap(const cudaq::SimulationState &other) {
       std::make_pair(static_cast<const cudaq::SimulationState *>(this),
                      static_cast<const cudaq::SimulationState *>(&otherState));
   platform.set_exec_ctx(&context);
-  platform.launchKernel(kernelName, nullptr, nullptr, 0, 0);
+  [[maybe_unused]] auto dynamicResult =
+      platform.launchKernel(kernelName, nullptr, nullptr, 0, 0, {});
   platform.reset_exec_ctx();
   assert(context.overlapResult.has_value());
   return context.overlapResult.value();

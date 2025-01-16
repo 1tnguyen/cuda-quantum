@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -41,6 +41,12 @@ struct QuakeTypeConverter : public TypeConverter {
     addConversion([](quake::RefType ty) {
       return cudaq::cc::PointerType::get(
           cudaq::opt::getCudaqQubitSpanType(ty.getContext()));
+    });
+    addConversion([&](quake::StruqType ty) {
+      SmallVector<Type> mems;
+      for (auto m : ty.getMembers())
+        mems.push_back(convertType(m));
+      return cudaq::cc::StructType::get(ty.getContext(), mems);
     });
     addConversion([](quake::MeasureType ty) {
       return IntegerType::get(ty.getContext(), 64);

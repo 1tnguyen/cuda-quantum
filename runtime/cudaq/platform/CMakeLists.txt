@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -13,4 +13,9 @@ if (OPENSSL_FOUND)
 endif()
 if (CUDAQ_ENABLE_REST)
   add_subdirectory(mqpu)
+endif()
+
+add_subdirectory(fermioniq)
+if (AWSSDK_ROOT)
+  add_subdirectory(quera)
 endif()

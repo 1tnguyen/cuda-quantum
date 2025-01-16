@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -275,6 +275,7 @@ def test_sample_adjoint_qreg():
     print(kernel)
 
 
+# CHECK-LABEL: test_sample_adjoint_qreg
 # CHECK-LABEL:   func.func @__nvqpp__mlirgen____nvqppBuilderKernel_{{.*}}(
 # CHECK-SAME:      %[[VAL_0:.*]]: i64) attributes {"cudaq-entrypoint"} {
 # CHECK-DAG:           %[[VAL_1:.*]] = arith.constant 1 : i64

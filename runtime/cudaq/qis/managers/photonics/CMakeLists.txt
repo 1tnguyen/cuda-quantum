@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -34,4 +34,4 @@ install(EXPORT cudaq-em-photonics-targets
         NAMESPACE cudaq::
         DESTINATION lib/cmake/cudaq)
 
-add_target_config(photonics)
+add_target_config(orca-photonics)

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -55,21 +55,37 @@ state::operator()(const std::initializer_list<std::size_t> &indices,
 
 std::complex<double> state::operator[](std::size_t idx) const {
   std::size_t numQubits = internal->getNumQubits();
+  std::size_t numElements = internal->getNumElements();
+
   if (!internal->isArrayLike()) {
     // Use amplitude accessor if linear indexing is not supported, e.g., tensor
     // network state.
     std::vector<int> basisState(numQubits, 0);
-    for (std::size_t i = 0; i < numQubits; ++i) {
-      if (idx & (1ULL << i))
-        basisState[(numQubits - 1) - i] = 1;
+    // Are we dealing with qudits or qubits?
+    /// NOTE: Following check makes assumption that only qubit simulation uses
+    /// GPU(s)
+    if (!internal->isDeviceData() && std::log2(numElements) / numQubits > 1) {
+      for (std::size_t i = 0; i < numQubits; ++i) {
+        basisState[i] = 1; // TODO: This is a placeholder. We need to figure out
+                           // how to handle qudits.
+      }
+    } else {
+      for (std::size_t i = 0; i < numQubits; ++i) {
+        if (idx & (1ULL << i))
+          basisState[(numQubits - 1) - i] = 1;
+      }
     }
     return internal->getAmplitude(basisState);
   }
 
   std::size_t newIdx = 0;
-  for (std::size_t i = 0; i < numQubits; ++i)
-    if (idx & (1ULL << i))
-      newIdx |= (1ULL << ((numQubits - 1) - i));
+  if (std::log2(numElements) / numQubits > 1) {
+    newIdx = idx;
+  } else {
+    for (std::size_t i = 0; i < numQubits; ++i)
+      if (idx & (1ULL << i))
+        newIdx |= (1ULL << ((numQubits - 1) - i));
+  }
   return operator()({newIdx}, 0);
 }
 
@@ -141,5 +157,7 @@ state *__nvqpp_cudaq_state_createFromData_fp32(void *data, std::size_t size) {
   std::vector<std::complex<float>> current(d, d + size);
   return new state(state::from_data(current));
 }
+
+void __nvqpp_cudaq_state_delete(state *obj) { delete obj; }
 }
 } // namespace cudaq

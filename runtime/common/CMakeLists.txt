@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -11,6 +11,7 @@ set(LIBRARY_NAME cudaq-common)
 
 set(COMMON_EXTRA_DEPS "")
 set(COMMON_RUNTIME_SRC
+  CustomOp.cpp  
   Environment.cpp
   Executor.cpp
   Future.cpp
@@ -82,9 +83,6 @@ endif()
 ## here called cudaq-mlir-runtime that cudaq-builder and cudaq-rest-qpu 
 ## can link to and get MLIR/LLVM things uniformly
 
-get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
-get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
-
 add_library(cudaq-mlir-runtime
   SHARED
     ArgumentConversion.cpp
@@ -97,7 +95,6 @@ set_property(GLOBAL APPEND PROPERTY CUDAQ_RUNTIME_LIBS cudaq-mlir-runtime)
 
 # Note: JIT.cpp contains throw statements. Should RTTI be enabled?
 set_source_files_properties(
-    ArgumentConversion.cpp
     Environment.cpp
     JIT.cpp
     Logger.cpp
@@ -113,8 +110,6 @@ target_include_directories(cudaq-mlir-runtime
 
 target_link_libraries(cudaq-mlir-runtime 
   PUBLIC
-    ${dialect_libs}
-    ${conversion_libs}
     nvqir
     CCDialect
     QuakeDialect
@@ -133,6 +128,7 @@ target_link_libraries(cudaq-mlir-runtime
     MLIRLLVMCommonConversion
     MLIRLLVMToLLVMIRTranslation
   PRIVATE
+    cudaq
     spdlog::spdlog)
 
 install(TARGETS cudaq-mlir-runtime DESTINATION lib)

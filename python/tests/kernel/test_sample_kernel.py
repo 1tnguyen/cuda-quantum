@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -13,11 +13,6 @@ import numpy as np
 from typing import Callable, List
 
 import cudaq
-
-## [PYTHON_VERSION_FIX]
-skipIfPythonLessThan39 = pytest.mark.skipif(
-    sys.version_info < (3, 9),
-    reason="built-in collection types such as `list` not supported")
 
 
 @pytest.fixture(autouse=True)
@@ -148,7 +143,6 @@ def test_broadcast():
         assert len(c) == 2
 
 
-@skipIfPythonLessThan39
 def test_broadcastPy39Plus():
 
     @cudaq.kernel

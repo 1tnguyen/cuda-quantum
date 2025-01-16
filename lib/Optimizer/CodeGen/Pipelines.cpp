@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -37,12 +37,16 @@ void cudaq::opt::commonPipelineConvertToQIR(
   if (convertTo && convertTo->equals("qir-base"))
     pm.addNestedPass<func::FuncOp>(createDelayMeasurementsPass());
   pm.addPass(createConvertMathToFuncs());
+  pm.addPass(createSymbolDCEPass());
   pm.addPass(createConvertToQIR());
 }
 
 void cudaq::opt::addPipelineTranslateToOpenQASM(PassManager &pm) {
-  pm.addPass(createCanonicalizerPass());
-  pm.addPass(createCSEPass());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  pm.addNestedPass<func::FuncOp>(createCSEPass());
+  pm.addNestedPass<func::FuncOp>(createClassicalMemToReg());
+  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  pm.addPass(createSymbolDCEPass());
 }
 
 void cudaq::opt::addPipelineTranslateToIQMJson(PassManager &pm) {

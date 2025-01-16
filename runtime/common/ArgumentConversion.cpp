@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -7,13 +7,18 @@
  ******************************************************************************/
 
 #include "ArgumentConversion.h"
+#include "cudaq.h"
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
 #include "cudaq/Optimizer/Builder/Runtime.h"
+#include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Todo.h"
+#include "cudaq/qis/pauli_word.h"
+#include "cudaq/utils/registry.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/Parser/Parser.h"
 
 using namespace mlir;
 
@@ -73,14 +78,16 @@ static Value genConstant(OpBuilder &builder, FloatType fltTy, long double *v) {
 static Value genConstant(OpBuilder &builder, const std::string &v,
                          ModuleOp substMod) {
   auto loc = builder.getUnknownLoc();
-  cudaq::IRBuilder irBuilder(builder);
-  auto cString = irBuilder.genCStringLiteralAppendNul(loc, substMod, v);
-  auto addr = builder.create<cudaq::cc::AddressOfOp>(
-      loc, cudaq::cc::PointerType::get(cString.getType()), cString.getName());
-  auto i8PtrTy = cudaq::cc::PointerType::get(builder.getI8Type());
-  auto cast = builder.create<cudaq::cc::CastOp>(loc, i8PtrTy, addr);
+  auto *ctx = builder.getContext();
+  auto i8Ty = builder.getI8Type();
+  auto strLitTy = cudaq::cc::PointerType::get(
+      cudaq::cc::ArrayType::get(ctx, i8Ty, v.size() + 1));
+  auto strLit =
+      builder.create<cudaq::cc::CreateStringLiteralOp>(loc, strLitTy, v);
+  auto i8PtrTy = cudaq::cc::PointerType::get(i8Ty);
+  auto cast = builder.create<cudaq::cc::CastOp>(loc, i8PtrTy, strLit);
   auto size = builder.create<arith::ConstantIntOp>(loc, v.size(), 64);
-  auto chSpanTy = cudaq::cc::CharspanType::get(builder.getContext());
+  auto chSpanTy = cudaq::cc::CharspanType::get(ctx);
   return builder.create<cudaq::cc::StdvecInitOp>(loc, chSpanTy, cast, size);
 }
 
@@ -119,40 +126,25 @@ static Value genConstant(OpBuilder &builder, const cudaq::state *v,
 
     cudaq::IRBuilder irBuilder(ctx);
     auto genConArray = [&]<typename T>() -> Value {
-      std::vector<std::complex<T>> vec(size);
+      SmallVector<std::complex<T>> vec(size);
       for (std::size_t i = 0; i < size; i++) {
         vec[i] = (*v)({i}, 0);
       }
       std::string name =
           kernelName.str() + ".rodata_synth_" + std::to_string(counter++);
       irBuilder.genVectorOfConstants(loc, substMod, name, vec);
-      auto conGlobal = builder.create<cudaq::cc::AddressOfOp>(loc, ptrTy, name);
-      return builder.create<cudaq::cc::LoadOp>(loc, arrTy, conGlobal);
+      return builder.create<cudaq::cc::AddressOfOp>(loc, ptrTy, name);
     };
 
-    auto conArr = is64Bit ? genConArray.template operator()<double>()
+    auto buffer = is64Bit ? genConArray.template operator()<double>()
                           : genConArray.template operator()<float>();
-
-    auto createState = is64Bit ? cudaq::createCudaqStateFromDataFP64
-                               : cudaq::createCudaqStateFromDataFP32;
-    auto result = irBuilder.loadIntrinsic(substMod, createState);
-    assert(succeeded(result) && "loading intrinsic should never fail");
 
     auto arrSize = builder.create<arith::ConstantIntOp>(loc, size, 64);
     auto stateTy = cudaq::cc::StateType::get(ctx);
     auto statePtrTy = cudaq::cc::PointerType::get(stateTy);
-    auto i8PtrTy = cudaq::cc::PointerType::get(builder.getI8Type());
-    auto buffer = builder.create<cudaq::cc::AllocaOp>(loc, arrTy);
-    builder.create<cudaq::cc::StoreOp>(loc, conArr, buffer);
 
-    auto cast = builder.create<cudaq::cc::CastOp>(loc, i8PtrTy, buffer);
-    auto statePtr = builder
-                        .create<func::CallOp>(loc, statePtrTy, createState,
-                                              ValueRange{cast, arrSize})
-                        .getResult(0);
-
-    // TODO: Delete the new state before function exit.
-    return builder.create<cudaq::cc::CastOp>(loc, statePtrTy, statePtr);
+    return builder.create<quake::CreateStateOp>(loc, statePtrTy, buffer,
+                                                arrSize);
   }
   // The program is executed on quantum hardware, state data is not
   // available and needs to be regenerated.
@@ -199,7 +191,7 @@ Value dispatchSubtype(OpBuilder &builder, Type ty, void *p, ModuleOp substMod,
         return {};
       })
       .Case([&](cudaq::cc::CharspanType strTy) {
-        return genConstant(builder, *static_cast<const std::string *>(p),
+        return genConstant(builder, static_cast<cudaq::pauli_word *>(p)->str(),
                            substMod);
       })
       .Case([&](cudaq::cc::StdvecType ty) {
@@ -214,6 +206,21 @@ Value dispatchSubtype(OpBuilder &builder, Type ty, void *p, ModuleOp substMod,
       .Default({});
 }
 
+// Get the size of \p eleTy on the host side in bytes.
+static std::size_t getHostSideElementSize(Type eleTy,
+                                          llvm::DataLayout &layout) {
+  if (isa<cudaq::cc::StdvecType>(eleTy))
+    return sizeof(std::vector<int>);
+  if (isa<cudaq::cc::CharspanType>(eleTy)) {
+    // char span type is a std::string on host side.
+    return sizeof(std::string);
+  }
+  // Note: we want the size on the host side, but `getDataSize()` returns the
+  // size on the device side. This is ok for now since they are the same for
+  // most types and the special cases are handled above.
+  return cudaq::opt::getDataSize(layout, eleTy);
+}
+
 Value genConstant(OpBuilder &builder, cudaq::cc::StdvecType vecTy, void *p,
                   ModuleOp substMod, llvm::DataLayout &layout) {
   typedef const char *VectorType[3];
@@ -223,7 +230,8 @@ Value genConstant(OpBuilder &builder, cudaq::cc::StdvecType vecTy, void *p,
     return {};
   auto eleTy = vecTy.getElementType();
   auto elePtrTy = cudaq::cc::PointerType::get(eleTy);
-  auto eleSize = cudaq::opt::getDataSize(layout, eleTy);
+  auto eleSize = getHostSideElementSize(eleTy, layout);
+
   assert(eleSize && "element must have a size");
   auto loc = builder.getUnknownLoc();
   std::int32_t vecSize = delta / eleSize;
@@ -282,6 +290,33 @@ Value genConstant(OpBuilder &builder, cudaq::cc::ArrayType arrTy, void *p,
     cursor += eleSize;
   }
   return aggie;
+}
+
+Value genConstant(OpBuilder &builder, cudaq::cc::IndirectCallableType indCallTy,
+                  void *p, ModuleOp sourceMod, ModuleOp substMod,
+                  llvm::DataLayout &layout) {
+  auto key = cudaq::registry::__cudaq_getLinkableKernelKey(p);
+  auto *name = cudaq::registry::getLinkableKernelNameOrNull(key);
+  if (!name)
+    return {};
+  auto code = cudaq::get_quake_by_name(name, /*throwException=*/false);
+  auto *ctx = builder.getContext();
+  auto fromModule = parseSourceString<ModuleOp>(code, ctx);
+  OpBuilder cloneBuilder(ctx);
+  cloneBuilder.setInsertionPointToStart(substMod.getBody());
+  for (auto &i : *fromModule->getBody()) {
+    auto s = dyn_cast_if_present<SymbolOpInterface>(i);
+    if (!s || sourceMod.lookupSymbol(s.getNameAttr()) ||
+        substMod.lookupSymbol(s.getNameAttr()))
+      continue;
+    auto clone = cloneBuilder.clone(i);
+    cast<SymbolOpInterface>(clone).setPrivate();
+  }
+  auto loc = builder.getUnknownLoc();
+  auto func = builder.create<func::ConstantOp>(
+      loc, indCallTy.getSignature(),
+      std::string{cudaq::runtime::cudaqGenPrefixName} + name);
+  return builder.create<cudaq::cc::CastOp>(loc, indCallTy, func);
 }
 
 //===----------------------------------------------------------------------===//
@@ -361,7 +396,7 @@ void cudaq::opt::ArgumentConverter::gen(const std::vector<void *> &arguments) {
               return {};
             })
             .Case([&](cc::CharspanType strTy) {
-              return buildSubst(*static_cast<const std::string *>(argPtr),
+              return buildSubst(static_cast<cudaq::pauli_word *>(argPtr)->str(),
                                 substModule);
             })
             .Case([&](cc::PointerType ptrTy) -> cc::ArgumentSubstitutionOp {
@@ -379,6 +414,10 @@ void cudaq::opt::ArgumentConverter::gen(const std::vector<void *> &arguments) {
             })
             .Case([&](cc::ArrayType ty) {
               return buildSubst(ty, argPtr, substModule, dataLayout);
+            })
+            .Case([&](cc::IndirectCallableType ty) {
+              return buildSubst(ty, argPtr, sourceModule, substModule,
+                                dataLayout);
             })
             .Default({});
     if (subst)
@@ -406,8 +445,10 @@ void cudaq::opt::ArgumentConverter::gen_drop_front(
   if (numDrop >= arguments.size())
     return;
   std::vector<void *> partialArgs;
+  int drop = numDrop;
   for (void *arg : arguments) {
-    if (numDrop--) {
+    if (drop > 0) {
+      drop--;
       partialArgs.push_back(nullptr);
       continue;
     }

@@ -1,5 +1,5 @@
 # ============================================================================ #
-# Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                   #
+# Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                   #
 # All rights reserved.                                                         #
 #                                                                              #
 # This source code and the accompanying materials are made available under     #
@@ -96,7 +96,7 @@ def test_sdg_1_state_negate():
 
         # Place qubit in 1-state.
         x(qubit)
-        # Superpositoin.
+        # Superposition.
         h(qubit)
         # Rotate around Z by -pi/2, twice. Total rotation of -pi.
         sdg(qubit)

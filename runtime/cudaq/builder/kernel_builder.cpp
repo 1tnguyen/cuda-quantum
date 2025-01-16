@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -17,8 +17,6 @@
 #include "cudaq/Optimizer/Dialect/Quake/QuakeDialect.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Optimizer/Transforms/Passes.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Affine/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
@@ -514,16 +512,11 @@ QuakeValue qalloc(ImplicitLocOpBuilder &builder, QuakeValue &sizeOrVec) {
     auto eleTy = statePtrTy.getElementType();
     if (auto stateTy = dyn_cast<cc::StateType>(eleTy)) {
       // get the number of qubits
-      IRBuilder irBuilder(context);
-      auto mod = builder.getBlock()->getParentOp()->getParentOfType<ModuleOp>();
-      auto result = irBuilder.loadIntrinsic(mod, getNumQubitsFromCudaqState);
-      assert(succeeded(result) && "loading intrinsic should never fail");
-      auto numQubits = builder.create<func::CallOp>(
-          builder.getI64Type(), getNumQubitsFromCudaqState, ValueRange{value});
+      auto numQubits = builder.create<quake::GetNumberOfQubitsOp>(
+          builder.getI64Type(), value);
       // allocate the number of qubits we need
       auto veqTy = quake::VeqType::getUnsized(context);
-      Value qubits =
-          builder.create<quake::AllocaOp>(veqTy, numQubits.getResult(0));
+      Value qubits = builder.create<quake::AllocaOp>(veqTy, numQubits);
       // Add the initialize state op
       qubits = builder.create<quake::InitializeStateOp>(qubits.getType(),
                                                         qubits, value);
@@ -953,17 +946,18 @@ jitCode(ImplicitLocOpBuilder &builder, ExecutionEngine *jit,
     pm.addPass(createCanonicalizerPass());
     pm.addPass(cudaq::opt::createApplyOpSpecializationPass());
     pm.addNestedPass<func::FuncOp>(cudaq::opt::createClassicalMemToReg());
-    pm.addPass(createCanonicalizerPass());
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
     pm.addPass(cudaq::opt::createExpandMeasurementsPass());
-    pm.addPass(cudaq::opt::createLoopNormalize());
-    pm.addPass(cudaq::opt::createLoopUnroll());
-    pm.addPass(createCanonicalizerPass());
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createLoopNormalize());
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createLoopUnroll());
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
     pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeAddDeallocs());
     pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeAddMetadata());
     pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
     pm.addNestedPass<func::FuncOp>(createCSEPass());
-    pm.addPass(cudaq::opt::createGenerateDeviceCodeLoader(/*genAsQuake=*/true));
+    pm.addPass(cudaq::opt::createGenerateDeviceCodeLoader({.jitTime = true}));
     pm.addPass(cudaq::opt::createGenerateKernelExecution());
+    pm.addPass(createSymbolDCEPass());
     if (failed(pm.run(module)))
       throw std::runtime_error(
           "cudaq::builder failed to JIT compile the Quake representation.");

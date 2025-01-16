@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2024 NVIDIA Corporation & Affiliates.                  *
+ * Copyright (c) 2022 - 2025 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
@@ -47,8 +47,9 @@ struct VerifyNVQIRCallOpsPass
           cudaq::opt::QIRArrayQubitAllocateArrayWithStateComplex32,
           cudaq::opt::QIRArrayQubitAllocateArrayWithStateComplex64,
           cudaq::getNumQubitsFromCudaqState,
+          cudaq::createCudaqStateFromDataFP32,
           cudaq::createCudaqStateFromDataFP64,
-          cudaq::createCudaqStateFromDataFP32};
+          cudaq::deleteCudaqState};
       // It must be either NVQIR extension functions or in the allowed list.
       return std::find(NVQIR_FUNCS.begin(), NVQIR_FUNCS.end(), functionName) !=
                  NVQIR_FUNCS.end() ||
