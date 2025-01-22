@@ -29,7 +29,7 @@ def evolve_dynamics(
         hamiltonian: Operator,
         dimensions: Mapping[int, int],
         schedule: Schedule,
-        initial_state: InitialStateArgT,
+        initial_state: InitialStateArgT | Sequence[InitialStateArgT],
         collapse_operators: Sequence[Operator] = [],
         observables: Sequence[Operator] = [],
         store_intermediate_results=False,
@@ -55,6 +55,10 @@ def evolve_dynamics(
     if isinstance(initial_state, InitialState):
         has_collapse_operators = len(collapse_operators) > 0
         initial_state = CuDensityMatState.create_initial_state(
+            initial_state, hilbert_space_dims, has_collapse_operators)
+    elif isinstance(initial_state, Sequence):
+        has_collapse_operators = len(collapse_operators) > 0
+        initial_state = CuDensityMatState.create_batched_initial_state(
             initial_state, hilbert_space_dims, has_collapse_operators)
     else:
         with ScopeTimer("evolve.as_cudm_state") as timer:

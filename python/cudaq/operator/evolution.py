@@ -396,6 +396,17 @@ def evolve(
         warnings.warn(f"`shots_count` will be ignored on target {target_name}")
 
     if isinstance(initial_state, Sequence):
+        if target_name == "dynamics":
+            try:
+                from .cudm_solver import evolve_dynamics
+            except:
+                raise ImportError(
+                    "Failed to load dynamics solver. Please check your installation"
+                )
+            return evolve_dynamics(hamiltonian, dimensions, schedule, initial_state,
+                                collapse_operators, observables,
+                                store_intermediate_results, integrator)
+
         return [
             evolve_single(hamiltonian, dimensions, schedule, state,
                           collapse_operators, observables,

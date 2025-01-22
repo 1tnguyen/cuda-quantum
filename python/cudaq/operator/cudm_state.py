@@ -181,6 +181,39 @@ class CuDensityMatState(object):
 
         return new_state
 
+    @staticmethod
+    def create_batched_initial_state(states: Sequence[cudaq_runtime.State],
+                             hilbert_space_dims: Sequence[int],
+                             mix_state: bool):
+        batch_size = len(states)
+        new_state = CuDensityMatState(None)
+        new_state.hilbert_space_dims = hilbert_space_dims
+        dm_shape = hilbert_space_dims * 2
+        dm_size = numpy.prod(dm_shape)
+        if not all(state.get_num_elements() == states[0].get_num_elements() for state in states):
+            raise ValueError("All states must have the same size")
+        
+        is_dm = mix_state and (states[0].get_num_elements() == dm_size)
+
+        if is_dm:
+            new_state.state = DenseMixedState(new_state.__ctx,
+                                              new_state.hilbert_space_dims,
+                                              batch_size=batch_size,
+                                              dtype="complex128")
+        else:
+            new_state.state = DensePureState(new_state.__ctx,
+                                             new_state.hilbert_space_dims,
+                                             batch_size=batch_size,
+                                             dtype="complex128")
+
+        required_buffer_size = new_state.state.storage_size
+        buffer = cupy.asfortranarray(cupy.zeros((required_buffer_size,), dtype="complex128", order="F"))  
+        buffer = buffer.reshape(required_buffer_size / batch_size, batch_size)
+        for batch_id in range(batch_size):
+            buffer[:, batch_id] = to_cupy_array(states[batch_id]) 
+        slice_shape, slice_offsets = new_state.state.local_info
+        new_state.state.attach_storage(buffer)                                  
+
     def get_impl(self):
         return self.state
 
