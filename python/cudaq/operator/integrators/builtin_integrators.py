@@ -42,9 +42,7 @@ class cuDensityMatTimeStepper(BaseTimeStepper[CudmStateType]):
         # Currently, we cannot return a reference since the caller might call compute() multiple times during a single integrate step.
         timer = ScopeTimer("compute.action_result")
         with timer:
-            action_result = self.state.clone(
-                cp.zeros_like(self.state.storage).reshape(
-                    self.state.local_info[0]))
+            action_result = self.state.clone(cp.zeros_like(self.state.storage, order = "F"))
         timer = ScopeTimer("liouvillian_action.compute")
         with timer:
             self.liouvillian_action.compute(t, (), (self.state,), action_result)

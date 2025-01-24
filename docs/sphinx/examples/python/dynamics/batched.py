@@ -43,10 +43,10 @@ schedule = Schedule(steps, ["time"])
 
 # Run the simulation.
 # Control bit = 0
-evolution_result_00 = cudaq.evolve(hamiltonian,
+evolution_result = cudaq.evolve(hamiltonian,
                                    dimensions,
                                    schedule,
-                                   psi_00,
+                                   [psi_00, psi_10],
                                    observables=[
                                        spin.x(0),
                                        spin.y(0),
@@ -59,61 +59,3 @@ evolution_result_00 = cudaq.evolve(hamiltonian,
                                    store_intermediate_results=True,
                                    integrator=ScipyZvodeIntegrator())
 
-# Control bit = 1
-evolution_result_10 = cudaq.evolve(hamiltonian,
-                                   dimensions,
-                                   schedule,
-                                   psi_10,
-                                   observables=[
-                                       spin.x(0),
-                                       spin.y(0),
-                                       spin.z(0),
-                                       spin.x(1),
-                                       spin.y(1),
-                                       spin.z(1)
-                                   ],
-                                   collapse_operators=[],
-                                   store_intermediate_results=True,
-                                   integrator=ScipyZvodeIntegrator())
-
-get_result = lambda idx, res: [
-    exp_vals[idx].expectation() for exp_vals in res.expectation_values()
-]
-results_00 = [
-    get_result(0, evolution_result_00),
-    get_result(1, evolution_result_00),
-    get_result(2, evolution_result_00),
-    get_result(3, evolution_result_00),
-    get_result(4, evolution_result_00),
-    get_result(5, evolution_result_00)
-]
-results_10 = [
-    get_result(0, evolution_result_10),
-    get_result(1, evolution_result_10),
-    get_result(2, evolution_result_10),
-    get_result(3, evolution_result_10),
-    get_result(4, evolution_result_10),
-    get_result(5, evolution_result_10)
-]
-
-# The changes in recession frequencies of the target qubit when control qubit is in |1> state allow us to implement two-qubit conditional gates.
-fig = plt.figure(figsize=(18, 6))
-
-plt.subplot(1, 2, 1)
-plt.plot(steps, results_00[5])
-plt.plot(steps, results_10[5])
-plt.ylabel(r"$\langle Z_2\rangle$")
-plt.xlabel("Time")
-plt.legend((r"$|\psi_0\rangle=|00\rangle$", r"$|\psi_0\rangle=|10\rangle$"))
-
-plt.subplot(1, 2, 2)
-plt.plot(steps, results_00[4])
-plt.plot(steps, results_10[4])
-plt.ylabel(r"$\langle Y_2\rangle$")
-plt.xlabel("Time")
-plt.legend((r"$|\psi_0\rangle=|00\rangle$", r"$|\psi_0\rangle=|10\rangle$"))
-
-abspath = os.path.abspath(__file__)
-dname = os.path.dirname(abspath)
-os.chdir(dname)
-fig.savefig('cross_resonance.png', dpi=fig.dpi)

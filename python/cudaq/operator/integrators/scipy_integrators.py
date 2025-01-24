@@ -38,18 +38,14 @@ class ScipyZvodeIntegrator(BaseIntegrator[CudmStateType]):
             raise ImportError('CuPy is required to use this integrator.')
         super().__init__(**kwargs)
         self.stepper = stepper
-        self.state_data_shape = None
 
     def __init__(self, **kwargs):
         if not has_scipy:
             raise ImportError("scipy is required to use this integrator.")
         super().__init__(**kwargs)
-        self.state_data_shape = None
 
     def compute_rhs(self, t, vec):
-        rho_data = cupy.asfortranarray(
-            cupy.array(vec).reshape(*self.state_data_shape,
-                                    self.state.batch_size))
+        rho_data = cupy.asfortranarray(cupy.array(vec))
         temp_state = self.state.clone(rho_data)
         result = self.stepper.compute(temp_state, t)
         as_array = result.storage.ravel().get()
@@ -102,18 +98,12 @@ class ScipyZvodeIntegrator(BaseIntegrator[CudmStateType]):
             raise ValueError(
                 "Integration time must be greater than current time")
         new_state = self.solver.integrate(t)
-        rho_data = cupy.asfortranarray(
-            cupy.array(new_state).reshape(*self.state_data_shape,
-                                          self.state.batch_size))
+        rho_data = cupy.asfortranarray(cupy.array(new_state))
         self.state.inplace_scale(0.0)
         self.state.inplace_accumulate(self.state.clone(rho_data))
         self.t = t
 
     def set_state(self, state: CudmStateType, t: float = 0.0):
         super().set_state(state, t)
-        if self.state_data_shape is None:
-            self.state_data_shape = self.state.storage.shape
-        else:
-            assert self.state_data_shape == self.state.storage.shape, "State shape must remain constant"
         as_array = self.state.storage.ravel().get()
         self.solver.set_initial_value(as_array, t)

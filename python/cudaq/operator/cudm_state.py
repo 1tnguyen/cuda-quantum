@@ -190,10 +190,10 @@ class CuDensityMatState(object):
         new_state.hilbert_space_dims = hilbert_space_dims
         dm_shape = hilbert_space_dims * 2
         dm_size = numpy.prod(dm_shape)
-        if not all(state.get_num_elements() == states[0].get_num_elements() for state in states):
+        if not all(state.getTensor().get_num_elements() == states[0].getTensor().get_num_elements() for state in states):
             raise ValueError("All states must have the same size")
         
-        is_dm = mix_state and (states[0].get_num_elements() == dm_size)
+        is_dm = mix_state and (states[0].getTensor().get_num_elements() == dm_size)
 
         if is_dm:
             new_state.state = DenseMixedState(new_state.__ctx,
@@ -207,12 +207,16 @@ class CuDensityMatState(object):
                                              dtype="complex128")
 
         required_buffer_size = new_state.state.storage_size
-        buffer = cupy.asfortranarray(cupy.zeros((required_buffer_size,), dtype="complex128", order="F"))  
-        buffer = buffer.reshape(required_buffer_size / batch_size, batch_size)
-        for batch_id in range(batch_size):
-            buffer[:, batch_id] = to_cupy_array(states[batch_id]) 
+        print(f"required_buffer_size = {required_buffer_size}; batch_size = {batch_size}")
         slice_shape, slice_offsets = new_state.state.local_info
-        new_state.state.attach_storage(buffer)                                  
+        state_data = []
+        for batch_id in range(batch_size):
+            state_data.append(to_cupy_array(states[batch_id]))
+        buffer = cupy.asfortranarray(cupy.concatenate(state_data, axis=None))
+        print("buffer:", buffer)
+        print(f"slice_shape = {slice_shape}; slice_offsets = {slice_offsets}")
+        new_state.state.attach_storage(buffer)  
+        return new_state                                 
 
     def get_impl(self):
         return self.state
