@@ -53,10 +53,12 @@ def evolve_dynamics(
         )
 
     has_collapse_operators = len(collapse_operators) > 0
+    batch_size = 1
     if isinstance(initial_state, InitialState):
         initial_state = CuDensityMatState.create_initial_state(
             initial_state, hilbert_space_dims, has_collapse_operators)
     elif isinstance(initial_state, Sequence):
+        batch_size = len(initial_state)
         initial_state = CuDensityMatState.create_batched_initial_state(
             initial_state, hilbert_space_dims, has_collapse_operators)
     else:
@@ -111,7 +113,7 @@ def evolve_dynamics(
         for observable in observables
     ]
     integrator.set_state(initial_state, schedule._steps[0])
-    exp_vals = []
+    exp_vals = [ [] for _ in range(batch_size) ]
     intermediate_states = []
     for step_idx, parameters in enumerate(schedule):
         if step_idx > 0:
@@ -120,7 +122,7 @@ def evolve_dynamics(
         # If we store intermediate values, compute them for each step.
         # Otherwise, just for the last step.
         if store_intermediate_results or step_idx == (len(schedule) - 1):
-            step_exp_vals = []
+            step_exp_vals = [[] for _ in range(batch_size)]
             for obs_idx, obs in enumerate(expectation_op):
                 _, state = integrator.get_state()
                 with ScopeTimer("evolve.prepare_expectation") as timer:
@@ -128,8 +130,10 @@ def evolve_dynamics(
                 with ScopeTimer("evolve.compute_expectation") as timer:
                     exp_val = obs.compute_expectation(schedule.current_step, (),
                                                       state)
-                step_exp_vals.append(float(cupy.real(exp_val[0])))
-            exp_vals.append(step_exp_vals)
+                for batch_id in range(batch_size):
+                    step_exp_vals[batch_id].append(float(cupy.real(exp_val[batch_id])))
+            for batch_id in range(batch_size):
+                exp_vals[batch_id].append(step_exp_vals[batch_id])
         if store_intermediate_results:
             _, state = integrator.get_state()
             state_length = state.storage.size
@@ -147,7 +151,10 @@ def evolve_dynamics(
                             state.storage.reshape((dimension,))))
 
     if store_intermediate_results:
-        return cudaq_runtime.EvolveResult(intermediate_states, exp_vals)
+        if batch_size == 1:
+            return cudaq_runtime.EvolveResult(intermediate_states, exp_vals[0])
+        else:
+            return [cudaq_runtime.EvolveResult(intermediate_states, exp_val_result) for exp_val_result in exp_vals]
     else:
         _, state = integrator.get_state()
         state_length = state.storage.size
@@ -162,5 +169,7 @@ def evolve_dynamics(
             with ScopeTimer("evolve.final_state") as timer:
                 final_state = cudaq_runtime.State.from_data(
                     state.storage.reshape((dimension,)))
-
-        return cudaq_runtime.EvolveResult(final_state, exp_vals[-1])
+        if batch_size == 1:
+            return cudaq_runtime.EvolveResult(final_state, exp_vals[0][-1])
+        else:
+            return [cudaq_runtime.EvolveResult(final_state, exp_val_result[-1]) for exp_val_result in exp_vals]
