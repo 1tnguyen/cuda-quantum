@@ -52,12 +52,11 @@ def evolve_dynamics(
             f"Integrator {type(integrator).__name__} does not support distributed state."
         )
 
+    has_collapse_operators = len(collapse_operators) > 0
     if isinstance(initial_state, InitialState):
-        has_collapse_operators = len(collapse_operators) > 0
         initial_state = CuDensityMatState.create_initial_state(
             initial_state, hilbert_space_dims, has_collapse_operators)
     elif isinstance(initial_state, Sequence):
-        has_collapse_operators = len(collapse_operators) > 0
         initial_state = CuDensityMatState.create_batched_initial_state(
             initial_state, hilbert_space_dims, has_collapse_operators)
     else:
