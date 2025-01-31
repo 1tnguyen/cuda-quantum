@@ -114,7 +114,7 @@ def evolve_dynamics(
     ]
     integrator.set_state(initial_state, schedule._steps[0])
     exp_vals = [ [] for _ in range(batch_size) ]
-    intermediate_states = []
+    intermediate_states = [ [] for _ in range(batch_size) ]
     for step_idx, parameters in enumerate(schedule):
         if step_idx > 0:
             with ScopeTimer("evolve.integrator.integrate") as timer:
@@ -136,40 +136,78 @@ def evolve_dynamics(
                 exp_vals[batch_id].append(step_exp_vals[batch_id])
         if store_intermediate_results:
             _, state = integrator.get_state()
-            state_length = state.storage.size
-            if is_density_matrix:
-                dimension = int(math.sqrt(state_length))
-                with ScopeTimer("evolve.intermediate_states.append") as timer:
-                    intermediate_states.append(
-                        cudaq_runtime.State.from_data(
-                            state.storage.reshape((dimension, dimension))))
+            state_length = (int)(state.storage.size / batch_size)
+            print("Shape:", state.storage.shape)
+            if batch_size == 1:
+                if is_density_matrix:
+                    dimension = int(math.sqrt(state_length))
+                    with ScopeTimer("evolve.intermediate_states.append") as timer:
+                        intermediate_states[0].append(
+                            cudaq_runtime.State.from_data(
+                                state.storage.reshape((dimension, dimension))))
+                else:
+                    dimension = state_length
+                    with ScopeTimer("evolve.intermediate_states.append") as timer:
+                        intermediate_states[0].append(
+                            cudaq_runtime.State.from_data(
+                                state.storage.reshape((dimension,))))
             else:
-                dimension = state_length
-                with ScopeTimer("evolve.intermediate_states.append") as timer:
-                    intermediate_states.append(
-                        cudaq_runtime.State.from_data(
-                            state.storage.reshape((dimension,))))
+                single_state = cupy.zeros((state_length,), dtype="complex128", order="F")
+                size_bytes = single_state.nbytes
+                for batch_id in range(batch_size):
+                    cupy.cuda.runtime.memcpy(single_state.data.ptr, state.storage.data.ptr + size_bytes * batch_id, size_bytes, cupy.cuda.runtime.memcpyDeviceToDevice)
+                    if is_density_matrix:
+                        dimension = int(math.sqrt(state_length))
+                        with ScopeTimer("evolve.intermediate_states.append") as timer:
+                            intermediate_states[batch_id].append(
+                                cudaq_runtime.State.from_data(
+                                    single_state.reshape((dimension, dimension))))
+                    else:
+                        dimension = state_length
+                        with ScopeTimer("evolve.intermediate_states.append") as timer:
+                            intermediate_states[batch_id].append(
+                                cudaq_runtime.State.from_data(
+                                    single_state.reshape((dimension,))))
 
     if store_intermediate_results:
         if batch_size == 1:
-            return cudaq_runtime.EvolveResult(intermediate_states, exp_vals[0])
+            return cudaq_runtime.EvolveResult(intermediate_states[0], exp_vals[0])
         else:
-            return [cudaq_runtime.EvolveResult(intermediate_states, exp_val_result) for exp_val_result in exp_vals]
+            return [cudaq_runtime.EvolveResult(intermediate_state, exp_val_result) for exp_val_result, intermediate_state in zip(exp_vals, intermediate_states)]
     else:
         _, state = integrator.get_state()
-        state_length = state.storage.size
-
-        if is_density_matrix:
-            dimension = int(math.sqrt(state_length))
-            with ScopeTimer("evolve.final_state") as timer:
-                final_state = cudaq_runtime.State.from_data(
-                    state.storage.reshape((dimension, dimension)))
-        else:
-            dimension = state_length
-            with ScopeTimer("evolve.final_state") as timer:
-                final_state = cudaq_runtime.State.from_data(
-                    state.storage.reshape((dimension,)))
+        
         if batch_size == 1:
-            return cudaq_runtime.EvolveResult(final_state, exp_vals[0][-1])
+            state_length = state.storage.size
+
+            if is_density_matrix:
+                dimension = int(math.sqrt(state_length))
+                with ScopeTimer("evolve.final_state") as timer:
+                    final_state = cudaq_runtime.State.from_data(
+                        state.storage.reshape((dimension, dimension)))
+            else:
+                dimension = state_length
+                with ScopeTimer("evolve.final_state") as timer:
+                    final_state = cudaq_runtime.State.from_data(
+                        state.storage.reshape((dimension,)))
+                return cudaq_runtime.EvolveResult(final_state, exp_vals[0][-1])
         else:
-            return [cudaq_runtime.EvolveResult(final_state, exp_val_result[-1]) for exp_val_result in exp_vals]
+            state_length = state.storage.size / batch_size
+            single_state = cupy.zeros((state_length,), dtype="complex128", order="F")
+            size_bytes = single_state.nbytes
+            final_states = []
+            for batch_id in range(batch_size):
+                cupy.cuda.runtime.memcpy(single_state.data.ptr, state.storage.ctypes.data + size_bytes * batch_id, size_bytes, cupy.cuda.runtime.memcpyDeviceToDevice)
+                if is_density_matrix:
+                    dimension = int(math.sqrt(state_length))
+                    with ScopeTimer("evolve.intermediate_states.append") as timer:
+                        final_states.append(
+                            cudaq_runtime.State.from_data(
+                                single_state.reshape((dimension, dimension))))
+                else:
+                    dimension = state_length
+                    with ScopeTimer("evolve.intermediate_states.append") as timer:
+                        final_states.append(
+                            cudaq_runtime.State.from_data(
+                                single_state.reshape((dimension,))))
+            return [cudaq_runtime.EvolveResult(final_state, exp_val_result[-1]) for final_state, exp_val_result in zip(final_state, exp_vals)]
