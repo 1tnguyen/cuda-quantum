@@ -11,7 +11,7 @@ import argparse
 cudaq.set_target("dynamics")
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--L", type=int, default=15)
+parser.add_argument("--L", type=int, default=25)
 parser.add_argument("--repeats", type=int, default=20)
 parser.add_argument("--discards", type=int, default=10)
 parser.add_argument("--gamma", type=float, default=1.0)

@@ -33,7 +33,7 @@ class cuDensityMatTimeStepper(BaseTimeStepper[CudmStateType]):
             self.liouvillian_action = cudm.OperatorAction(
                 self.ctx, (self.liouvillian,))
 
-        if state != self.state:
+        if self.state is None or state.local_info != self.state.local_info:
             self.state = state
             timer = ScopeTimer("liouvillian_action.prepare")
             with timer:
