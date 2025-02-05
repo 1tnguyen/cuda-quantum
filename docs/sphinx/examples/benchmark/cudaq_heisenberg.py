@@ -35,6 +35,7 @@ Jx = params.J_x
 Jy = params.J_y
 Jz = params.J_y
 h = params.h
+gamma = params.gamma
 # Construct the Hamiltonian
 H = h * spin.z(0) 
 for i in range(N - 1):
@@ -61,7 +62,7 @@ evolution_result = cudaq.evolve(H,
                                 observables=[],
                                 collapse_operators=[],
                                 store_intermediate_results=False,
-                                integrator=RungeKuttaIntegrator())
+                                integrator=RungeKuttaIntegrator(order=1))
 
 
 
