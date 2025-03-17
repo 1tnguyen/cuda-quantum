@@ -139,7 +139,7 @@ def evolve_dynamics(
             state_length = (int)(state.storage.size / batch_size)
             print("Shape:", state.storage.shape)
             if batch_size == 1:
-                if is_density_matrix:
+                if is_density_matrix and not CuDensityMatState.is_multi_process():
                     dimension = int(math.sqrt(state_length))
                     with ScopeTimer("evolve.intermediate_states.append") as timer:
                         intermediate_states[0].append(
@@ -180,7 +180,10 @@ def evolve_dynamics(
         if batch_size == 1:
             state_length = state.storage.size
 
-            if is_density_matrix:
+            # Only reshape the data into a density matrix is this is a single-GPU state.
+            # In a multi-GPU state, the density matrix is sliced, hence we cannot reshape each slice into a density matrix form.
+            # The data is returned as a flat buffer in this case.
+            if is_density_matrix and not CuDensityMatState.is_multi_process():
                 dimension = int(math.sqrt(state_length))
                 with ScopeTimer("evolve.final_state") as timer:
                     final_state = cudaq_runtime.State.from_data(

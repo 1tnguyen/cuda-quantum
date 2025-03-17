@@ -130,7 +130,7 @@ ENV UCX_TLS=rc,cuda_copy,cuda_ipc,gdr_copy,sm
 
 # Install CUDA
 
-ARG cuda_packages="cuda-cudart cuda-nvrtc cuda-compiler libcublas-dev libcusolver"
+ARG cuda_packages="cuda-cudart cuda-nvrtc cuda-compiler libcublas-dev libcurand-dev libcusolver"
 RUN if [ -n "$cuda_packages" ]; then \
         arch_folder=$([ "$(uname -m)" == "aarch64" ] && echo sbsa || echo x86_64) \
         && cuda_packages=`printf '%s\n' $cuda_packages | xargs -I {} echo {}-$(echo ${CUDA_VERSION} | tr . -)` \
@@ -181,7 +181,3 @@ ENV CUTENSOR_INSTALL_PREFIX="$CUTENSOR_INSTALL_PREFIX"
 ENV CUTENSOR_ROOT="$CUTENSOR_INSTALL_PREFIX"
 ENV LD_LIBRARY_PATH="$CUTENSOR_INSTALL_PREFIX/lib:$LD_LIBRARY_PATH"
 ENV CPATH="$CUTENSOR_INSTALL_PREFIX/include:$CPATH"
-
-# Active MPI support for the cuTensorNet library
-RUN cd "$CUQUANTUM_INSTALL_PREFIX/distributed_interfaces/" && source activate_mpi_cutn.sh
-ENV CUTENSORNET_COMM_LIB="$CUQUANTUM_INSTALL_PREFIX/distributed_interfaces/libcutensornet_distributed_interface_mpi.so"
