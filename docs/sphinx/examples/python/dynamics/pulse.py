@@ -1,5 +1,5 @@
 import cudaq
-from cudaq import spin, operators, ScalarOperator, Schedule, ScipyZvodeIntegrator
+from cudaq import spin_op, boson, ScalarOperator, Schedule, ScipyZvodeIntegrator
 import numpy as np
 import cupy as cp
 import os
@@ -36,9 +36,9 @@ def signal(t):
 
 
 # Qubit Hamiltonian
-hamiltonian = omega * spin.z(0) / 2
+hamiltonian = omega * spin_op.z(0) / 2
 # Add modulated driving term to the Hamiltonian
-hamiltonian += np.pi * rabi_rate * ScalarOperator(signal) * spin.x(0)
+hamiltonian += np.pi * rabi_rate * ScalarOperator(signal) * spin_op.x(0)
 
 # Dimensions of sub-system. We only have a single degree of freedom of dimension 2 (two-level system).
 dimensions = {0: 2}
@@ -59,7 +59,7 @@ evolution_result = cudaq.evolve(hamiltonian,
                                 dimensions,
                                 schedule,
                                 psi0,
-                                observables=[operators.number(0)],
+                                observables=[boson.number(0)],
                                 collapse_operators=[],
                                 store_intermediate_results=True,
                                 integrator=ScipyZvodeIntegrator())

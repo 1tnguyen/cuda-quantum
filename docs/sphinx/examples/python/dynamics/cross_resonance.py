@@ -1,5 +1,5 @@
 import cudaq
-from cudaq import spin, Schedule, ScipyZvodeIntegrator
+from cudaq import spin_op, Schedule, ScipyZvodeIntegrator
 import numpy as np
 import cupy as cp
 import os
@@ -23,9 +23,9 @@ m_12 = 0.2
 Omega = 20 * 2 * np.pi
 
 # Qubit Hamiltonian (in the rotating frame w.r.t. the target qubit)
-hamiltonian = delta / 2 * spin.z(0) + J * (
-    spin.minus(1) * spin.plus(0) +
-    spin.plus(1) * spin.minus(0)) + Omega * spin.x(0) + m_12 * Omega * spin.x(1)
+hamiltonian = delta / 2 * spin_op.z(0) + J * (
+    spin_op.minus(1) * spin_op.plus(0) +
+    spin_op.plus(1) * spin_op.minus(0)) + Omega * spin_op.x(0) + m_12 * Omega * spin_op.x(1)
 
 # Dimensions of sub-system
 dimensions = {0: 2, 1: 2}
@@ -52,12 +52,12 @@ evolution_result_00 = cudaq.evolve(hamiltonian,
                                    schedule,
                                    psi_00,
                                    observables=[
-                                       spin.x(0),
-                                       spin.y(0),
-                                       spin.z(0),
-                                       spin.x(1),
-                                       spin.y(1),
-                                       spin.z(1)
+                                       spin_op.x(0),
+                                       spin_op.y(0),
+                                       spin_op.z(0),
+                                       spin_op.x(1),
+                                       spin_op.y(1),
+                                       spin_op.z(1)
                                    ],
                                    collapse_operators=[],
                                    store_intermediate_results=True,
@@ -69,12 +69,12 @@ evolution_result_10 = cudaq.evolve(hamiltonian,
                                    schedule,
                                    psi_10,
                                    observables=[
-                                       spin.x(0),
-                                       spin.y(0),
-                                       spin.z(0),
-                                       spin.x(1),
-                                       spin.y(1),
-                                       spin.z(1)
+                                       spin_op.x(0),
+                                       spin_op.y(0),
+                                       spin_op.z(0),
+                                       spin_op.x(1),
+                                       spin_op.y(1),
+                                       spin_op.z(1)
                                    ],
                                    collapse_operators=[],
                                    store_intermediate_results=True,

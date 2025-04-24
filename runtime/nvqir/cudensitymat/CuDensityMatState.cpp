@@ -11,7 +11,7 @@
 #include "common/EigenDense.h"
 #include "common/Logger.h"
 #include "cudaq/utils/cudaq_utils.h"
-
+#include <iostream>
 namespace cudaq {
 
 std::complex<double>
@@ -66,8 +66,9 @@ CuDensityMatState::getAmplitude(const std::vector<int> &basisState) {
 // Dump the state to the given output stream
 void CuDensityMatState::dump(std::ostream &os) const {
   // get state data from device to print
-  Eigen::MatrixXcd state(dimension, isDensityMatrix ? dimension : 1);
-  const auto size = isDensityMatrix ? dimension * dimension : dimension;
+  const auto dim = isDensityMatrix ? std::size_t(std::sqrt(dimension)) : dimension;
+  Eigen::MatrixXcd state(dim, isDensityMatrix ? dim : 1);
+  const auto size = state.size();
   HANDLE_CUDA_ERROR(cudaMemcpy(state.data(), devicePtr,
                                size * sizeof(std::complex<double>),
                                cudaMemcpyDeviceToHost));
@@ -230,7 +231,7 @@ CuDensityMatState::CuDensityMatState(
   }
 
   cudensitymatStatePurity_t purity;
-
+  isDensityMatrix = rawDataSize == expectedDensityMatrixSize;
   if (rawDataSize == expectedDensityMatrixSize) {
     purity = CUDENSITYMAT_STATE_PURITY_MIXED;
   } else if (rawDataSize == expectedStateVectorSize) {
@@ -277,10 +278,11 @@ CuDensityMatState::CuDensityMatState(cudensitymatHandle_t handle,
                                      const std::vector<int64_t> &dims)
     : cudmHandle(handle), hilbertSpaceDims(dims) {
 
-  const bool isDensityMat =
+  isDensityMatrix =
       simState.dimension == calculate_density_matrix_size(hilbertSpaceDims);
   dimension = simState.dimension;
-
+  std::cout <<  "dimension = " << dimension << "\n";
+  std::cout << "isDensityMat = " << isDensityMatrix << "\n";   
   const size_t dataSize = dimension * sizeof(std::complex<double>);
   HANDLE_CUDA_ERROR(
       cudaMalloc(reinterpret_cast<void **>(&devicePtr), dataSize));
@@ -288,7 +290,7 @@ CuDensityMatState::CuDensityMatState(cudensitymatHandle_t handle,
   HANDLE_CUDA_ERROR(
       cudaMemcpy(devicePtr, simState.devicePtr, dataSize, cudaMemcpyDefault));
 
-  const cudensitymatStatePurity_t purity = isDensityMat
+  const cudensitymatStatePurity_t purity = isDensityMatrix
                                                ? CUDENSITYMAT_STATE_PURITY_MIXED
                                                : CUDENSITYMAT_STATE_PURITY_PURE;
   HANDLE_CUDM_ERROR(cudensitymatCreateState(
@@ -482,6 +484,31 @@ CuDensityMatState cudaq::CuDensityMatState::to_density_matrix() const {
   }
 
   return CuDensityMatState(cudmHandle, densityMatrix, hilbertSpaceDims);
+}
+
+CuDensityMatState *cudaq::CuDensityMatState::make_density_matrix() const {
+  if (!is_initialized())
+    throw std::runtime_error("State is not initialized.");
+
+  if (is_density_matrix())
+    throw std::runtime_error("State is already a density matrix.");
+
+  size_t vectorSize = calculate_state_vector_size(hilbertSpaceDims);
+  std::vector<std::complex<double>> stateVecData(vectorSize);
+  HANDLE_CUDA_ERROR(cudaMemcpy(stateVecData.data(), devicePtr,
+                               dimension * sizeof(std::complex<double>),
+                               cudaMemcpyDeviceToHost));
+  size_t expectedDensityMatrixSize = vectorSize * vectorSize;
+  std::vector<std::complex<double>> densityMatrix(expectedDensityMatrixSize);
+
+  for (size_t i = 0; i < vectorSize; i++) {
+    for (size_t j = 0; j < vectorSize; j++) {
+      densityMatrix[i * vectorSize + j] =
+          stateVecData[i] * std::conj(stateVecData[j]);
+    }
+  }
+
+  return new CuDensityMatState(cudmHandle, densityMatrix, hilbertSpaceDims);
 }
 
 cudensitymatState_t cudaq::CuDensityMatState::get_impl() const {

@@ -368,4 +368,4 @@ def test_update_parameter_doc_in_composite_operator():
 # for debugging
 if __name__ == "__main__":
     test_parameter_docs()
-    #pytest.main(["-rP"])
+    pytest.main(["-rP"])

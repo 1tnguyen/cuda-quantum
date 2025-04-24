@@ -10,6 +10,10 @@ from ..integrator import BaseTimeStepper, BaseIntegrator
 from ..cudm_helpers import cudm, CudmStateType, CudmOperator, CudmWorkStream
 from ..cudm_helpers import CuDensityMatOpConversion, constructLiouvillian
 from ...util.timing_helper import ScopeTimer
+from typing import Sequence, Mapping
+from ..expressions import Operator
+from ..schedule import Schedule
+from ...mlir._mlir_libs._quakeDialects.cudaq_runtime import MatrixOperator
 
 has_cupy = True
 try:
@@ -48,17 +52,16 @@ class cuDensityMatTimeStepper(BaseTimeStepper[CudmStateType]):
 
 
 class RungeKuttaIntegrator(BaseIntegrator[CudmStateType]):
-    n_steps = 10
+    n_steps = 1
     # Order of the integrator: supporting `1st` order (Euler) or `4th` order (`Runge-Kutta`).
     order = 4
 
     def __init__(self,
-                 stepper: BaseTimeStepper[CudmStateType] = None,
                  **kwargs):
         if not has_cupy:
             raise ImportError('CuPy is required to use integrators.')
         super().__init__(**kwargs)
-        self.stepper = stepper
+        self.rk_integrator = bindings.integrators.runge_kutta()
 
     def support_distributed_state(self):
         return True
@@ -71,68 +74,23 @@ class RungeKuttaIntegrator(BaseIntegrator[CudmStateType]):
             if self.order != 1 and self.order != 4:
                 raise ValueError("The 'order' parameter must be either 1 or 4.")
 
+    def set_state(self, state, t):
+        self.rk_integrator.setState(state, t)
+
+    def get_state(self):
+        return self.rk_integrator.getState()
+    
+    def set_system(self,
+                   dimensions: Mapping[int, int],
+                   schedule: Schedule,
+                   hamiltonian: Operator,
+                   collapse_operators: Sequence[Operator] = []):
+        system_ = bindings.SystemDynamics()
+        system_.modeExtents = [dimensions[d] for d in range(len(dimensions))]
+        system_.hamiltonian = hamiltonian
+        system_.collapseOps = [MatrixOperator(c_op) for c_op in collapse_operators]
+        schedule_ = bindings.Schedule(schedule._steps, list(schedule._parameters))
+        self.rk_integrator.setSystem(system_, schedule_)
+    
     def integrate(self, t):
-        if self.state is None:
-            raise ValueError("Initial state is not set")
-        self.ctx = self.state._ctx
-        if self.stepper is None:
-            if self.hamiltonian is None or self.collapse_operators is None or self.dimensions is None:
-                raise ValueError(
-                    "Hamiltonian and collapse operators are required for integrator if no stepper is provided"
-                )
-            hilbert_space_dims = tuple(
-                self.dimensions[d] for d in range(len(self.dimensions)))
-            ham_term = self.hamiltonian._evaluate(
-                CuDensityMatOpConversion(self.dimensions, self.schedule))
-            linblad_terms = []
-            for c_op in self.collapse_operators:
-                linblad_terms.append(
-                    c_op._evaluate(
-                        CuDensityMatOpConversion(self.dimensions,
-                                                 self.schedule)))
-            is_master_equation = isinstance(self.state, cudm.DenseMixedState)
-            liouvillian = constructLiouvillian(hilbert_space_dims, ham_term,
-                                               linblad_terms,
-                                               is_master_equation)
-            cudm_ctx = self.state._ctx
-            self.stepper = cuDensityMatTimeStepper(liouvillian, cudm_ctx)
-
-        if t <= self.t:
-            raise ValueError(
-                "Integration time must be greater than current time")
-        dt = (t - self.t) / self.n_steps
-        for i in range(self.n_steps):
-            current_t = self.t + i * dt
-            k1 = self.stepper.compute(self.state, current_t)
-            if self.order == 1:
-                # First order Euler method
-                k1.inplace_scale(dt)
-                self.state.inplace_accumulate(k1)
-            else:
-                # Continue computing the higher-order terms
-                rho_temp = cp.copy(self.state.storage)
-                rho_temp += ((dt / 2) * k1.storage)
-                k2 = self.stepper.compute(self.state.clone(rho_temp),
-                                          current_t + dt / 2)
-
-                rho_temp = cp.copy(self.state.storage)
-                rho_temp += ((dt / 2) * k2.storage)
-                k3 = self.stepper.compute(self.state.clone(rho_temp),
-                                          current_t + dt / 2)
-
-                rho_temp = cp.copy(self.state.storage)
-                rho_temp += ((dt) * k3.storage)
-                k4 = self.stepper.compute(self.state.clone(rho_temp),
-                                          current_t + dt)
-
-                # Scale
-                k1.inplace_scale(dt / 6)
-                k2.inplace_scale(dt / 3)
-                k3.inplace_scale(dt / 3)
-                k4.inplace_scale(dt / 6)
-
-                self.state.inplace_accumulate(k1)
-                self.state.inplace_accumulate(k2)
-                self.state.inplace_accumulate(k3)
-                self.state.inplace_accumulate(k4)
-        self.t = t
+        self.rk_integrator.integrate(t)   
