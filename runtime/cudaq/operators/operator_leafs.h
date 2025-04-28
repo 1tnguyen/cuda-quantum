@@ -26,37 +26,40 @@ class scalar_operator {
 private:
   // If someone gave us a constant value, we will just return that
   // directly to them when they call `evaluate`.
-  std::variant<std::complex<double>, scalar_callback> value;
-  std::unordered_map<std::string, std::string> param_desc;
+  std::variant<std::complex<double>, scalar_callback> value = 1.;
+  std::unordered_map<std::string, std::string> param_desc = {};
 
 public:
   // read-only properties
 
   bool is_constant() const;
-  const std::unordered_map<std::string, std::string>& get_parameter_descriptions() const;
+  const std::unordered_map<std::string, std::string> &
+  get_parameter_descriptions() const;
 
   // constructors and destructors
 
-  scalar_operator() : value(1.) {}
+  constexpr scalar_operator() = default;
 
   scalar_operator(double value);
 
   /// @brief Constructor that just takes and returns a complex double value.
   scalar_operator(std::complex<double> value);
 
-  scalar_operator(const scalar_callback &create, 
-                  std::unordered_map<std::string, std::string> &&parameter_descriptions = {});
+  scalar_operator(const scalar_callback &create,
+                  std::unordered_map<std::string, std::string>
+                      &&parameter_descriptions = {});
 
   /// @brief Constructor that just takes a callback function with no
   /// arguments.
   scalar_operator(scalar_callback &&create,
-                  std::unordered_map<std::string, std::string> &&parameter_descriptions = {});
-  
+                  std::unordered_map<std::string, std::string>
+                      &&parameter_descriptions = {});
+
   // copy constructor
-  scalar_operator(const scalar_operator &other);
+  scalar_operator(const scalar_operator &other) = default;
 
   // move constructor
-  scalar_operator(scalar_operator &&other);
+  scalar_operator(scalar_operator &&other) = default;
 
   ~scalar_operator() = default;
 

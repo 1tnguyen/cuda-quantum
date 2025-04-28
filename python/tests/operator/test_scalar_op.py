@@ -7,7 +7,7 @@
 # ============================================================================ #
 
 import numpy as np, operator, pytest
-from cudaq.operator.scalar_op import ScalarOperator
+from cudaq.operators import ScalarOperator
 from cudaq import spin
 
 
@@ -198,7 +198,6 @@ def test_equality():
     assert ScalarOperator(lambda: 5) != ScalarOperator.const(5)
     assert ScalarOperator(lambda: 5) != ScalarOperator(lambda: 5)
 
-    # BREAKING CHANGE
     # Note that while it would be preferable if we could identity
     # when the same generator is used, the bindings construct a new
     # function such that this is not currently recognized.
@@ -317,7 +316,7 @@ def test_scalar_generator_update():
     assert 'p' in so1.parameters
 
     dims = {0: 2}
-    op = so1 * spin_op.x(0)
+    op = so1 * spin.x(0)
     assert np.allclose(op.to_matrix(dims, p=2.0), [[0, 0.5], [0.5, 0]])
 
     # Update to new generator function

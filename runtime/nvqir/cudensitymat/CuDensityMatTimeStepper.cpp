@@ -10,6 +10,8 @@
 #include "CuDensityMatContext.h"
 #include "CuDensityMatErrorHandling.h"
 #include "CuDensityMatUtils.h"
+#include <map>
+
 namespace cudaq {
 CuDensityMatTimeStepper::CuDensityMatTimeStepper(
     cudensitymatHandle_t handle, cudensitymatOperator_t liouvillian)
@@ -82,4 +84,5 @@ void CuDensityMatTimeStepper::computeImpl(
   cudaq::dynamics::destroyArrayGpu(param_d);
   HANDLE_CUDM_ERROR(cudensitymatDestroyWorkspace(workspace));
 }
+
 } // namespace cudaq
