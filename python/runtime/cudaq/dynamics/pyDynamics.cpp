@@ -30,13 +30,6 @@ cudaq::CuDensityMatState *asCudmState(cudaq::state &cudaqState) {
 // Internal dynamics bindings
 PYBIND11_MODULE(nvqir_dynamics_bindings, m) {
   py::class_<cudaq::CuDensityMatTimeStepper>(m, "TimeStepper")
-      .def(py::init([](int64_t handlePtrInt, int64_t operatorPtrInt) {
-        cudensitymatHandle_t handle =
-            reinterpret_cast<cudensitymatHandle_t>(handlePtrInt);
-        cudensitymatOperator_t op =
-            reinterpret_cast<cudensitymatOperator_t>(operatorPtrInt);
-        return cudaq::CuDensityMatTimeStepper(handle, op);
-      }))
       .def(py::init([](cudaq::schedule schedule,
                        std::vector<int64_t> modeExtents,
                        cudaq::sum_op<cudaq::matrix_handler> hamiltonian,
