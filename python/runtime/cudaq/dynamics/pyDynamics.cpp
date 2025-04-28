@@ -68,10 +68,20 @@ PYBIND11_MODULE(nvqir_dynamics_bindings, m) {
              auto *cudmState = asCudmState(state);
              self.prepare(cudmState->get_impl());
            })
-      .def("compute", [](cudaq::CuDensityMatExpectation &self,
-                         cudaq::state &state, double t) {
-        auto *cudmState = asCudmState(state);
-        return self.compute(cudmState->get_impl(), t).real();
+      .def("compute",
+           [](cudaq::CuDensityMatExpectation &self, cudaq::state &state,
+              double t) {
+             auto *cudmState = asCudmState(state);
+             return self.compute(cudmState->get_impl(), t).real();
+           })
+      .def("prepare",
+           [](cudaq::CuDensityMatExpectation &self, int64_t statePtr) {
+             self.prepare(reinterpret_cast<cudensitymatState_t>(statePtr));
+           })
+      .def("compute", [](cudaq::CuDensityMatExpectation &self, int64_t statePtr,
+                         double t) {
+        return self.compute(reinterpret_cast<cudensitymatState_t>(statePtr), t)
+            .real();
       });
 
   py::class_<cudaq::schedule>(m, "Schedule")
