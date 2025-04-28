@@ -281,8 +281,6 @@ CuDensityMatState::CuDensityMatState(cudensitymatHandle_t handle,
   isDensityMatrix =
       simState.dimension == calculate_density_matrix_size(hilbertSpaceDims);
   dimension = simState.dimension;
-  std::cout <<  "dimension = " << dimension << "\n";
-  std::cout << "isDensityMat = " << isDensityMatrix << "\n";   
   const size_t dataSize = dimension * sizeof(std::complex<double>);
   HANDLE_CUDA_ERROR(
       cudaMalloc(reinterpret_cast<void **>(&devicePtr), dataSize));
@@ -403,6 +401,50 @@ CuDensityMatState CuDensityMatState::clone(const CuDensityMatState &other) {
       state.cudmHandle, state.cudmState,
       1, // only one storage component (tensor)
       std::vector<void *>({state.devicePtr})
+          .data(), // pointer to the GPU storage for the quantum state
+      std::vector<std::size_t>({storageSize})
+          .data())); // size of the GPU storage for the quantum state
+  return state;
+}
+
+CuDensityMatState* CuDensityMatState::clonePtr(const CuDensityMatState &other) {
+  CuDensityMatState *state = new CuDensityMatState;
+  state->cudmHandle = other.cudmHandle;
+  state->hilbertSpaceDims = other.hilbertSpaceDims;
+  state->dimension = other.dimension;
+  const size_t dataSize = state->dimension * sizeof(std::complex<double>);
+  HANDLE_CUDA_ERROR(
+      cudaMalloc(reinterpret_cast<void **>(&state->devicePtr), dataSize));
+  HANDLE_CUDA_ERROR(cudaMemcpy(state->devicePtr, other.devicePtr, dataSize,
+                               cudaMemcpyDefault));
+
+  const size_t expectedDensityMatrixSize =
+      calculate_density_matrix_size(state->hilbertSpaceDims);
+  const bool isDensityMat = expectedDensityMatrixSize == state->dimension;
+  const cudensitymatStatePurity_t purity = isDensityMat
+                                               ? CUDENSITYMAT_STATE_PURITY_MIXED
+                                               : CUDENSITYMAT_STATE_PURITY_PURE;
+  HANDLE_CUDM_ERROR(cudensitymatCreateState(
+      state->cudmHandle, purity,
+      static_cast<int32_t>(state->hilbertSpaceDims.size()),
+      state->hilbertSpaceDims.data(), 1, CUDA_C_64F, &state->cudmState));
+
+  // Query the size of the quantum state storage
+  std::size_t storageSize{0}; // only one storage component (tensor) is needed
+  HANDLE_CUDM_ERROR(cudensitymatStateGetComponentStorageSize(
+      state->cudmHandle, state->cudmState,
+      1,              // only one storage component
+      &storageSize)); // storage size in bytes
+  const std::size_t stateVolume =
+      storageSize / sizeof(std::complex<double>); // quantum state tensor volume
+                                                  // (number of elements)
+  assert(stateVolume == state->dimension);
+
+  // Attach initialized GPU storage to the input quantum state
+  HANDLE_CUDM_ERROR(cudensitymatStateAttachComponentStorage(
+      state->cudmHandle, state->cudmState,
+      1, // only one storage component (tensor)
+      std::vector<void *>({state->devicePtr})
           .data(), // pointer to the GPU storage for the quantum state
       std::vector<std::size_t>({storageSize})
           .data())); // size of the GPU storage for the quantum state

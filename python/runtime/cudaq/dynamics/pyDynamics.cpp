@@ -87,10 +87,8 @@ PYBIND11_MODULE(nvqir_dynamics_bindings, m) {
           cudaq::dynamics::Context::getCurrentContext()->getHandle(),
           modeExtents);
 
-    if (asDensityMat && !castSimState.is_density_matrix()) {
-      printf("Make density mat\n");
+    if (asDensityMat && !castSimState.is_density_matrix())
       return cudaq::state(castSimState.make_density_matrix());
-    }
     return state;
   });
 

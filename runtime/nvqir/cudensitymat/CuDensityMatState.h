@@ -91,6 +91,7 @@ public:
   // @brief Create a zero state
   static CuDensityMatState zero_like(const CuDensityMatState &other);
   static CuDensityMatState clone(const CuDensityMatState &other);
+  static CuDensityMatState* clonePtr(const CuDensityMatState &other);
   // Prevent copies (avoids double free issues)
   CuDensityMatState(const CuDensityMatState &) = delete;
   CuDensityMatState &operator=(const CuDensityMatState &) = delete;

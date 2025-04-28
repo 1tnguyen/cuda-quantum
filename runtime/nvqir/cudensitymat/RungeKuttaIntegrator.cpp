@@ -36,7 +36,11 @@ std::shared_ptr<base_integrator> runge_kutta::clone() {
 }
 
 void runge_kutta::setState(const cudaq::state &initial_state, double t0) {
-  m_state = std::make_shared<cudaq::state>(initial_state);
+  auto *simState = cudaq::state_helper::getSimulationState(const_cast<cudaq::state*>(&initial_state));
+  auto *castSimState = dynamic_cast<CuDensityMatState *>(simState);
+  if (!castSimState)
+    throw std::runtime_error("Invalid state.");
+  m_state = std::make_shared<cudaq::state>(CuDensityMatState::clonePtr(*castSimState));
   m_t = t0;
 }
 
@@ -117,13 +121,13 @@ void runge_kutta::integrate(double targetTime) {
       }
       auto k1State = m_stepper->compute(*m_state, m_t, step_size, params);
       auto &k1 = *asCudmState(k1State);
-      printf("state\n");
-      m_state->dump(std::cout);
-      printf("k1\n");
-      k1.dump(std::cout);
+      // printf("state\n");
+      // m_state->dump(std::cout);
+      // printf("k1\n");
+      // k1.dump(std::cout);
       CuDensityMatState rho_temp = CuDensityMatState::clone(castSimState);
-      printf("rho_temp\n");
-      rho_temp.dump(std::cout);
+      // printf("rho_temp\n");
+      // rho_temp.dump(std::cout);
       rho_temp += (k1 * (step_size / 2));
 
       for (const auto &param : m_schedule.get_parameters()) {
