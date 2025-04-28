@@ -37,6 +37,25 @@ PYBIND11_MODULE(nvqir_dynamics_bindings, m) {
             reinterpret_cast<cudensitymatOperator_t>(operatorPtrInt);
         return cudaq::CuDensityMatTimeStepper(handle, op);
       }))
+      .def(py::init([](cudaq::schedule schedule,
+                       std::vector<int64_t> modeExtents,
+                       cudaq::sum_op<cudaq::matrix_handler> hamiltonian,
+                       std::vector<cudaq::sum_op<cudaq::matrix_handler>>
+                           collapse_ops,
+                       bool is_master_equation) {
+        std::unordered_map<std::string, std::complex<double>> params;
+        for (const auto &param : schedule.get_parameters()) {
+          params[param] = schedule.get_value_function()(param, 0.0);
+        }
+        auto liouvillian =
+            cudaq::dynamics::Context::getCurrentContext()
+                ->getOpConverter()
+                .constructLiouvillian(hamiltonian, collapse_ops, modeExtents,
+                                      params, is_master_equation);
+        return cudaq::CuDensityMatTimeStepper(
+            cudaq::dynamics::Context::getCurrentContext()->getHandle(),
+            liouvillian);
+      }))
       .def("compute",
            [](cudaq::CuDensityMatTimeStepper &self, int64_t inputStatePtr,
               int64_t outputStatePtr, double t) {
