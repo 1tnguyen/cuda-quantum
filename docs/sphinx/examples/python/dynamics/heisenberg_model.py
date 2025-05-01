@@ -1,5 +1,5 @@
 import cudaq
-from cudaq import spin_op, Schedule, ScipyZvodeIntegrator
+from cudaq import spin, Schedule, ScipyZvodeIntegrator
 
 import numpy as np
 import cupy as cp
@@ -25,7 +25,7 @@ for i in range(N):
     spin_state += str(int(i % 2))
 
 # Observable is the staggered magnetization operator
-staggered_magnetization_op = spin_op.empty()
+staggered_magnetization_op = spin.empty()
 for i in range(N):
     if i % 2 == 0:
         staggered_magnetization_op += spin_op.z(i)
@@ -42,7 +42,7 @@ for g in [0.0, 0.25, 4.0]:
     Jz = g
 
     # Construct the Hamiltonian
-    H = spin_op.empty()
+    H = spin.empty()
 
     for i in range(N - 1):
         H += Jx * spin_op.x(i) * spin_op.x(i + 1)

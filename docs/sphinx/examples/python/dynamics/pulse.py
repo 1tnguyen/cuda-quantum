@@ -1,5 +1,5 @@
 import cudaq
-from cudaq import spin_op, boson, ScalarOperator, Schedule, ScipyZvodeIntegrator
+from cudaq import spin, boson, ScalarOperator, Schedule, ScipyZvodeIntegrator
 import numpy as np
 import cupy as cp
 import os

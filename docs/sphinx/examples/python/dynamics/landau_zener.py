@@ -1,5 +1,5 @@
 import cudaq
-from cudaq import spin_op, boson, ScalarOperator, Schedule, ScipyZvodeIntegrator
+from cudaq import spin, boson, ScalarOperator, Schedule, ScipyZvodeIntegrator
 import numpy as np
 import cupy as cp
 import os
@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 cudaq.set_target("dynamics")
 
 # Define some shorthand operators
-sx = spin_op.x(0)
-sz = spin_op.z(0)
+sx = spin.x(0)
+sz = spin.z(0)
 sm = boson.annihilate(0)
 sm_dag = boson.create(0)
 

@@ -59,9 +59,6 @@ class RungeKuttaIntegrator(BaseIntegrator[CudmStateType]):
         super().__init__(**kwargs)
         self.rk_integrator = bindings.integrators.runge_kutta()
 
-    def support_distributed_state(self):
-        return True
-
     def is_native(self):
         return True
     

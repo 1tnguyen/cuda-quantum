@@ -1,5 +1,5 @@
 import cudaq
-from cudaq import boson, Schedule, RungeKuttaIntegrator
+from cudaq import boson, Schedule, ScipyZvodeIntegrator
 import numpy as np
 import cupy as cp
 import os
@@ -44,26 +44,26 @@ steps = np.linspace(0, 10, 2001)
 schedule = Schedule(steps, ["time"])
 
 # First, evolve the system without any collapse operators (ideal).
-evolution_result = cudaq.evolve(
+evolution_result = cudaq.evolve(hamiltonian,
+                                dimensions,
+                                schedule,
+                                rho0,
+                                observables=[boson.number(1),
+                                             boson.number(0)],
+                                collapse_operators=[],
+                                store_intermediate_results=True,
+                                integrator=ScipyZvodeIntegrator())
+
+# Then, evolve the system with a collapse operator modeling cavity decay (leaking photons)
+evolution_result_decay = cudaq.evolve(
     hamiltonian,
     dimensions,
     schedule,
     rho0,
     observables=[boson.number(1), boson.number(0)],
-    collapse_operators=[],
+    collapse_operators=[np.sqrt(0.1) * a],
     store_intermediate_results=True,
-    integrator=RungeKuttaIntegrator())
-
-# Then, evolve the system with a collapse operator modeling cavity decay (leaking photons)
-# evolution_result_decay = cudaq.evolve(
-#     hamiltonian,
-#     dimensions,
-#     schedule,
-#     rho0,
-#     observables=[boson.number(1), boson.number(0)],
-#     collapse_operators=[np.sqrt(0.1) * a],
-#     store_intermediate_results=True,
-#     integrator=RungeKuttaIntegrator())
+    integrator=ScipyZvodeIntegrator())
 
 get_result = lambda idx, res: [
     exp_vals[idx].expectation() for exp_vals in res.expectation_values()
