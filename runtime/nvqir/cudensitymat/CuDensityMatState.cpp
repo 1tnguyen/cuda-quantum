@@ -96,7 +96,6 @@ CuDensityMatState::createFromSizeAndPtr(std::size_t size, void *dataPtr,
     size = std::reduce(extents.begin(), extents.end(), 1, std::multiplies());
     dataPtr = const_cast<void *>(ptr);
   }
-
   std::complex<double> *devicePtr = nullptr;
 
   HANDLE_CUDA_ERROR(
@@ -116,9 +115,12 @@ CuDensityMatState::getTensor(std::size_t tensorIdx) const {
     throw std::runtime_error(
         "CuDensityMatState state only supports a single tensor");
 
+  const std::size_t dim = isDensityMatrix
+                              ? static_cast<std::size_t>(std::sqrt(dimension))
+                              : dimension;
   const std::vector<std::size_t> extents =
-      isDensityMatrix ? std::vector<std::size_t>{dimension, dimension}
-                      : std::vector<std::size_t>{dimension};
+      isDensityMatrix ? std::vector<std::size_t>{dim, dim}
+                      : std::vector<std::size_t>{dim};
   return Tensor{devicePtr, extents, precision::fp64};
 }
 

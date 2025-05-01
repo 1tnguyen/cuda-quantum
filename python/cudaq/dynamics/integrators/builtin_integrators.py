@@ -10,7 +10,7 @@ from ..integrator import BaseTimeStepper, BaseIntegrator
 from ..cudm_helpers import cudm, CudmStateType, CudmOperator, CudmWorkStream
 from ...util.timing_helper import ScopeTimer
 from typing import Sequence, Mapping
-from ..expressions import Operator
+from ...operators import Operator
 from ..schedule import Schedule
 from ...mlir._mlir_libs._quakeDialects.cudaq_runtime import MatrixOperator
 
@@ -37,7 +37,6 @@ class cuDensityMatTimeStepper(BaseTimeStepper[CudmStateType]):
 
         if not has_cupy:
             raise ImportError('CuPy is required to use integrators.')
-
         self.stepper = bindings.TimeStepper(schedule, dims, ham, collapsed_ops, 
                                             is_master_equation)
 
@@ -93,4 +92,5 @@ class RungeKuttaIntegrator(BaseIntegrator[CudmStateType]):
         self.rk_integrator.setSystem(system_, schedule_)
     
     def integrate(self, t):
+        print("Integrate @", t)
         self.rk_integrator.integrate(t)   

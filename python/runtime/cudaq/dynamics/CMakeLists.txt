@@ -31,5 +31,5 @@ target_include_directories(nvqir_dynamics_bindings
         ${CMAKE_SOURCE_DIR}/runtime/nvqir/cudensitymat 
         ${CUDENSITYMAT_INCLUDE_DIR}
         ${CUDAToolkit_INCLUDE_DIRS})
-install(TARGETS nvqir_dynamics_bindings DESTINATION cudaq/operator)
+install(TARGETS nvqir_dynamics_bindings DESTINATION cudaq/dynamics)
 
