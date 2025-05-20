@@ -118,3 +118,102 @@ TEST(EvolveAPITester, checkTimeDependent) {
     EXPECT_NEAR((double)expVals[0], theoryResults[count++], 1e-3);
   }
 }
+
+TEST(EvolveAPITester, checkSuperopSimple) {
+  const cudaq::dimension_map dims = {{0, 2}};
+  cudaq::product_op<cudaq::matrix_handler> ham_ =
+      2.0 * M_PI * 0.1 * cudaq::spin_op::x(0);
+  cudaq::sum_op<cudaq::matrix_handler> ham(ham_);
+  constexpr int numSteps = 10;
+  cudaq::schedule schedule(cudaq::linspace(0.0, 1.0, numSteps), {"t"});
+  auto initialState =
+      cudaq::state::from_data(std::vector<std::complex<double>>{1.0, 0.0});
+  cudaq::integrators::runge_kutta integrator(1, 0.001);
+  cudaq::superoperator sup;
+  // Apply `-iH * psi` superop
+  sup += cudaq::superoperator::left_multiply(std::complex<double>(0.0, -1.0) *
+                                             ham);
+  auto result = cudaq::evolve(sup, dims, schedule, initialState, integrator,
+                              {cudaq::spin_op::z(0)}, true);
+
+  std::vector<double> theoryResults;
+  for (const auto &t : schedule) {
+    const double expected = std::cos(4.0 * M_PI * 0.1 * t.real());
+    theoryResults.emplace_back(expected);
+  }
+
+  int count = 0;
+  for (auto expVals : result.expectation_values.value()) {
+    EXPECT_EQ(expVals.size(), 1);
+    std::cout << "Result = " << (double)expVals[0] << "; expected "
+              << theoryResults[count] << "\n";
+    EXPECT_NEAR((double)expVals[0], theoryResults[count++], 1e-3);
+  }
+}
+
+
+TEST(EvolveAPITester, checkSuperopMasterEquation) {
+  constexpr int N = 10;
+  constexpr int numSteps = 101;
+  cudaq::schedule schedule(cudaq::linspace(0.0, 1.0, numSteps), {"t"});
+  auto ham_ = cudaq::boson_op::number(0);
+  const cudaq::dimension_map dimensions{{0, N}};
+  std::vector<std::complex<double>> rho0_(N * N, 0.0);
+  rho0_.back() = 1.0;
+  auto initialState = cudaq::state::from_data(rho0_);
+  cudaq::sum_op<cudaq::matrix_handler> ham(ham_);
+  cudaq::integrators::runge_kutta integrator(4, 0.01);
+  cudaq::superoperator sup;
+  // Apply `-i[H, rho]` superop
+  sup += cudaq::superoperator::left_multiply(std::complex<double>(0.0, -1.0) *
+                                             ham);
+  sup += cudaq::superoperator::right_multiply(std::complex<double>(0.0, 1.0) *
+                                              ham);
+
+  constexpr double decay_rate = 0.1;
+
+  auto td_function =
+      [decay_rate](const std::unordered_map<std::string, std::complex<double>>
+                       &parameters) {
+        auto entry = parameters.find("t");
+        if (entry == parameters.end())
+          throw std::runtime_error("Cannot find value of expected parameter");
+        const auto t = entry->second.real();
+        const auto result = std::sqrt(decay_rate * std::exp(-t));
+        return result;
+      };
+
+  auto collapseOperator =
+      cudaq::scalar_operator(td_function) * cudaq::boson_op::annihilate(0);
+  auto collapseOperatorDagger =
+      cudaq::scalar_operator(td_function) * cudaq::boson_op::create(0);
+  cudaq::sum_op<cudaq::matrix_handler> L(collapseOperator);
+  cudaq::sum_op<cudaq::matrix_handler> L_dagger(collapseOperatorDagger);
+  // Lindblad terms
+  // L * rho * L_dagger
+  sup += cudaq::superoperator::left_right_multiply(L, L_dagger);
+  // -0.5 * L_dagger * L * rho
+  sup += cudaq::superoperator::left_multiply(-0.5 * L_dagger * L);
+  // -0.5 * rho * L_dagger * L
+  sup += cudaq::superoperator::right_multiply(-0.5 * L_dagger * L);
+
+  auto result = cudaq::evolve(sup, dimensions, schedule, initialState,
+                              integrator, {cudaq::boson_op::number(0)}, true);
+
+  EXPECT_TRUE(result.expectation_values.has_value());
+  EXPECT_EQ(result.expectation_values.value().size(), numSteps);
+  std::vector<double> theoryResults;
+  for (const auto &t : schedule) {
+    const double expected =
+        (N - 1) * std::exp(-decay_rate * (1.0 - std::exp(-t.real())));
+    theoryResults.emplace_back(expected);
+  }
+
+  int count = 0;
+  for (auto expVals : result.expectation_values.value()) {
+    EXPECT_EQ(expVals.size(), 1);
+    std::cout << "Result = " << (double)expVals[0] << "; expected "
+              << theoryResults[count] << "\n";
+    EXPECT_NEAR((double)expVals[0], theoryResults[count++], 1e-3);
+  }
+}

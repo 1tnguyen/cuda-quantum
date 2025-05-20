@@ -1714,6 +1714,52 @@ private:
   std::optional<std::pair<scalar_operator, std::vector<double>>> delta_local;
 };
 
+// https://en.wikipedia.org/wiki/Superoperator
+// 'superoperator' is a linear operator acting on a vector space of linear
+// operators.
+class superoperator {
+public:
+  // A superoperator term is a pair of left/right multiplication operators.
+  // At least side must be non-null.
+  struct apply_op {
+    cudaq::sum_op<cudaq::matrix_handler> op;
+    bool adjoint;
+    apply_op(const cudaq::sum_op<cudaq::matrix_handler> &sumOp,
+             bool isAdjoint = false)
+        : op(sumOp), adjoint(isAdjoint) {}
+  };
+  using term = std::pair<std::optional<apply_op>, std::optional<apply_op>>;
+  superoperator() = default;
+
+  superoperator &operator+=(const term &term) {
+    m_terms.emplace_back(term);
+    return *this;
+  }
+
+  static term left_multiply(const cudaq::sum_op<cudaq::matrix_handler> &op,
+                            bool adjoint = false) {
+    return std::make_pair(apply_op{op, adjoint}, std::optional<apply_op>{});
+  }
+
+  static term right_multiply(const cudaq::sum_op<cudaq::matrix_handler> &op,
+                             bool adjoint = false) {
+    return std::make_pair(std::optional<apply_op>{}, apply_op{op, adjoint});
+  }
+
+  static term
+  left_right_multiply(const cudaq::sum_op<cudaq::matrix_handler> &leftOp,
+                      const cudaq::sum_op<cudaq::matrix_handler> &rightOp,
+                      bool leftAdjoint = false, bool rightAdjoint = false) {
+    return std::make_pair(apply_op{leftOp, leftAdjoint},
+                          apply_op{rightOp, rightAdjoint});
+  }
+
+  const std::vector<term> &get_terms() const { return m_terms; }
+
+private:
+  std::vector<term> m_terms;
+};
+
 // type aliases for convenience
 /// @brief Typedef for a map of parameters.
 /// This typedef defines `parameter_map` as a map of strings to complex
