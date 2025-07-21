@@ -278,8 +278,9 @@ BraketExecutor::execute(std::vector<KernelExecution> &codesToExecute,
           }
           auto resultsJson = nlohmann::json::parse(
               s3Response.GetResultWithOwnership().GetBody());
-
-          auto c = serverHelper->processResults(resultsJson, taskArn);
+          auto braketServerHelper =
+              dynamic_cast<BraketServerHelper *>(serverHelper);
+          auto c = braketServerHelper->processResults(resultsJson, taskArn);
 
           if (isObserve) {
             // Use the job name instead of the global register.

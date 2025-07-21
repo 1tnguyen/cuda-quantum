@@ -26,7 +26,7 @@ public:
   /// @brief Given a successful job and the success response,
   /// retrieve the results and map them to a sample_result.
   cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                      std::string &jobId) override;
+                                      const std::string &jobId) override;
 };
 
 } // namespace cudaq

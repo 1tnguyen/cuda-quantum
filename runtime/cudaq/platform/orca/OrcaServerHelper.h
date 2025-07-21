@@ -16,7 +16,7 @@
 
 namespace cudaq {
 
-class OrcaServerHelper : public ServerHelper {
+class OrcaServerHelper : public ServerHelperBase {
 
 protected:
   /// @brief The base URL
@@ -75,7 +75,7 @@ public:
 
   /// @brief Return the URL for retrieving job results
   std::string constructGetJobPath(ServerMessage &postResponse) override;
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Return true if the job is done
   bool jobIsDone(ServerMessage &getJobResponse) override;
@@ -85,7 +85,7 @@ public:
 
   /// @brief Given a completed job response, map back to the sample_result
   sample_result processResults(ServerMessage &postJobResponse,
-                               std::string &jobID) override;
+                               const std::string &jobID) override;
 };
 
 } // namespace cudaq

@@ -55,7 +55,7 @@ OrcaServerHelper::createJob(cudaq::orca::TBIParameters params) {
 
 // Process the results from a job
 sample_result OrcaServerHelper::processResults(ServerMessage &postJobResponse,
-                                               std::string &jobID) {
+                                               const std::string &jobID) {
   auto results = postJobResponse.at("results");
 
   CountsDictionary counts;
@@ -105,7 +105,7 @@ std::string OrcaServerHelper::constructGetJobPath(ServerMessage &postResponse) {
   return baseUrl + "v1/get_job/" + extractJobId(postResponse);
 }
 
-std::string OrcaServerHelper::constructGetJobPath(std::string &jobId) {
+std::string OrcaServerHelper::constructGetJobPath(const std::string &jobId) {
   return baseUrl + "v1/get_job/" + jobId;
 }
 

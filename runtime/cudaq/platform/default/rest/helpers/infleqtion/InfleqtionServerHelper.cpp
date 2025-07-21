@@ -43,7 +43,7 @@ namespace cudaq {
 /// @brief The InfleqtionServerHelper class extends the ServerHelper class to
 /// handle interactions with the Infleqtion server for submitting and retrieving
 /// quantum computation jobs.
-class InfleqtionServerHelper : public ServerHelper {
+class InfleqtionServerHelper : public ServerHelperBase {
   static constexpr const char *DEFAULT_URL = "https://superstaq.infleqtion.com";
   static constexpr const char *DEFAULT_VERSION = "v0.2.0";
 
@@ -71,7 +71,7 @@ public:
   std::string constructGetJobPath(ServerMessage &postResponse) override;
 
   /// @brief Constructs the URL for retrieving a job based on a job ID.
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Checks if a job is done based on the server's response to a job
   /// retrieval request.
@@ -80,7 +80,7 @@ public:
   /// @brief Processes the server's response to a job retrieval request and
   /// maps the results back to sample results.
   cudaq::sample_result processResults(ServerMessage &getJobResponse,
-                                      std::string &jobId) override;
+                                      const std::string &jobId) override;
 
   /// @brief Override the polling interval method
   std::chrono::microseconds
@@ -231,7 +231,7 @@ InfleqtionServerHelper::constructGetJobPath(ServerMessage &postResponse) {
 }
 
 // Construct the path to get a job based on job ID
-std::string InfleqtionServerHelper::constructGetJobPath(std::string &jobId) {
+std::string InfleqtionServerHelper::constructGetJobPath(const std::string &jobId) {
   if (!keyExists("url") || !keyExists("version"))
     throw std::runtime_error(
         "Keys 'url' or 'version' don't exist in backendConfig.");
@@ -259,7 +259,7 @@ bool InfleqtionServerHelper::jobIsDone(ServerMessage &getJobResponse) {
 // Process the results from a job
 cudaq::sample_result
 InfleqtionServerHelper::processResults(ServerMessage &getJobResponse,
-                                       std::string &jobId) {
+                                       const std::string &jobId) {
   // Check if the response contains 'samples' key
   if (!getJobResponse.contains("samples"))
     throw std::runtime_error("Samples not found in the job results.");

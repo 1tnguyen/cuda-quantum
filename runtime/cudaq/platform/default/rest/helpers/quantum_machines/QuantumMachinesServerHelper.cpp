@@ -26,7 +26,7 @@ namespace cudaq {
 /// @brief The QuantumMachinesServerHelper class extends the ServerHelper class
 /// to handle interactions with the Quantum Machines server for submitting and
 /// retrieving quantum computation jobs.
-class QuantumMachinesServerHelper : public ServerHelper {
+class QuantumMachinesServerHelper : public ServerHelperBase {
   static constexpr const char *DEFAULT_URL = "https://api.quantum-machines.com";
   static constexpr const char *DEFAULT_VERSION = "v1.0.0";
   static constexpr const char *DEFAULT_EXECUTOR = "mock";
@@ -105,8 +105,8 @@ public:
   }
 
   /// @brief Constructs the URL for retrieving a job based on a job ID.
-  std::string constructGetJobPath(std::string &jobId) override {
-    cudaq::info("In constructGetJobPath(std::string &jobId)");
+  std::string constructGetJobPath(const std::string &jobId) override {
+    cudaq::info("In constructGetJobPath(const std::string &jobId)");
     std::string results_url = backendConfig["url"] + "/v1/results/" + jobId;
     return results_url;
   }
@@ -122,7 +122,7 @@ public:
   /// @brief Processes the server's response to a job retrieval request and
   /// maps the results back to sample results.
   cudaq::sample_result processResults(ServerMessage &getJobResponse,
-                                      std::string &jobId) override {
+                                      const std::string &jobId) override {
     cudaq::info("Sample results: {}", getJobResponse.dump());
     auto samplesJson = getJobResponse["samples"];
     cudaq::CountsDictionary counts;

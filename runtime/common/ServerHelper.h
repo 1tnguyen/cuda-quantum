@@ -15,7 +15,7 @@
 #include "Registry.h"
 #include "SampleResult.h"
 #include <filesystem>
-
+#include "RestClient.h"
 namespace cudaq {
 
 /// @brief Typedef for a mapping of key-values describing the remote server
@@ -65,6 +65,7 @@ using OutputNamesType = std::map<std::size_t, ResultInfoType>;
 /// to a remote server. It enables clients to create server-specific job
 /// payloads, extract job ids, and query / request job results. Moreover it
 /// provides a hook for extracting results from a server response.
+
 class ServerHelper : public registry::RegisteredType<ServerHelper> {
 protected:
   /// @brief All ServerHelpers can be configured at the `nvq++` command line.
@@ -99,6 +100,26 @@ public:
   /// @return
   BackendConfig getConfig() { return backendConfig; }
 
+  virtual std::string submitJob(const KernelExecution &codeToExecute) = 0;
+
+  virtual void waitForJobCompletion(const std::string &jobId) = 0;
+  virtual cudaq::sample_result getExecutionResult(const std::string &jobId) = 0;
+  /// @brief Adjust the compiler pass pipeline (if desired)
+  virtual void updatePassPipeline(const std::filesystem::path &platformPath,
+                                  std::string &passPipeline) {}
+};
+
+class ServerHelperBase : public ServerHelper {
+  RestClient client;
+public:
+  virtual std::string submitJob(const KernelExecution &codeToExecute) override;
+  virtual void waitForJobCompletion(const std::string &jobId) override;
+  virtual cudaq::sample_result
+  getExecutionResult(const std::string &jobId) override;
+  /// @brief Adjust the compiler pass pipeline (if desired)
+  virtual void updatePassPipeline(const std::filesystem::path &platformPath,
+                                  std::string &passPipeline) override {}
+
   /// @brief Return the POST/GET required headers.
   /// @return
   virtual RestHeaders getHeaders() = 0;
@@ -113,7 +134,7 @@ public:
 
   /// @brief Get the specific path required to retrieve job results.
   /// Construct specifically from the job id.
-  virtual std::string constructGetJobPath(std::string &jobId) = 0;
+  virtual std::string constructGetJobPath(const std::string &jobId) = 0;
 
   /// @brief Get the specific path required to retrieve job results. Construct
   /// from the full server response message.
@@ -135,10 +156,6 @@ public:
   /// @param jobId
   /// @return
   virtual cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                              std::string &jobId) = 0;
-
-  /// @brief Adjust the compiler pass pipeline (if desired)
-  virtual void updatePassPipeline(const std::filesystem::path &platformPath,
-                                  std::string &passPipeline) {}
+                                              const std::string &jobId) = 0;
 };
 } // namespace cudaq

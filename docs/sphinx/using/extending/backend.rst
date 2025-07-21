@@ -62,7 +62,7 @@ Here's a template for implementing a server helper class:
     /// @brief The ProviderNameServerHelper class extends the ServerHelper class
     /// to handle interactions with the Provider Name server for submitting and
     /// retrieving quantum computation jobs.
-    class ProviderNameServerHelper : public ServerHelper {
+    class ProviderNameServerHelper : public ServerHelperBase {
       static constexpr const char *DEFAULT_URL = "https://api.provider-name.com";
       static constexpr const char *DEFAULT_VERSION = "v1.0";
     
@@ -123,7 +123,7 @@ Here's a template for implementing a server helper class:
       }
     
       /// @brief Example implementation of job ID tracking.
-      std::string constructGetJobPath(std::string &jobId) override {
+      std::string constructGetJobPath(const std::string &jobId) override {
         return backendConfig["url"] + "/jobs/" + jobId;
       }
     

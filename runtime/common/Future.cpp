@@ -20,26 +20,15 @@ sample_result future::get() {
     return inFuture.get();
 
 #ifdef CUDAQ_RESTCLIENT_AVAILABLE
-  RestClient client;
   auto serverHelper = registry::get<ServerHelper>(qpuName);
   serverHelper->initialize(serverConfig);
-  auto headers = serverHelper->getHeaders();
 
   std::vector<ExecutionResult> results;
   for (auto &id : jobs) {
     cudaq::info("Future retrieving results for {}.", id.first);
-
-    auto jobGetPath = serverHelper->constructGetJobPath(id.first);
-
-    cudaq::info("Future got job retrieval path as {}.", jobGetPath);
-    auto resultResponse = client.get(jobGetPath, "", headers);
-    while (!serverHelper->jobIsDone(resultResponse)) {
-      auto polling_interval =
-          serverHelper->nextResultPollingInterval(resultResponse);
-      std::this_thread::sleep_for(polling_interval);
-      resultResponse = client.get(jobGetPath, "", headers);
-    }
-    auto c = serverHelper->processResults(resultResponse, id.first);
+    const auto &jobId = id.first;
+    serverHelper->waitForJobCompletion(jobId);
+    auto c = serverHelper->getExecutionResult(jobId);
 
     if (isObserve) {
       // Use the job name instead of the global register.

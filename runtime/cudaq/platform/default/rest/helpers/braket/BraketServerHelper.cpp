@@ -91,7 +91,7 @@ BraketServerHelper::createJob(std::vector<KernelExecution> &circuitCodes) {
 };
 
 sample_result BraketServerHelper::processResults(ServerMessage &resultsJson,
-                                                 std::string &jobID) {
+                                                 const std::string &jobID) {
 
   if (outputNames.find(jobID) == outputNames.end())
     throw std::runtime_error("Could not find output names for job " + jobID);

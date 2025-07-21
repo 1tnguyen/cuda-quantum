@@ -85,7 +85,7 @@ std::string PasqalServerHelper::extractJobId(ServerMessage &postResponse) {
   return postResponse["data"]["id"].get<std::string>();
 }
 
-std::string PasqalServerHelper::constructGetJobPath(std::string &jobId) {
+std::string PasqalServerHelper::constructGetJobPath(const std::string &jobId) {
   return baseUrl + apiPath + "/v1/cudaq/job/" + jobId;
 }
 
@@ -103,7 +103,7 @@ bool PasqalServerHelper::jobIsDone(ServerMessage &getJobResponse) {
 }
 
 sample_result PasqalServerHelper::processResults(ServerMessage &postJobResponse,
-                                                 std::string &jobId) {
+                                                 const std::string &jobId) {
   auto status = postJobResponse["data"]["status"].get<std::string>();
   if (status != "DONE")
     throw std::runtime_error("Job status: " + status);

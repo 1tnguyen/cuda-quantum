@@ -11,7 +11,7 @@
 
 namespace cudaq {
 
-class PasqalServerHelper : public ServerHelper {
+class PasqalServerHelper : public ServerHelperBase {
 protected:
   /// @brief Server helper implementation for communicating with the REST API of
   /// Pasqal's cloud platform.
@@ -40,7 +40,7 @@ public:
 
   /// @brief Get the specific path required to retrieve job results. Construct
   /// specifically from the job id.
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Get the specific path required to retrieve job results. Construct
   /// from the full server response message.
@@ -62,7 +62,7 @@ public:
   /// @param jobId
   /// @return
   sample_result processResults(ServerMessage &postJobResponse,
-                               std::string &jobId) override;
+                               const std::string &jobId) override;
 };
 
 } // namespace cudaq

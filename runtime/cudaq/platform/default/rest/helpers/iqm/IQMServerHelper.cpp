@@ -19,7 +19,7 @@
 
 namespace cudaq {
 
-class IQMServerHelper : public ServerHelper {
+class IQMServerHelper : public ServerHelperBase {
 protected:
   /// @brief The base URL
   std::string iqmServerUrl = "http://localhost/cocos/";
@@ -154,7 +154,7 @@ public:
 
   /// @brief Return the URL for retrieving job results
   std::string constructGetJobPath(ServerMessage &postResponse) override;
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Return next results polling interval
   std::chrono::microseconds
@@ -165,7 +165,7 @@ public:
 
   /// @brief Given a completed job response, map back to the sample_result
   cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                      std::string &jobId) override;
+                                      const std::string &jobId) override;
 
   /// @brief Update `passPipeline` with architecture-specific pass options
   void updatePassPipeline(const std::filesystem::path &platformPath,
@@ -204,7 +204,7 @@ std::string IQMServerHelper::constructGetJobPath(ServerMessage &postResponse) {
   return "jobs" + postResponse["id"].get<std::string>() + "/counts";
 }
 
-std::string IQMServerHelper::constructGetJobPath(std::string &jobId) {
+std::string IQMServerHelper::constructGetJobPath(const std::string &jobId) {
   return iqmServerUrl + "jobs/" + jobId + "/counts";
 }
 
@@ -224,7 +224,7 @@ bool IQMServerHelper::jobIsDone(ServerMessage &getJobResponse) {
 
 cudaq::sample_result
 IQMServerHelper::processResults(ServerMessage &postJobResponse,
-                                std::string &jobID) {
+                                const std::string &jobID) {
   cudaq::info("postJobResponse: {}", postJobResponse.dump());
 
   // check if the job succeeded

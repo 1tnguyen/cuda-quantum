@@ -23,7 +23,7 @@ const std::map<std::string, uint> Machines = {{Lucy, 8}, {Toshiko, 32}};
 /// @brief The OQCServerHelper class extends the ServerHelper class to handle
 /// interactions with the OQC server for submitting and retrieving quantum
 /// computation jobs.
-class OQCServerHelper : public ServerHelper {
+class OQCServerHelper : public ServerHelperBase {
 private:
   /// @brief RestClient used for HTTP requests.
 
@@ -67,7 +67,7 @@ public:
   std::string constructGetJobPath(ServerMessage &postResponse) override;
 
   /// @brief Constructs the URL for retrieving a job based on a job ID.
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Constructs the URL for retrieving the results of a job based on the
   /// server's response to a job submission.
@@ -87,7 +87,7 @@ public:
   /// @brief Processes the server's response to a job retrieval request and
   /// maps the results back to sample results.
   cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                      std::string &jobID) override;
+                                      const std::string &jobID) override;
 
   /// @brief Update `passPipeline` with architecture-specific pass options
   void updatePassPipeline(const std::filesystem::path &platformPath,
@@ -299,7 +299,7 @@ std::string OQCServerHelper::constructGetJobPath(ServerMessage &postResponse) {
 }
 
 // Overloaded version of constructGetJobPath for jobId input
-std::string OQCServerHelper::constructGetJobPath(std::string &jobId) {
+std::string OQCServerHelper::constructGetJobPath(const std::string &jobId) {
   if (!keyExists("job_path")) {
     throw std::runtime_error("Key 'job_path' doesn't exist in backendConfig.");
   }
@@ -347,7 +347,7 @@ bool OQCServerHelper::jobIsDone(ServerMessage &getJobResponse) {
 // Process the results from a job
 cudaq::sample_result
 OQCServerHelper::processResults(ServerMessage &postJobResponse,
-                                std::string &jobId) {
+                                const std::string &jobId) {
 
   if (postJobResponse["results"].is_null()) {
     throw std::runtime_error("OQC backend error message: " +

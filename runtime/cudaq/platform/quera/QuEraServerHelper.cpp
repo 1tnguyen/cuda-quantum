@@ -51,7 +51,7 @@ QuEraServerHelper::createJob(std::vector<KernelExecution> &circuitCodes) {
 }
 
 sample_result QuEraServerHelper::processResults(ServerMessage &resultsJson,
-                                                std::string &) {
+                                                const std::string &) {
   std::vector<ExecutionResult> results;
   CountsDictionary globalReg;
   CountsDictionary preSeqReg;

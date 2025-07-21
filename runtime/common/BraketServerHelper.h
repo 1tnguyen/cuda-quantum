@@ -22,7 +22,7 @@ namespace cudaq {
 /// @brief The BraketServerHelper class extends the ServerHelper class to handle
 /// interactions with the Amazon Braket server for submitting and retrieving
 /// quantum computation jobs.
-class BraketServerHelper : public ServerHelper {
+class BraketServerHelper : public ServerHelperBase {
 public:
   /// @brief Returns the name of the server helper.
   const std::string name() const override { return "braket"; }
@@ -38,7 +38,9 @@ public:
 
   std::string extractJobId(ServerMessage &postResponse) override { return ""; }
 
-  std::string constructGetJobPath(std::string &jobId) override { return ""; }
+  std::string constructGetJobPath(const std::string &jobId) override {
+    return "";
+  }
 
   std::string constructGetJobPath(ServerMessage &postResponse) override {
     return "";
@@ -47,7 +49,7 @@ public:
   bool jobIsDone(ServerMessage &getJobResponse) override { return true; }
 
   cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                      std::string &jobId) override;
+                                      const std::string &jobId) override;
 
   void setOutputNames(const std::string &taskId,
                       const std::string &output_names);

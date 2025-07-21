@@ -32,7 +32,7 @@ std::string searchAPIKey(std::string &key, std::string &refreshKey,
 /// to map Job requests and Job result retrievals actions from the calling
 /// Executor to the specific schema required by the remote REST
 /// server.
-class AnyonServerHelper : public ServerHelper {
+class AnyonServerHelper : public ServerHelperBase {
 protected:
   /// @brief The base URL
   std::string baseUrl = "https://api.anyon.cloud:5000/";
@@ -95,14 +95,14 @@ public:
 
   /// @brief Return the URL for retrieving job results
   std::string constructGetJobPath(ServerMessage &postResponse) override;
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Return true if the job is done
   bool jobIsDone(ServerMessage &getJobResponse) override;
 
   /// @brief Given a completed job response, map back to the sample_result
   cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                      std::string &jobID) override;
+                                      const std::string &jobID) override;
 
   /// @brief Update `passPipeline` with architecture-specific pass options
   void updatePassPipeline(const std::filesystem::path &platformPath,
@@ -157,7 +157,7 @@ AnyonServerHelper::constructGetJobPath(ServerMessage &postResponse) {
   return baseUrl + "job/" + extractJobId(postResponse);
 }
 
-std::string AnyonServerHelper::constructGetJobPath(std::string &jobId) {
+std::string AnyonServerHelper::constructGetJobPath(const std::string &jobId) {
   return baseUrl + "job/" + jobId;
 }
 
@@ -180,7 +180,7 @@ bool AnyonServerHelper::jobIsDone(ServerMessage &getJobResponse) {
 
 cudaq::sample_result
 AnyonServerHelper::processResults(ServerMessage &postJobResponse,
-                                  std::string &jobId) {
+                                  const std::string &jobId) {
   // Results come back as a map of vectors. Each map key corresponds to a qubit
   // and its corresponding vector holds the measurement results in each shot:
   //      { "results" : { "r0" : ["0", "0", ...],

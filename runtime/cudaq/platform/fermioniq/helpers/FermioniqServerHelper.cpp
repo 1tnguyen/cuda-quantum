@@ -20,7 +20,7 @@ namespace cudaq {
 /// @brief The FermioniqServerHelper class extends the ServerHelper class to
 /// handle interactions with the Fermioniq server for submitting and retrieving
 /// quantum computation jobs.
-class FermioniqServerHelper : public ServerHelper {
+class FermioniqServerHelper : public ServerHelperBase {
 
   static constexpr int POLLING_INTERVAL_IN_SECONDS = 1;
 
@@ -69,7 +69,7 @@ public:
   std::string constructGetJobPath(ServerMessage &postResponse) override;
 
   /// @brief Constructs the URL for retrieving a job based on a job ID.
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Checks if a job is done based on the server's response to a job
   /// retrieval request.
@@ -78,7 +78,7 @@ public:
   /// @brief Processes the server's response to a job retrieval request and
   /// maps the results back to sample results.
   cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                      std::string &jobId) override;
+                                      const std::string &jobId) override;
 
   void refreshTokens(bool force_refresh);
 
@@ -373,7 +373,7 @@ FermioniqServerHelper::constructGetJobPath(ServerMessage &postResponse) {
 }
 
 // Overloaded version of constructGetJobPath for jobId input
-std::string FermioniqServerHelper::constructGetJobPath(std::string &jobId) {
+std::string FermioniqServerHelper::constructGetJobPath(const std::string &jobId) {
   cudaq::debug("constructGetJobPath (jobId) from {}", jobId);
 
   auto ret = backendConfig.at(CFG_URL_KEY) + "/api/jobs/" + jobId;
@@ -383,7 +383,7 @@ std::string FermioniqServerHelper::constructGetJobPath(std::string &jobId) {
 // Process the results from a job
 cudaq::sample_result
 FermioniqServerHelper::processResults(ServerMessage &postJobResponse,
-                                      std::string &jobID) {
+                                      const std::string &jobID) {
   cudaq::debug("processResults for job: {}", jobID);
 
   RestClient client;

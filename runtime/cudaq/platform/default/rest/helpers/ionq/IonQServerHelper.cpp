@@ -20,7 +20,7 @@ namespace cudaq {
 /// @brief The IonQServerHelper class extends the ServerHelper class to handle
 /// interactions with the IonQ server for submitting and retrieving quantum
 /// computation jobs.
-class IonQServerHelper : public ServerHelper {
+class IonQServerHelper : public ServerHelperBase {
   static constexpr const char *DEFAULT_URL = "https://api.ionq.co";
   static constexpr const char *DEFAULT_VERSION = "v0.3";
 
@@ -48,7 +48,7 @@ public:
   std::string constructGetJobPath(ServerMessage &postResponse) override;
 
   /// @brief Constructs the URL for retrieving a job based on a job ID.
-  std::string constructGetJobPath(std::string &jobId) override;
+  std::string constructGetJobPath(const std::string &jobId) override;
 
   /// @brief Constructs the URL for retrieving the results of a job based on the
   /// server's response to a job submission.
@@ -68,7 +68,7 @@ public:
   /// @brief Processes the server's response to a job retrieval request and
   /// maps the results back to sample results.
   cudaq::sample_result processResults(ServerMessage &postJobResponse,
-                                      std::string &jobId) override;
+                                      const std::string &jobId) override;
 
 private:
   /// @brief RestClient used for HTTP requests.
@@ -251,7 +251,7 @@ std::string IonQServerHelper::constructGetJobPath(ServerMessage &postResponse) {
 }
 
 // Overloaded version of constructGetJobPath for jobId input
-std::string IonQServerHelper::constructGetJobPath(std::string &jobId) {
+std::string IonQServerHelper::constructGetJobPath(const std::string &jobId) {
   if (!keyExists("job_path"))
     throw std::runtime_error("Key 'job_path' doesn't exist in backendConfig.");
 
@@ -354,7 +354,7 @@ bool IonQServerHelper::jobIsDone(ServerMessage &getJobResponse) {
 // Process the results from a job
 cudaq::sample_result
 IonQServerHelper::processResults(ServerMessage &postJobResponse,
-                                 std::string &jobID) {
+                                 const std::string &jobID) {
   // Construct the path to get the results
   auto resultsGetPath = constructGetResultsPath(postJobResponse);
   // Get the results
