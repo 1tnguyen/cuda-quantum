@@ -77,7 +77,7 @@ for gate in ["x", "y", "z", "h", "s", "t", "rx", "ry", "rz"]:
     # Add depolarization noise for single qubit gates
     noise_model.add_all_qubit_channel(gate, depol_1q)
 
-for gate in ["cx", "cz"]:
+for gate in ["cx", "cz", "crx", "crz", "cr1"]:
     # Add amplitude damping noise for two qubit gates
     noise_model.add_all_qubit_channel(gate, amplitude_damping_model_2q(gate_time_2q))
     # Add dephasing noise for two qubit gates
