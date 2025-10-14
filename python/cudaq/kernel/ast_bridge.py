@@ -646,6 +646,8 @@ class PyASTBridge(ast.NodeVisitor):
         sourceElePtrTy = cc.PointerType.get(sourceEleType)
         sourceArrElePtrTy = cc.PointerType.get(sourceArrType)
         sourceValue = self.ifPointerThenLoad(sourcePtr)
+        # No pointer to i1 is allowed
+        assert sourceEleType != self.getIntegerType(1)
         sourceDataPtr = cc.StdvecDataOp(sourceArrElePtrTy, sourceValue).result
         sourceSize = cc.StdvecSizeOp(self.getIntegerType(), sourceValue).result
 
@@ -760,6 +762,9 @@ class PyASTBridge(ast.NodeVisitor):
             MLIR Value containing the loaded element
         """
         if cc.StdvecType.isinstance(vector.type):
+            # No pointer to i1 is allowed
+            assert cc.StdvecType.getElementType(
+                        vector.type) != self.getIntegerType(1)
             data_ptr = cc.StdvecDataOp(
                 cc.PointerType.get(
                     cc.ArrayType.get(cc.StdvecType.getElementType(
@@ -852,6 +857,7 @@ class PyASTBridge(ast.NodeVisitor):
         with InsertionPoint(whileBlock):
             condPred = IntegerAttr.get(
                 iTy, 2) if not isDecrementing else IntegerAttr.get(iTy, 4)
+            assert whileBlock.arguments[0].type == endVal.type
             cc.ConditionOp(
                 arith.CmpIOp(condPred, whileBlock.arguments[0], endVal).result,
                 whileBlock.arguments)
@@ -934,6 +940,8 @@ class PyASTBridge(ast.NodeVisitor):
                     elePtrTy = cc.PointerType.get(eleTy)
                     arrTy = cc.ArrayType.get(eleTy)
                     ptrArrTy = cc.PointerType.get(arrTy)
+                    # No pointer to i1 is allowed
+                    assert eleTy != self.getIntegerType(1)
                     vecPtr = cc.StdvecDataOp(ptrArrTy, value).result
                     attr = DenseI32ArrayAttr.get([kDynamicPtrIndex], context=self.ctx)
                     nrArgs = len(target.elts)
@@ -1391,6 +1399,12 @@ class PyASTBridge(ast.NodeVisitor):
                 self.visit(node.value)
                 valueToStore = self.popValue()
                 # Store the value
+                print("HERE", ptrVal, valueToStore)
+                print("Element type", ptrEleType)
+                # cast if needed
+                if not ptrEleType == valueToStore.type:
+                    valueToStore = self.changeOperandToType(ptrEleType, valueToStore)
+                print("After cast", valueToStore)
                 cc.StoreOp(valueToStore, ptrVal)
                 return target.value, None
 
@@ -1664,7 +1678,54 @@ class PyASTBridge(ast.NodeVisitor):
                 func.CallOp(otherKernel, values)
             else:
                 result = func.CallOp(otherKernel, values).result
-                self.pushValue(result)
+                print("Function call result:", result)
+                # Check if the result is a vector type
+                if cc.StdvecType.isinstance(result.type):
+                    print("Result is a vector type:", result.type)
+                '''
+                auto eleTy = [&]() -> Type {
+        auto et = vecTy.getElementType();
+        if (et == builder.getI1Type())
+          return builder.getI8Type();
+        return et;
+      }();
+      auto data = builder.create<cudaq::cc::StdvecDataOp>(
+          loc, cudaq::cc::PointerType::get(eleTy), call.getResult(0));
+      auto i64Ty = builder.getI64Type();
+      auto len = builder.create<cudaq::cc::StdvecSizeOp>(loc, i64Ty,
+                                                         call.getResult(0));
+      auto eleSize = builder.create<cudaq::cc::SizeOfOp>(loc, i64Ty, eleTy);
+      auto size = builder.create<arith::MulIOp>(loc, len, eleSize);
+      auto buffer = builder.create<cudaq::cc::AllocaOp>(loc, eleTy, size);
+      auto i8PtrTy = cudaq::cc::PointerType::get(builder.getI8Type());
+      auto cbuffer = builder.create<cudaq::cc::CastOp>(loc, i8PtrTy, buffer);
+      auto cdata = builder.create<cudaq::cc::CastOp>(loc, i8PtrTy, data);
+      builder.create<func::CallOp>(loc, TypeRange{},
+                                   "__nvqpp_vectorCopyToStack",
+                                   ValueRange{cbuffer, cdata, size});
+      Value newSpan =
+          builder.create<cudaq::cc::StdvecInitOp>(loc, vecTy, buffer, len);
+      return pushValue(newSpan);
+                '''
+                elem_ty = cc.StdvecType.getElementType(result.type)
+                if elem_ty == self.getIntegerType(1):
+                    elem_ty = self.getIntegerType(8)
+                data = cc.StdvecDataOp(cc.PointerType.get(elem_ty), result).result
+                i64Ty = self.getIntegerType(64)
+                length = cc.StdvecSizeOp(i64Ty, result).result
+                elemSize = cc.SizeOfOp(i64Ty, TypeAttr.get(elem_ty)).result
+                size = arith.MulIOp(length, elemSize).result
+                buffer = cc.AllocaOp(cc.PointerType.get(cc.ArrayType.get(elem_ty)), TypeAttr.get(elem_ty), seqSize=size).result
+                print("Buffer:", buffer)
+                i8PtrTy = cc.PointerType.get(self.getIntegerType(8))
+                cbuffer = cc.CastOp(i8PtrTy, buffer).result
+                cdata = cc.CastOp(i8PtrTy, data).result
+                print("Calling __nvqpp_vectorCopyToStack", cbuffer, cdata, size)
+                symName = '__nvqpp_vectorCopyToStack'
+                load_intrinsic(self.module, symName)
+                func.CallOp([], symName, [cbuffer, cdata, size])
+                newSpan = cc.StdvecInitOp(result.type, buffer, length=length).result
+                self.pushValue(newSpan)
 
         def checkControlAndTargetTypes(controls, targets):
             """
@@ -1900,6 +1961,8 @@ class PyASTBridge(ast.NodeVisitor):
                             arrEleTy = cc.ArrayType.get(iterEleTy)
                             elePtrTy = cc.PointerType.get(iterEleTy)
                             arrPtrTy = cc.PointerType.get(arrEleTy)
+                            # No pointer to i1 is allowed
+                            assert iterEleTy != self.getIntegerType(1)
                             vecPtr = cc.StdvecDataOp(arrPtrTy, iterable).result
                             eleAddr = cc.ComputePtrOp(
                                 elePtrTy, vecPtr, [idxVal],
@@ -2564,6 +2627,7 @@ class PyASTBridge(ast.NodeVisitor):
                         veqTy = quake.VeqType.get()
 
                         qubits = quake.AllocaOp(veqTy, size=numQubits).result
+                        assert eleTy != self.getIntegerType(1)
                         data = cc.StdvecDataOp(ptrArrTy, value).result
                         init = quake.InitializeStateOp(veqTy, qubits,
                                                        data).result
@@ -3088,6 +3152,7 @@ class PyASTBridge(ast.NodeVisitor):
                 iterableSize = cc.StdvecSizeOp(self.getIntegerType(), iterable).result
                 iterTy = cc.StdvecType.getElementType(iterable.type)
                 iterArrPtrTy = cc.PointerType.get(cc.ArrayType.get(iterTy))
+                assert iterTy != self.getIntegerType(1)
                 iterable = cc.StdvecDataOp(iterArrPtrTy, iterable).result
             elif quake.VeqType.isinstance(iterable.type):
                 iterableSize = quake.VeqSizeOp(self.getIntegerType(), iterable).result
@@ -3272,10 +3337,21 @@ class PyASTBridge(ast.NodeVisitor):
 
         listElemTy = get_item_type(node.elt)
         if listElemTy is None: return
-        listTy = cc.ArrayType.get(listElemTy)
-        listValue = cc.AllocaOp(cc.PointerType.get(listTy),
-                                TypeAttr.get(listElemTy),
-                                seqSize=iterableSize).result
+        print("listElemTy =", listElemTy)
+        is_bool = listElemTy == self.getIntegerType(1)
+        # Special case of i1:
+        if self.getIntegerType(1) == listElemTy:
+            # use i8 instead
+            listElemTy = self.getIntegerType(8)
+            listTy = cc.ArrayType.get(self.getIntegerType(8))
+            listValue = cc.AllocaOp(cc.PointerType.get(listTy),
+                                    TypeAttr.get(self.getIntegerType(8)),
+                                    seqSize=iterableSize).result
+        else:
+            listTy = cc.ArrayType.get(listElemTy)
+            listValue = cc.AllocaOp(cc.PointerType.get(listTy),
+                                    TypeAttr.get(listElemTy),
+                                    seqSize=iterableSize).result
 
         # General case of
         # `listVar = [expr(i) for i in iterable]`
@@ -3295,6 +3371,15 @@ class PyASTBridge(ast.NodeVisitor):
             self.__deconstructAssignment(node.generators[0].target, loadedEle)
             self.visit(node.elt)
             result = self.popValue()
+            print("result =", result)
+            # Check if this is an i1 value that we need to convert to i8
+            if result.type == self.getIntegerType(1):
+                # The list must be of i8 type
+                if listElemTy != self.getIntegerType(8):
+                    self.emitFatalError("cannot store boolean value in list of type " + str(listElemTy), node)
+                print("converting i1 to i8")
+                result = self.changeOperandToType(self.getIntegerType(8), result, allowDemotion=False)
+
             listValueAddr = cc.ComputePtrOp(
                 cc.PointerType.get(listElemTy), listValue, [iterVar],
                 DenseI32ArrayAttr.get([kDynamicPtrIndex], context=self.ctx))
@@ -3302,10 +3387,19 @@ class PyASTBridge(ast.NodeVisitor):
             self.symbolTable.popScope()
 
         self.createInvariantForLoop(iterableSize, bodyBuilder)
-        self.pushValue(
-            cc.StdvecInitOp(cc.StdvecType.get(listElemTy),
-                            listValue,
-                            length=iterableSize).result)
+        if is_bool:
+            # convert to stdvec<i1>
+            print("converting stdvec<i8> to stdvec<i1>")
+            vec_i8 = cc.StdvecInitOp(cc.StdvecType.get(self.getIntegerType(1)),
+                                listValue,
+                                length=iterableSize).result
+            # self.pushValue(cc.StdvecDataOp(cc.PointerType.get(cc.ArrayType.get(self.getIntegerType(1))), vec_i8).result)
+            self.pushValue(vec_i8)
+        else:    
+            self.pushValue(
+                cc.StdvecInitOp(cc.StdvecType.get(listElemTy),
+                                listValue,
+                                length=iterableSize).result)
         return
 
     def visit_List(self, node):
@@ -3488,6 +3582,7 @@ class PyASTBridge(ast.NodeVisitor):
                 nElementsVal = arith.SubIOp(upperVal, lowerVal).result
                 # need to compute the distance between `upperVal` and `lowerVal`
                 # then slice is `stdvecdataOp + computeptr[lower] + stdvecinit[ptr,distance]`
+                assert eleTy != self.getIntegerType(1)
                 vecPtr = cc.StdvecDataOp(ptrArrTy, var).result
                 ptr = cc.ComputePtrOp(
                     ptrTy, vecPtr, [lowerVal],
@@ -3527,6 +3622,12 @@ class PyASTBridge(ast.NodeVisitor):
             elePtrTy = cc.PointerType.get(eleTy)
             arrTy = cc.ArrayType.get(eleTy)
             ptrArrTy = cc.PointerType.get(arrTy)
+            # No pointer to i1 is allowed
+            if eleTy == self.getIntegerType(1):
+               elePtrTy = cc.PointerType.get(self.getIntegerType(8))
+               arrTy = cc.ArrayType.get(self.getIntegerType(8))
+               ptrArrTy = cc.PointerType.get(arrTy)
+            
             vecPtr = cc.StdvecDataOp(ptrArrTy, var).result
             eleAddr = cc.ComputePtrOp(
                 elePtrTy, vecPtr, [idx],
@@ -3535,7 +3636,14 @@ class PyASTBridge(ast.NodeVisitor):
             if self.subscriptPushPointerValue:
                 self.pushValue(eleAddr)
                 return
-            self.pushValue(cc.LoadOp(eleAddr).result)
+            print("HPWD")
+            extracted_val = cc.LoadOp(eleAddr).result
+            if eleAddr.type != cc.PointerType.get(eleTy):
+                print("Different types {} vs {}".format(eleAddr.type, cc.PointerType.get(eleTy)))
+                # need to cast
+                extracted_val = self.changeOperandToType(eleTy, extracted_val)
+            
+            self.pushValue(extracted_val)
             return
 
         if cc.PointerType.isinstance(var.type):
@@ -3553,6 +3661,8 @@ class PyASTBridge(ast.NodeVisitor):
                     ptrEleTy, casted, [idx],
                     DenseI32ArrayAttr.get([kDynamicPtrIndex],
                                           context=self.ctx)).result
+                if eleTy == self.getIntegerType(1): 
+                    print("loading i1 from stdvec, need to convert from i8")
                 self.pushValue(cc.LoadOp(eleAddr).result)
                 return
 
@@ -3684,6 +3794,8 @@ class PyASTBridge(ast.NodeVisitor):
                         if not cc.ArrayType.isinstance(arrTy):
                             arrTy = cc.ArrayType.get(vecTy)
                         dataArrTy = cc.PointerType.get(arrTy)
+                        # No pointer to i1 is allowed
+                        assert cc.ArrayType.getElementType(arrTy) != self.getIntegerType(1)
                         data = cc.StdvecDataOp(dataArrTy, seq).result
                         v = cc.ComputePtrOp(
                             dataTy, data, [idx],
@@ -3752,8 +3864,14 @@ class PyASTBridge(ast.NodeVisitor):
 
                 def functor(iter, idxVal):
                     elePtrTy = cc.PointerType.get(iterEleTy)
-                    arrTy = cc.ArrayType.get(iterEleTy)
+                    if iterEleTy == self.getIntegerType(1):
+                        arrTy = cc.ArrayType.get(self.getIntegerType(8))
+                        elePtrTy = cc.PointerType.get(self.getIntegerType(8))
+                    else:
+                        arrTy = cc.ArrayType.get(iterEleTy)
                     ptrArrTy = cc.PointerType.get(arrTy)
+                    # No pointer to i1 is allowed
+                    assert cc.ArrayType.getElementType(arrTy) != self.getIntegerType(1)
                     vecPtr = cc.StdvecDataOp(ptrArrTy, iter).result
                     eleAddr = cc.ComputePtrOp(
                         elePtrTy, vecPtr, [idxVal],
@@ -3817,6 +3935,7 @@ class PyASTBridge(ast.NodeVisitor):
             if self.getIntegerType(1) != condition.type:
                 # not equal to 0, then compare with 1
                 condPred = IntegerAttr.get(self.getIntegerType(), 1)
+                assert condition.type == self.getConstantInt(0).type
                 condition = arith.CmpIOp(condPred, condition,
                                          self.getConstantInt(0)).result
             cc.ConditionOp(condition, [])
@@ -3861,7 +3980,7 @@ class PyASTBridge(ast.NodeVisitor):
             self.visit(node.values[0])
             lhs = self.popValue()
             zero = self.getConstantInt(0, IntegerType(lhs.type).width)
-
+            assert lhs.type == zero.type
             cond = arith.CmpIOp(
                 self.getIntegerAttr(self.getIntegerType(),
                                     1 if shortCircuitWhenTrue else 0), lhs,
@@ -3941,6 +4060,7 @@ class PyASTBridge(ast.NodeVisitor):
                                     complex.ImOp(item2).result)
                 return arith.AndIOp(reComp, imComp).result
             elif IntegerType.isinstance(item1.type):
+                assert item1.type == item2.type
                 return arith.CmpIOp(iCondPred, item1, item2).result
             else:
                 return arith.CmpFOp(fCondPred, item1, item2).result
@@ -3950,6 +4070,7 @@ class PyASTBridge(ast.NodeVisitor):
             if ComplexType.isinstance(left.type):
                 self.emitFatalError("invalid type 'Complex' in comparison", node)
             elif IntegerType.isinstance(left.type):
+                assert left.type == right.type
                 self.pushValue(
                     arith.CmpIOp(self.getIntegerAttr(iTy, 4), left,
                                  right).result)
@@ -3964,6 +4085,7 @@ class PyASTBridge(ast.NodeVisitor):
             if ComplexType.isinstance(left.type):
                 self.emitFatalError("invalid type 'Complex' in comparison", node)
             elif IntegerType.isinstance(left.type):
+                assert left.type == right.type
                 self.pushValue(
                     arith.CmpIOp(self.getIntegerAttr(iTy, 5), left,
                                  right).result)
@@ -3992,6 +4114,7 @@ class PyASTBridge(ast.NodeVisitor):
             if ComplexType.isinstance(left.type):
                 self.emitFatalError("invalid type 'Complex' in comparison", node)
             elif IntegerType.isinstance(left.type):
+                assert left.type == right.type
                 self.pushValue(
                     arith.CmpIOp(self.getIntegerAttr(iTy, 3), left,
                                  right).result)
@@ -4060,6 +4183,9 @@ class PyASTBridge(ast.NodeVisitor):
         if self.getIntegerType(1) != condition.type:
             if IntegerType.isinstance(condition.type):
                 condPred = IntegerAttr.get(self.getIntegerType(), 1) # ne
+                print("condition", condition)
+                print("Node:", ast.dump(node))
+                assert condition.type == self.getConstantInt(0).type
                 condition = arith.CmpIOp(condPred, condition,
                                         self.getConstantInt(0)).result
                 
