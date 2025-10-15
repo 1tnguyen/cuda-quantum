@@ -157,7 +157,6 @@ ExecutionEngine *jitKernel(const std::string &name, MlirModule module,
     pm.addPass(cudaq::opt::createGenerateKernelExecution(
         {.startingArgIdx = startingArgIdx}));
     pm.addPass(cudaq::opt::createGenerateDeviceCodeLoader({.jitTime = true}));
-    pm.addPass(cudaq::opt::createReturnToOutputLog());
     pm.addPass(cudaq::opt::createLambdaLiftingPass());
     pm.addPass(cudaq::opt::createDistributedDeviceCall());
     std::string tl = getTransportLayer();
@@ -947,7 +946,8 @@ void bindAltLaunchKernel(py::module &mod,
 
   auto callableArgHandler = [](cudaq::OpaqueArguments &argData,
                                py::object &arg) {
-    if (py::hasattr(arg, "module")) {
+    if (py::hasattr(arg, "module") || py::hasattr(arg, "__call__")) {
+      printf("Handling callable argument.\n");
       // Just give it some dummy data that will not be used.
       // We synthesize away all callables, the block argument
       // remains but it is not used, so just give argsCreator

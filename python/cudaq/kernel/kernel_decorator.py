@@ -483,7 +483,8 @@ class PyKernelDecorator(object):
             mlirType = mlirTypeFromPyType(type(arg),
                                           self.module.context,
                                           argInstance=arg,
-                                          argTypeToCompareTo=self.argTypes[i])
+                                          argTypeToCompareTo=self.argTypes[i],
+                                          module=self.module)
 
             if self.isCastablePyType(mlirType, self.argTypes[i]):
                 processedArgs.append(
@@ -498,19 +499,40 @@ class PyKernelDecorator(object):
                 )
 
             if cc.CallableType.isinstance(mlirType):
-                # Assume this is a PyKernelDecorator
-                callableNames.append(arg.name)
-                # It may be that the provided input callable kernel
-                # is not currently in the ModuleOp. Need to add it
-                # if that is the case, we have to use the AST
-                # so that it shares self.module's MLIR Context
-                symbols = SymbolTable(self.module.operation)
-                if nvqppPrefix + arg.name not in symbols:
-                    tmpBridge = PyASTBridge(self.capturedDataStorage,
-                                            existingModule=self.module,
-                                            disableEntryPointTag=True)
-                    tmpBridge.visit(globalAstRegistry[arg.name][0])
-
+                if isinstance(arg, PyKernelDecorator):
+                    # Assume this is a PyKernelDecorator
+                    callableNames.append(arg.name)
+                    # It may be that the provided input callable kernel
+                    # is not currently in the ModuleOp. Need to add it
+                    # if that is the case, we have to use the AST
+                    # so that it shares self.module's MLIR Context
+                    symbols = SymbolTable(self.module.operation)
+                    if nvqppPrefix + arg.name not in symbols:
+                        tmpBridge = PyASTBridge(self.capturedDataStorage,
+                                                existingModule=self.module,
+                                                disableEntryPointTag=True)
+                        tmpBridge.visit(globalAstRegistry[arg.name][0])
+                else:
+                    print(arg)
+                    if hasattr(arg, '__call__') and hasattr(arg, '__module__') and hasattr(arg, '__name__'):
+                        # This is a callable object, likely a C++ kernel
+                        devKey = f"{arg.__module__}.{arg.__name__}"
+                        if cudaq_runtime.isRegisteredDeviceModule(devKey):
+                            print("111Found registered device module for callable object:", devKey)
+                            
+                            maybeKernelName = cudaq_runtime.checkRegisteredCppDeviceKernel(
+                                self.module, devKey)
+                            if maybeKernelName != None:
+                                otherKernel = SymbolTable(
+                                    self.module.operation)[maybeKernelName]
+                                print("Found Other kernel:", otherKernel)
+                                # Remove "__nvqpp__mlirgen__" prefix
+                                maybeKernelName = maybeKernelName.replace("__nvqpp__mlirgen__", "")
+                                callableNames.append(maybeKernelName)
+                    else:
+                        emitFatalError(
+                            "Invalid callable argument provided to kernel."
+                        )
             # Convert `numpy` arrays to lists
             if cc.StdvecType.isinstance(mlirType) and hasattr(arg, "tolist"):
                 if arg.ndim != 1:
@@ -519,6 +541,7 @@ class PyKernelDecorator(object):
                     )
                 processedArgs.append(arg.tolist())
             else:
+                print("ADDING ARG:", arg, type(arg))
                 processedArgs.append(arg)
 
         if self.returnType == None:
