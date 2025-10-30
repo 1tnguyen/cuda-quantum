@@ -142,5 +142,22 @@ public:
     expectation_values = result;
   }
   evolve_result(const sample_result &sr) : sampling_result(sr) {}
+
+  // Construct result with final expectations for a list of observables
+  evolve_result(const std::vector<double> &finalExpectations,
+                const std::vector<spin_op> &observables) {
+    std::vector<observe_result> result;
+    if (finalExpectations.size() != observables.size()) {
+      throw std::invalid_argument(
+          "Size of expectations must match size of observables.");
+    }
+    for (size_t i = 0; i < finalExpectations.size(); ++i) {
+      result.push_back(observe_result(finalExpectations[i], observables[i]));
+    }
+
+    expectation_values =
+        std::make_optional<std::vector<std::vector<observe_result>>>(
+            std::vector<std::vector<observe_result>>{result});
+  }
 };
 } // namespace cudaq

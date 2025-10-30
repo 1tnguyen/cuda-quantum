@@ -828,4 +828,14 @@ evolve_async(const cudaq::rydberg_hamiltonian &hamiltonian,
       qpu_id);
 }
 
+// Annealing Ising Hamiltonian
+inline evolve_result
+evolve(const cudaq::annealing_hamiltonian &hamiltonian,
+       cudaq::schedule &schedule,
+       const std::vector<cudaq::sum_op<cudaq::spin_handler>> &observables,
+       const std::vector<std::complex<double>> &initial_state,
+       std::optional<int> shots_count = std::nullopt) {
+  return cudaq::__internal__::evolveSingle(hamiltonian, schedule, observables,
+                                           initial_state, shots_count);
+}
 } // namespace cudaq

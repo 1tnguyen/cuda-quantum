@@ -20,6 +20,7 @@ set(CUDAQ_OPS_SRC
   product_op.cpp
   sum_op.cpp
   rydberg_hamiltonian.cpp
+  ising_hamiltonian.cpp
   evaluation.cpp
   handler.cpp
   helpers.cpp

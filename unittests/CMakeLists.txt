@@ -315,6 +315,7 @@ set(CUDAQ_OPERATOR_TEST_SOURCES
    operators/product_op.cpp
    operators/sum_op.cpp
    operators/rydberg_hamiltonian.cpp
+   operators/ising_hamiltonian.cpp
    operators/manipulation.cpp
 )
 add_executable(test_operators main.cpp ${CUDAQ_OPERATOR_TEST_SOURCES})

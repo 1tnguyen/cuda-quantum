@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "JsonConvert.h"
 #include "common/FmtCore.h"
 #include "nlohmann/json.hpp"
 #include <optional>
@@ -334,5 +335,28 @@ struct TaskResult {
 };
 
 } // namespace ahs
+
+namespace ising {
+using json = nlohmann::json;
+
+struct Program {
+  using SpinOpRepr = std::unordered_map<std::string, double>;
+  std::vector<std::pair<std::string, SpinOpRepr>> hamiltonians;
+  std::vector<std::unordered_map<std::string, std::vector<double>>> schedules;
+  std::vector<SpinOpRepr> observables;
+  std::vector<std::complex<double>> initialState;
+  friend void to_json(json &j, const Program &p) {
+    j["type"] = "time_evolution";
+    j["payload"] = json::object();
+    j["payload"]["hamiltonians"] = json::object();
+    for (const auto &hamiltonian : p.hamiltonians) {
+      j["payload"]["hamiltonians"][hamiltonian.first] = hamiltonian.second;
+    }
+    j["payload"]["schedules"] = p.schedules;
+    j["payload"]["observables"] = p.observables;
+    j["payload"]["initialState"] = p.initialState;
+  }
+};
+} // namespace ising
 
 } // namespace cudaq

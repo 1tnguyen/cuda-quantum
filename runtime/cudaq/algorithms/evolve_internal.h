@@ -248,5 +248,11 @@ evolve_result evolveSingle(const cudaq::rydberg_hamiltonian &hamiltonian,
                            const cudaq::schedule &schedule,
                            std::optional<int> shots_count = std::nullopt);
 
+evolve_result
+evolveSingle(const cudaq::annealing_hamiltonian &hamiltonian,
+             cudaq::schedule &schedule,
+             const std::vector<cudaq::sum_op<cudaq::spin_handler>> &observables,
+             const std::vector<std::complex<double>> &initial_state,
+             std::optional<int> shots_count = std::nullopt);
 } // namespace __internal__
 } // namespace cudaq

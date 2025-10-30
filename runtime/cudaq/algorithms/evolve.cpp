@@ -96,4 +96,43 @@ evolve_result evolveSingle(const cudaq::rydberg_hamiltonian &hamiltonian,
   return evolve_result(sampleResults);
 }
 
+evolve_result
+evolveSingle(const cudaq::annealing_hamiltonian &hamiltonian,
+             cudaq::schedule &schedule,
+             const std::vector<cudaq::sum_op<cudaq::spin_handler>> &observables,
+             const std::vector<std::complex<double>> &initial_state,
+             std::optional<int> shots_count) {
+  cudaq::ising::Program program;
+  program.hamiltonians = hamiltonian.get_spin_hamiltonians_representation();
+  program.schedules = hamiltonian.get_annealing_schedule(schedule);
+  program.observables.reserve(observables.size());
+  for (const auto &obs : observables) {
+    std::unordered_map<std::string, double> terms;
+    for (const auto &product_op : obs) {
+      if (!product_op.get_coefficient().is_constant())
+        throw std::runtime_error(
+            "Observable terms must have constant coefficients.");
+
+      const auto coeff = product_op.get_coefficient().evaluate({});
+      if (coeff.imag() != 0.0)
+        throw std::runtime_error(
+            "Observable terms must have real coefficients.");
+      terms[product_op.get_term_id()] = coeff.real();
+    }
+    program.observables.push_back(std::move(terms));
+  }
+
+  program.initialState = initial_state;
+
+  auto programJson = nlohmann::json(program);
+  // TEMP: print program JSON
+  printf("Program JSON: %s\n", programJson.dump(4).c_str());
+
+  // We should attach this json to the kernel launch (as above for AHS program).
+
+  // TODO: retrieve the expectation values from the launch results
+  std::vector<double> expectation_values(observables.size(),
+                                         0.0); // Just a place holder
+  return evolve_result(expectation_values, observables);
+}
 } // namespace cudaq::__internal__

@@ -1764,6 +1764,41 @@ private:
   std::optional<std::pair<scalar_operator, std::vector<double>>> delta_local;
 };
 
+class schedule;
+/// @brief Representation of Ising annealing Hamiltonian
+class annealing_hamiltonian {
+public:
+  annealing_hamiltonian(
+      const std::vector<cudaq::sum_op<cudaq::spin_handler>> &hamiltonians,
+      const std::vector<scalar_operator> &scalingFactors);
+
+  const std::vector<cudaq::sum_op<cudaq::spin_handler>> &
+  get_spin_hamiltonians() const;
+  const std::vector<scalar_operator> &get_scaling_factors() const;
+
+  std::vector<std::pair<std::string, std::unordered_map<std::string, double>>>
+  get_spin_hamiltonians_representation() const;
+
+  std::vector<std::unordered_map<std::string, std::vector<double>>>
+  get_annealing_schedule(cudaq::schedule &schedule) const;
+
+  static scalar_operator
+  create_linear_field(cudaq::schedule &time_schedule,
+                      double initial_value = 0.0, double final_value = 1.0,
+                      const std::string &time_parameter_name = "t");
+
+  static scalar_operator create_piecewise_linear_field(
+      cudaq::schedule &time_schedule,
+      const std::vector<std::pair<double, double>> &fixed_points,
+      const std::string &time_parameter_name = "t");
+
+private:
+  void validate_spin_hamiltonian(
+      const cudaq::sum_op<cudaq::spin_handler> &spin_op) const;
+  std::vector<cudaq::sum_op<cudaq::spin_handler>> spin_hamiltonians;
+  std::vector<scalar_operator> scaling_factors;
+};
+
 // https://en.wikipedia.org/wiki/Superoperator
 // 'super_op' is a linear operator acting on a vector space of linear
 // operators.
