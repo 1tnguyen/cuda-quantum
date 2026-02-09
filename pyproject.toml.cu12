@@ -7,10 +7,10 @@
 # ============================================================================ #
 
 [project]
-name = "cuda-quantum-cu12"
+name = "cuda-quantum-mlir"
 dynamic = ["version"]
 keywords = [ "cudaq", "cuda-quantum", "cuda", "quantum", "quantum computing", "nvidia", "high-performance computing" ]
-description="Python bindings for the CUDA-Q toolkit for heterogeneous quantum-classical workflows."
+description="Python bindings for the MLIR Dialects of CUDA-Q."
 authors = [{name = "NVIDIA Corporation & Affiliates"}]
 maintainers = [{name = "NVIDIA Corporation & Affiliates"}]
 readme = { file="python/README.md.in", content-type = "text/markdown"}
@@ -41,8 +41,6 @@ classifiers = [
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
-    "Environment :: GPU :: NVIDIA CUDA",
-    "Environment :: GPU :: NVIDIA CUDA :: 12",
     'Topic :: Software Development',
     'Topic :: Scientific/Engineering',
 ]
@@ -52,14 +50,6 @@ Homepage = "https://developer.nvidia.com/cuda-q"
 Documentation = "https://nvidia.github.io/cuda-quantum"
 Repository = "https://github.com/NVIDIA/cuda-quantum"
 Releases = "https://nvidia.github.io/cuda-quantum/latest/releases.html"
-
-# We must use h5py<3.11 because 3.11 doesn't include aarch64 Linux wheels.
-# https://github.com/h5py/h5py/issues/2408
-[project.optional-dependencies]
-chemistry = [ "openfermionpyscf==0.5", "h5py<3.11"  ]
-visualization = [ "qutip>5" , "matplotlib>=3.5" ]
-# Additional torch-based integrator
-integrators = [ "torchdiffeq" ]
 
 [build-system]
 requires = ["scikit-build-core==0.11.6", "cmake>=3.27,<3.29", "numpy>=1.24", "pytest==8.3.0"]
@@ -75,9 +65,9 @@ cmake.verbose = false
 cmake.args = [
     "-DCUDAQ_ENABLE_PYTHON=TRUE",
     "-DCUDAQ_DISABLE_CPP_FRONTEND=TRUE",
-    "-DCUDAQ_DISABLE_TOOLS=TRUE",
-    "-DCUDAQ_BUILD_TESTS=TRUE",
-    "-DCUDAQ_ENABLE_PASQAL_QRMI_CONNECTOR=OFF"
+    "-DCUDAQ_DISABLE_RUNTIME=TRUE",
+    "-DCUDAQ_BUILD_TESTS=FALSE",
+    "-DCUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS=TRUE"
 ]
 
 # Linux x86_64: enable Pasqal QRMI connector
