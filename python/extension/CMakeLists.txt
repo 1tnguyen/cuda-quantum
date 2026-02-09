@@ -35,6 +35,7 @@ declare_mlir_dialect_python_bindings(
   TD_FILE dialects/CCOps.td
   DIALECT_NAME cc)
 
+if (NOT CUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS)
 declare_mlir_python_extension(CUDAQuantumPythonSources.Extension
   MODULE_NAME _quakeDialects
   ADD_TO_PARENT CUDAQuantumPythonSources
@@ -127,7 +128,23 @@ target_link_libraries(CUDAQuantumPythonSources.Extension INTERFACE
     fmt::fmt-header-only
     unzip_util
 )
+else()
+declare_mlir_python_extension(CUDAQuantumPythonSources.Extension
+  MODULE_NAME _quakeDialects
+  ADD_TO_PARENT CUDAQuantumPythonSources
+  SOURCES
+    CUDAQuantumExtension.cpp
 
+  EMBED_CAPI_LINK_LIBS
+   CUDAQuantumMLIRCAPI
+   MLIRCAPIExecutionEngine
+  PRIVATE_LINK_LIBS
+   OptCodeGen
+   OptTransforms
+   MLIRPass
+)
+target_compile_definitions(CUDAQuantumPythonSources.Extension INTERFACE CUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS)
+endif()
 ################################################################################
 # Common CAPI
 ################################################################################
