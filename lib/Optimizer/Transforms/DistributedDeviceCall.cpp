@@ -16,6 +16,7 @@
 #include "mlir/IR/TypeSupport.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
+#include "cudaq/Optimizer/CodeGen/QIRFunctionNames.h"
 
 namespace cudaq::opt {
 #define GEN_PASS_DEF_DISTRIBUTEDDEVICECALL
@@ -51,6 +52,44 @@ public:
     llvm::MD5::MD5Result result;
     hash.final(result);
     std::uint32_t callbackCode = result.low();
+
+    if (auto attr = devFunc->getAttr(cudaq::autoDeviceCallAttrName)) {
+      // Convert this to a runtime trap since we don't expect to run this
+      // locally. These functions are only known on the remote device.
+      // (1) Create a trap function that has the same signature as the device
+      // function.
+      auto trapFunc = rewriter.create<func::FuncOp>(
+          devcall.getLoc(), devFuncName, devFunc.getFunctionType());
+      auto &entryBlock = *trapFunc.addEntryBlock();
+      rewriter.setInsertionPointToStart(&entryBlock);
+      // Create a call to the trap intrinsic.
+      Value one = rewriter.create<arith::ConstantIntOp>(devcall.getLoc(), 1, 64);
+      rewriter.create<func::CallOp>(devcall.getLoc(), TypeRange{}, cudaq::opt::QISTrap,
+                                    ValueRange{one});
+      // (2) Load from nullptr to create return value(s) of the same type as the
+      // device function.
+      SmallVector<Value> trapResults;
+      for (Type resTy : devFunc.getFunctionType().getResults()) {
+        auto nullPtr = rewriter.create<arith::ConstantOp>(
+            devcall.getLoc(),
+            rewriter.getZeroAttr(rewriter.getIntegerType(64)));
+        auto ptrTy = cudaq::opt::factory::getPointerType(resTy);
+        auto castedNullPtr = rewriter.create<arith::IntToPtrOp>(
+            devcall.getLoc(), ptrTy, nullPtr);
+        auto loadedVal =
+            rewriter.create<cudaq::cc::LoadOp>(devcall.getLoc(), castedNullPtr);
+        trapResults.push_back(loadedVal);
+      }
+
+      rewriter.create<func::ReturnOp>(devcall.getLoc(), trapResults);
+
+      // (3) Replace the device call with a call to the trap function.
+      rewriter.replaceOpWithNewOp<func::CallOp>(
+          devcall, trapFunc.getFunctionType().getResults(),
+          trapFunc.getSymNameAttr(), devcall.getArgs());
+
+      return success();
+    }
 
     bool needToAddIt = true;
     SmallVector<Attribute> funcIdAttr;
@@ -115,6 +154,12 @@ public:
             irBuilder.loadIntrinsic(module, cudaq::runtime::extractDevPtr))) {
       module.emitError(std::string{"could not load "} +
                        cudaq::runtime::CudaqRegisterCallbackName);
+      return;
+    }
+
+    if (failed(irBuilder.loadIntrinsic(module, cudaq::opt::QISTrap))) {
+      module.emitError("could not load QIR trap function.");
+      signalPassFailure();
       return;
     }
 

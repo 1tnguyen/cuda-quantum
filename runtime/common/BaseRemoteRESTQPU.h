@@ -730,6 +730,27 @@ public:
       for (auto &[name, module] : modules)
         runPassPipeline("func.func(combine-measurements)", module);
 
+    if (codegenTranslation == "quake") {
+      // For Quake, just send the MLIR string representation
+      // FIXME: use MLIR bytecode
+      std::vector<cudaq::KernelExecution> codes;
+      for (auto &[name, moduleOpI] : modules) {
+        std::string codeStr;
+        llvm::raw_string_ostream outStr(codeStr);
+        mlir::OpPrintingFlags opf;
+        opf.enableDebugInfo(/*enable=*/false,
+                            /*pretty=*/true);
+        moduleOpI.print(outStr, opf);
+        outStr << '\n';
+        outStr.flush();
+        nlohmann::json j; // empty json
+        std::string encodedCode = llvm::encodeBase64(codeStr);
+        codes.emplace_back(name, encodedCode, j, mapping_reorder_idx);
+      }
+
+      return codes;
+    }
+
     // Get the code gen translation
     auto translation = cudaq::getTranslation(codegenTranslation);
 

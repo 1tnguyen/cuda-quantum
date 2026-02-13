@@ -33,9 +33,19 @@ target-arguments:
     help-string: "Specify Quantum Machine base server url."
   - key: executor
     required: false
-    type: string
+    type: machine-config
     platform-arg: executor
     help-string: "Specify the executor to run. Default is mock"
+    machine-config:
+      # Quake backend requires different codegen emission (TESTING PURPOSES ONLY)
+      - arch-name: quake
+        pattern: quake.*
+        config: 
+          codegen-emission: quake
+      - arch-name: Other
+        pattern: .*
+        config: 
+          codegen-emission: qasm2
   - key: api_key
     required: false
     type: string
