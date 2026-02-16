@@ -89,6 +89,27 @@ void CuDensityMatState::dump(std::ostream &os) const {
   os << state << std::endl;
 }
 
+std::unique_ptr<cudaq::SimulationState>
+CuDensityMatState::createFromData(const state_data &data) {
+  // Handle explicit density matrix data input as a `cudaq::complex_matrix`.
+  if (std::holds_alternative<cudaq::complex_matrix>(data)) {
+    // Input is a density matrix
+    auto &cMat = std::get<complex_matrix>(data);
+    if (cMat.rows() != cMat.cols())
+      throw std::runtime_error("[CuDensityMatState] complex matrix must be "
+                               "square for density matrix.");
+
+    std::complex<double> *dataPtr = reinterpret_cast<std::complex<double> *>(
+        const_cast<complex_matrix &>(cMat).get_data(
+            complex_matrix::order::column_major));
+
+    return SimulationState::createFromData(
+        std::make_pair(dataPtr, cMat.size()));
+  }
+  // Use the base implementation (flattened 1D state data)
+  return SimulationState::createFromData(data);
+}
+
 std::unique_ptr<SimulationState>
 CuDensityMatState::createFromSizeAndPtr(std::size_t size, void *dataPtr,
                                         std::size_t type) {

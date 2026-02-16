@@ -278,3 +278,33 @@ TEST_F(CuDensityMatStateTest, SingleQubitDensityMatrixIndexing) {
   EXPECT_THROW(state(0, {2, 0}), std::runtime_error);
   EXPECT_THROW(state(0, {0, 2}), std::runtime_error);
 }
+
+TEST_F(CuDensityMatStateTest, ConstructFromComplexMatrix) {
+  // Create a 4 x 4 complex matrix and construct a density matrix state from it
+  cudaq::complex_matrix rhoMat(4, 4);
+  for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      rhoMat(i, j) = std::complex<double>(i, j);
+    }
+  }
+
+  auto state = CuDensityMatState().createFromData(rhoMat);
+  CuDensityMatState *dmState = dynamic_cast<CuDensityMatState *>(state.get());
+  EXPECT_NE(dmState, nullptr);
+  dmState->initialize_cudm(handle, {4}, /*batchSize=*/1);
+  EXPECT_TRUE(dmState->is_density_matrix());
+
+  // Valid indices are 0, 1
+  for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      auto val = (*state)(0, {i, j});
+      EXPECT_NEAR(val.real(), static_cast<double>(i), 1e-12);
+      EXPECT_NEAR(val.imag(), static_cast<double>(j), 1e-12);
+    }
+  }
+
+  // Throw if the matrix is not square
+  cudaq::complex_matrix nonSquareMat(4, 3);
+  EXPECT_THROW(CuDensityMatState().createFromData(nonSquareMat),
+               std::runtime_error);
+}

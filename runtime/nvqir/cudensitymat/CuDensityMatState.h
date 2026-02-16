@@ -87,6 +87,8 @@ public:
   }
 
   // Create the state from external data
+  std::unique_ptr<cudaq::SimulationState>
+  createFromData(const state_data &data) override;
   std::unique_ptr<SimulationState>
   createFromSizeAndPtr(std::size_t size, void *dataPtr,
                        std::size_t type) override;

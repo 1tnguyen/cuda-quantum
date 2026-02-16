@@ -163,6 +163,35 @@ def test_precision_info():
     assert target.get_precision() == cudaq.SimulationPrecision.fp64
 
 
+def test_state_construction_from_dm():
+    """
+    Test that state construction from density matrix data works correctly
+    """
+    N = 16
+    # Create a random NxN density matrix
+    rho = np.random.rand(N, N) + 1j * np.random.rand(N, N)
+    state = cudaq.State.from_data(rho)
+
+    schedule = Schedule([0.0], ["t"])
+    hamiltonian = 0.0 * operators.number(
+        0)  # zero Hamiltonian to keep the state unchanged
+    dimensions = {0: N}
+    evolution_result = cudaq.evolve(
+        hamiltonian,
+        dimensions,
+        schedule,
+        state,
+        observables=[],
+        collapse_operators=[],
+        store_intermediate_results=cudaq.IntermediateResultSave.NONE)
+
+    final_state = evolution_result.final_state()
+
+    for i in range(N):
+        for j in range(N):
+            assert np.abs(final_state[i, j] - rho[i, j]) < 1e-9
+
+
 # leave for gdb debugging
 if __name__ == "__main__":
     loc = os.path.abspath(__file__)
