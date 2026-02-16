@@ -77,7 +77,6 @@ static async_observe_result pyObserveAsync(const std::string &shortName,
   return details::runObservationAsync(
       detail::make_copyable_function([opaques = std::move(opaques), shortName,
                                       mod = mod.clone(), retTy]() mutable {
-        mod.dump();
         [[maybe_unused]] auto result =
             clean_launch_module(shortName, mod, retTy, opaques);
       }),
