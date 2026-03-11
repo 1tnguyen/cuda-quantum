@@ -116,6 +116,7 @@ struct PlaybackArgs {
   bool verify = true;
   bool emulator = false;
   bool forward = false; ///< Forward (echo) mode: accept RPC_MAGIC_REQUEST
+  std::uint32_t timer_spacing_us = DEFAULT_TIMER_SPACING_US;
 };
 
 PlaybackArgs parse_args(int argc, char *argv[]) {
@@ -168,6 +169,8 @@ PlaybackArgs parse_args(int argc, char *argv[]) {
       args.emulator = true;
     else if (a == "--forward")
       args.forward = true;
+    else if (a.find("--timer-spacing-us=") == 0)
+      args.timer_spacing_us = std::stoul(val_of("--timer-spacing-us="));
     else if (a == "--help" || a == "-h") {
       std::cout
           << "Usage: hololink_fpga_playback [options]\n"
@@ -188,7 +191,9 @@ PlaybackArgs parse_args(int argc, char *argv[]) {
           << "  --emulator            Using emulator (skip FPGA reset)\n"
           << "  --no-verify           Skip ILA response verification\n"
           << "  --forward             Forward (echo) mode: accept echoed "
-             "requests\n";
+             "requests\n"
+          << "  --timer-spacing-us=N  Timer spacing in microseconds (default: "
+          << DEFAULT_TIMER_SPACING_US << ")\n";
       exit(0);
     }
   }
@@ -476,7 +481,6 @@ int main(int argc, char *argv[]) {
   std::cout << "Hololink: " << args.hololink_ip << std::endl;
   std::cout << "Messages: " << args.num_messages << std::endl;
   std::cout << "Payload size: " << args.payload_size << " bytes" << std::endl;
-
   // ------------------------------------------------------------------
   // Build Hololink DataChannel
   // ------------------------------------------------------------------
@@ -526,6 +530,7 @@ int main(int argc, char *argv[]) {
   std::cout << "  Page size: " << args.page_size << " bytes" << std::endl;
   std::cout << "  Num pages: " << args.num_pages << std::endl;
   std::cout << "  Frame size: " << bytes_per_window << " bytes" << std::endl;
+  std::cout << "  Timer spacing: " << args.timer_spacing_us << " us" << std::endl;
 
   hololink_channel.authenticate(args.bridge_qp, args.bridge_rkey);
   hololink_channel.configure_roce(
@@ -550,8 +555,7 @@ int main(int argc, char *argv[]) {
       PLAYER_ADDR + PLAYER_WINDOW_NUMBER_OFFSET,
       static_cast<std::uint32_t>(args.num_messages));
   config_write.queue_write_uint32(PLAYER_ADDR + PLAYER_TIMER_OFFSET,
-                                  RF_SOC_TIMER_SCALE *
-                                      DEFAULT_TIMER_SPACING_US);
+                                  RF_SOC_TIMER_SCALE * args.timer_spacing_us);
   if (!hololink->write_uint32(config_write))
     throw std::runtime_error("Failed to configure player");
 
@@ -776,6 +780,27 @@ int main(int argc, char *argv[]) {
     std::cout << "  Payload errors:       " << payload_errors << std::endl;
 
     if (lat_count > 0) {
+      // Compute median latency
+      const auto compute_percentile = [&lat_samples](int percentile) -> double {
+        // Percentile in [0, 100.0]
+        if (percentile < 0 || percentile > 100)
+          throw std::invalid_argument("percentile must be in [0, 100]");
+        std::vector<int64_t> deltas;
+        deltas.reserve(lat_samples.size());
+        for (const auto &s : lat_samples)
+          deltas.push_back(s.delta_ns);
+        std::sort(deltas.begin(), deltas.end());
+        // Linear percentile calculation (similar to numpy percentile with
+        // default settings)
+        const double rank = (percentile / 100.0) * (deltas.size() - 1);
+        const size_t lower_idx = static_cast<size_t>(std::floor(rank));
+        const size_t upper_idx = static_cast<size_t>(std::ceil(rank));
+        if (lower_idx == upper_idx)
+          return deltas[lower_idx];
+        const double weight = rank - lower_idx;
+        return deltas[lower_idx] * (1.0 - weight) + deltas[upper_idx] * weight;
+      }();
+
       double lat_avg = static_cast<double>(lat_sum) / lat_count;
       std::cout << "\n=== PTP Round-Trip Latency ===" << std::endl;
       std::cout << "  Samples:  " << lat_count << std::endl;
@@ -783,6 +808,12 @@ int main(int argc, char *argv[]) {
       std::cout << "  Max:      " << lat_max << " ns" << std::endl;
       std::cout << "  Avg:      " << std::fixed << std::setprecision(1)
                 << lat_avg << " ns" << std::endl;
+      std::cout << "  Median:   " << std::fixed << std::setprecision(1)
+                << compute_percentile(50) << " ns" << std::endl;
+      std::cout << "  P95:      " << std::fixed << std::setprecision(1)
+                << compute_percentile(95) << " ns" << std::endl;
+      std::cout << "  P99:      " << std::fixed << std::setprecision(1)
+                << compute_percentile(99) << " ns" << std::endl;
       const std::string csv_path = "ptp_latency.csv";
       std::ofstream csv(csv_path);
       if (csv.is_open()) {

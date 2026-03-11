@@ -67,7 +67,7 @@ NUM_PAGES=128
 CONTROL_PORT=8193
 FORWARD=false
 UNIFIED=false
-
+DATA_GEN_SPACING_US=120
 # Build parallelism
 JOBS=$(nproc 2>/dev/null || echo 8)
 
@@ -111,6 +111,7 @@ Run options:
   --page-size N          Ring buffer slot size in bytes (default: 384)
   --num-pages N          Number of ring buffer slots (default: 128)
   --control-port N       UDP control port for emulator (default: 8193)
+  --msg-spacing-us N   Message spacing in microseconds (default: 120)
   --bin-dir DIR          Binary directory containing executables (default: None)
   --help, -h             Show this help
 EOF
@@ -141,6 +142,7 @@ while [[ $# -gt 0 ]]; do
         --page-size)        PAGE_SIZE="$2"; shift ;;
         --num-pages)        NUM_PAGES="$2"; shift ;;
         --control-port)     CONTROL_PORT="$2"; shift ;;
+        --msg-spacing-us)   DATA_GEN_SPACING_US="$2"; shift ;;
         --help|-h)          print_usage; exit 0 ;;
         *)
             echo "ERROR: Unknown option: $1" >&2
@@ -499,6 +501,7 @@ do_run() {
         --num-messages="$NUM_MESSAGES"
         --payload-size="$PAYLOAD_SIZE"
         --bridge-ip="$BRIDGE_IP"
+        --timer-spacing-us="$DATA_GEN_SPACING_US"
     )
     if $EMULATE; then
         playback_args+=(--emulator --control-port="$CONTROL_PORT")
