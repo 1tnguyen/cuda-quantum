@@ -799,7 +799,7 @@ int main(int argc, char *argv[]) {
           return deltas[lower_idx];
         const double weight = rank - lower_idx;
         return deltas[lower_idx] * (1.0 - weight) + deltas[upper_idx] * weight;
-      }();
+      };
 
       double lat_avg = static_cast<double>(lat_sum) / lat_count;
       std::cout << "\n=== PTP Round-Trip Latency ===" << std::endl;
