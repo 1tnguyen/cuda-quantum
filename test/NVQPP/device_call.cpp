@@ -25,8 +25,13 @@
 
 #include "cudaq.h"
 
+extern "C" {
+// Device call declaration
+int add_op(int a, int b);
+}
+
 __qpu__ int kernel(int a, int b) {
-  int result = cudaq::device_call<int>(/*device_id*/ 0, "add_op", a, b);
+  int result = cudaq::device_call(/*device_id*/ 0, add_op, a, b);
   return result;
 }
 

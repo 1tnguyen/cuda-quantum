@@ -53,20 +53,11 @@ public:
     hash.final(result);
     std::uint32_t callbackCode = result.low();
 
-    if (devFunc->getAttr(cudaq::autoDeviceCallAttrName) &&
-        devFunc.isDeclaration()) {
-      // This is an auto-generated device call, e.g., arbitrary functions
-      // provided by remote hardware providers
-      // In the JIT pipeline, the device call name will be sent on to the
-      // provider, which will resolve it to the actual function to call on the
-      // service side.
-
-      // This pass, which may be executed as part of the AOT pipeline, will
-      // convert this to a runtime trap (unreachable) since we don't expect to
-      // run this locally. This allows us to fully lower the code to LLVM IR as
-      // we don't have the actual device function definition available.
-      // Note: the generated code should never be executed unless there is a bug
-      // in the kernel launch.
+    if (devFunc.isDeclaration()) {
+      // For 'declared' device functions that are not defined in the module, we
+      // add a weak implementation (a trap) for them. If this is not provided
+      // (via linking with a library that defines the device function), we will
+      // get an error.
 
       // (1) Create a trap function that has the same signature as the device
       // function.
@@ -75,6 +66,10 @@ public:
       auto trapFunc = rewriter.create<func::FuncOp>(
           devcall.getLoc(), devFuncName, devFunc.getFunctionType());
       trapFunc.setPrivate();
+      // Set as a weak symbol so that it can be overridden by a strong symbol
+      // with the same name (i.e., the actual device function defined in a
+      // library).
+      // trapFunc->setAttr("llvm.linkage", StringAttr::get("weak", devcall.getContext()));
       auto &entryBlock = *trapFunc.addEntryBlock();
       rewriter.setInsertionPointToStart(&entryBlock);
       // Create a call to the trap intrinsic.
@@ -105,10 +100,10 @@ public:
       rewriter.restoreInsertionPoint(insPt);
 
       // (2) Replace the device call with a call to the trap function.
-      rewriter.replaceOpWithNewOp<func::CallOp>(
-          devcall, trapFunc.getFunctionType().getResults(),
-          trapFunc.getSymNameAttr(), devcall.getArgs());
-      return success();
+      // rewriter.replaceOpWithNewOp<func::CallOp>(
+      //     devcall, trapFunc.getFunctionType().getResults(),
+      //     trapFunc.getSymNameAttr(), devcall.getArgs());
+      // return success();
     }
 
     bool needToAddIt = true;
@@ -167,7 +162,7 @@ public:
 
   LogicalResult matchAndRewrite(func::FuncOp func,
                                 PatternRewriter &rewriter) const override {
-    if (func->getAttr(cudaq::autoDeviceCallAttrName) && func.isDeclaration()) {
+    if (func.isDeclaration()) {
       rewriter.eraseOp(func);
       return success();
     }
