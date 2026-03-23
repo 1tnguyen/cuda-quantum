@@ -166,6 +166,7 @@ extern "C" cudaq_host_dispatcher_handle_t *cudaq_host_dispatcher_start_thread(
   ctx.inflight_slot_tags = handle->inflight_slot_tags;
   ctx.io_ctxs_host = io_ctxs_host_ptr;
   ctx.io_ctxs_dev = io_ctxs_dev_ptr;
+  ctx.skip_tx_markers = config->skip_tx_markers;
 
   handle->thread = std::thread(
       [cfg = ctx]() { cudaq_host_dispatcher_loop(&cfg); });

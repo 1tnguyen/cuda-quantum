@@ -129,8 +129,14 @@ static void launch_graph_worker(const cudaq_host_dispatch_loop_ctx_t *ctx,
     void *d_ctx = d_ctxs + worker_id * sizeof(GraphIOContext);
     ctx->h_mailbox_bank[worker_id] = d_ctx;
 
+    // In GraphIOContext mode the graph kernel writes tx_flag_value (READY)
+    // to tx_flags from the GPU.  When skip_tx_markers is set, an external
+    // GPU kernel (Hololink TX) polls the same tx_flags and would
+    // misinterpret the 0xEEEE sentinel as a valid TX buffer address.
+    if (!ctx->skip_tx_markers) {
     as_atomic_u64(ctx->ringbuffer.tx_flags_host)[current_slot].store(
         CUDAQ_TX_FLAG_IN_FLIGHT, cuda::std::memory_order_release);
+    }
     __sync_synchronize();
   } else {
     ctx->h_mailbox_bank[worker_id] = data_dev;
@@ -161,6 +167,21 @@ static void launch_graph_worker(const cudaq_host_dispatch_loop_ctx_t *ctx,
   }
 }
 
+static void sweep_completed_workers(const cudaq_host_dispatch_loop_ctx_t *config) {
+  uint64_t busy = ~as_atomic_u64(config->idle_mask)->load(
+      cuda::std::memory_order_acquire);
+  busy &= (1ULL << config->num_workers) - 1;
+  while (busy != 0) {
+    int w = __builtin_ffsll(static_cast<long long>(busy)) - 1;
+    busy &= ~(1ULL << w);
+    cudaError_t qerr = cudaStreamQuery(config->workers[w].stream);
+    if (qerr == cudaSuccess) {
+      as_atomic_u64(config->idle_mask)
+          ->fetch_or(1ULL << w, cuda::std::memory_order_release);
+    }
+  }
+}
+
 } // anonymous namespace
 
 extern "C" void
@@ -178,6 +199,7 @@ cudaq_host_dispatcher_loop(const cudaq_host_dispatch_loop_ctx_t *ctx) {
             cuda::std::memory_order_acquire);
 
     if (rx_value == 0) {
+      sweep_completed_workers(ctx);
       CUDAQ_REALTIME_CPU_RELAX();
       continue;
     }
@@ -206,6 +228,7 @@ cudaq_host_dispatcher_loop(const cudaq_host_dispatch_loop_ctx_t *ctx) {
       continue;
     }
 
+    sweep_completed_workers(ctx);
     int worker_id =
         acquire_graph_worker(ctx, use_function_table, entry, function_id);
     if (worker_id < 0) {
