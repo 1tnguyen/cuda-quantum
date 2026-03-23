@@ -127,10 +127,13 @@ static void launch_graph_worker(const cudaq_host_dispatcher_config_t *config,
     config->h_mailbox_bank[worker_id] = d_ctx;
 
     // In GraphIOContext mode the graph kernel writes tx_flag_value (READY)
-    // to tx_flags from the GPU.  Set the in-flight marker BEFORE launch so
-    // the kernel's READY write is never clobbered by a late host write.
-    as_atomic_u64(config->tx_flags)[current_slot].store(
-        0xEEEEEEEEEEEEEEEEULL, cuda::std::memory_order_release);
+    // to tx_flags from the GPU.  When skip_tx_markers is set, an external
+    // GPU kernel (Hololink TX) polls the same tx_flags and would
+    // misinterpret the 0xEEEE sentinel as a valid TX buffer address.
+    if (!config->skip_tx_markers) {
+      as_atomic_u64(config->tx_flags)[current_slot].store(
+          0xEEEEEEEEEEEEEEEEULL, cuda::std::memory_order_release);
+    }
     __sync_synchronize();
   } else {
     config->h_mailbox_bank[worker_id] = data_dev;
@@ -162,6 +165,21 @@ static void launch_graph_worker(const cudaq_host_dispatcher_config_t *config,
   }
 }
 
+static void sweep_completed_workers(const cudaq_host_dispatcher_config_t *config) {
+  uint64_t busy = ~as_atomic_u64(config->idle_mask)->load(
+      cuda::std::memory_order_acquire);
+  busy &= (1ULL << config->num_workers) - 1;
+  while (busy != 0) {
+    int w = __builtin_ffsll(static_cast<long long>(busy)) - 1;
+    busy &= ~(1ULL << w);
+    cudaError_t qerr = cudaStreamQuery(config->workers[w].stream);
+    if (qerr == cudaSuccess) {
+      as_atomic_u64(config->idle_mask)
+          ->fetch_or(1ULL << w, cuda::std::memory_order_release);
+    }
+  }
+}
+
 } // anonymous namespace
 
 extern "C" void
@@ -178,6 +196,7 @@ cudaq_host_dispatcher_loop(const cudaq_host_dispatcher_config_t *config) {
         cuda::std::memory_order_acquire);
 
     if (rx_value == 0) {
+      sweep_completed_workers(config);
       QEC_CPU_RELAX();
       continue;
     }
@@ -206,6 +225,7 @@ cudaq_host_dispatcher_loop(const cudaq_host_dispatcher_config_t *config) {
       continue;
     }
 
+    sweep_completed_workers(config);
     int worker_id =
         acquire_graph_worker(config, use_function_table, entry, function_id);
     if (worker_id < 0) {

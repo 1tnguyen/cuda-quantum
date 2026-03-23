@@ -75,6 +75,12 @@ typedef struct {
   /// When NULL, legacy mode: raw RX slot pointer written to mailbox.
   void *io_ctxs_host; ///< host view of GraphIOContext[num_workers]
   void *io_ctxs_dev;  ///< device view of same pinned mapped memory
+
+  /// When non-zero, the host dispatcher will NOT write sentinel markers
+  /// (0xEEEE...) to tx_flags before graph launch.  Set this when an external
+  /// GPU kernel (e.g. Hololink TX) polls the same tx_flags array; the
+  /// sentinel would be misinterpreted as a valid TX buffer address.
+  int skip_tx_markers;
 } cudaq_host_dispatcher_config_t;
 
 /// Run the host-side dispatcher loop. Blocks until `*config->shutdown_flag`

@@ -162,6 +162,7 @@ extern "C" cudaq_host_dispatcher_handle_t *cudaq_host_dispatcher_start_thread(
   host_config.tx_flags_dev = ringbuffer->tx_flags;
   host_config.io_ctxs_host = io_ctxs_host_ptr;
   host_config.io_ctxs_dev = io_ctxs_dev_ptr;
+  host_config.skip_tx_markers = config->skip_tx_markers;
 
   handle->thread = std::thread(
       [cfg = host_config]() { cudaq_host_dispatcher_loop(&cfg); });
