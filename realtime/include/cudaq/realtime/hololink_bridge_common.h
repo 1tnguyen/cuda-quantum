@@ -286,6 +286,10 @@ inline int bridge_run(BridgeConfig &config) {
     return 1;
   }
 
+  // HOST_LOOP needs CPU-readable ring flags and data; allocate as CPU_GPU.
+  if (is_host_loop)
+    hololink_set_cpu_ring_buffers(transceiver, 1);
+
   std::cout << "  Connecting to remote QP 0x" << std::hex << config.remote_qp
             << std::dec << " at " << config.peer_ip << "..." << std::endl;
 
@@ -570,6 +574,7 @@ inline int bridge_run(BridgeConfig &config) {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   } else {
     std::cout << "\n[5/5] Launching Hololink kernels..." << std::endl;
+    std::cout.flush();
     hololink_thread = std::thread(
         [transceiver]() { hololink_blocking_monitor(transceiver); });
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
