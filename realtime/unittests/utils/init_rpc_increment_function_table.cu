@@ -20,6 +20,8 @@
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <cstring> // std::memset
+#include <stdexcept>
 
 namespace {
 
@@ -79,6 +81,65 @@ __global__ void init_function_table_kernel(cudaq_function_entry_t *entries) {
   }
 }
 
+//==============================================================================
+// Increment RPC Graph Handler
+//==============================================================================
+
+__global__ void graph_increment_kernel(void** mailbox_slot_ptr) {
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    void* buffer = *mailbox_slot_ptr;
+    cudaq::realtime::RPCHeader* header =
+        static_cast<cudaq::realtime::RPCHeader*>(buffer);
+    std::uint32_t arg_len = header->arg_len;
+    void* arg_buffer = static_cast<void*>(header + 1);
+    std::uint8_t* data = static_cast<std::uint8_t*>(arg_buffer);
+    for (std::uint32_t i = 0; i < arg_len; ++i)
+      data[i] = data[i] + 1;
+    cudaq::realtime::RPCResponse* response =
+        static_cast<cudaq::realtime::RPCResponse*>(buffer);
+    response->magic = cudaq::realtime::RPC_MAGIC_RESPONSE;
+    response->status = 0;
+    response->result_len = arg_len;
+  }
+}
+
+/// Creates an executable graph that runs graph_increment_kernel with
+/// kernel arg = d_mailbox_bank (device pointer to first mailbox slot).
+/// Caller must cudaGraphExecDestroy / cudaGraphDestroy.
+bool create_increment_graph(void** d_mailbox_bank, cudaGraph_t* graph_out,
+                            cudaGraphExec_t* exec_out) {
+  cudaGraph_t graph = nullptr;
+  if (cudaGraphCreate(&graph, 0) != cudaSuccess)
+    return false;
+
+  // kernelParams[i] must be a *pointer to* the i-th argument value.
+  // The kernel takes void** so we pass &d_mailbox_bank (a void***).
+  cudaKernelNodeParams params = {};
+  void* kernel_args[] = {&d_mailbox_bank};
+  params.func = reinterpret_cast<void*>(graph_increment_kernel);
+  params.gridDim = dim3(1, 1, 1);
+  params.blockDim = dim3(32, 1, 1);
+  params.sharedMemBytes = 0;
+  params.kernelParams = kernel_args;
+  params.extra = nullptr;
+
+  cudaGraphNode_t node = nullptr;
+  if (cudaGraphAddKernelNode(&node, graph, nullptr, 0, &params) !=
+      cudaSuccess) {
+    cudaGraphDestroy(graph);
+    return false;
+  }
+
+  cudaGraphExec_t exec = nullptr;
+  if (cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0) != cudaSuccess) {
+    cudaGraphDestroy(graph);
+    return false;
+  }
+
+  *graph_out = graph;
+  *exec_out = exec;
+  return true;
+}
 } // anonymous namespace
 
 //==============================================================================
@@ -89,4 +150,19 @@ extern "C" void
 setup_rpc_increment_function_table(cudaq_function_entry_t *d_entries) {
   init_function_table_kernel<<<1, 1>>>(d_entries);
   cudaDeviceSynchronize();
+}
+
+extern "C" void
+setup_rpc_graph_increment_function_table(cudaq_function_entry_t *h_entries, void** d_mailbox_bank, cudaGraph_t* graph_out,
+                            cudaGraphExec_t* exec_out) {
+  const bool graph_created = create_increment_graph(d_mailbox_bank, graph_out, exec_out);
+  if (!graph_created) {
+    throw std::runtime_error("Failed to create CUDA graph for the increment function.");
+  }
+
+  // --- Function table (one GRAPH_LAUNCH entry) ---
+  std::memset(h_entries, 0, sizeof(cudaq_function_entry_t));
+  h_entries->function_id = RPC_INCREMENT_FUNCTION_ID;
+  h_entries->dispatch_mode = CUDAQ_DISPATCH_GRAPH_LAUNCH;
+  h_entries->handler.graph_exec = *exec_out;
 }
