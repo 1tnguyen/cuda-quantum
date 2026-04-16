@@ -31,7 +31,7 @@ class ScipyZvodeIntegrator(BaseIntegrator[cudaq_runtime.State]):
     rtol = 1e-6
     order = 12
 
-    def __init__(self, stepper: BaseTimeStepper[cudaq_runtime.State], **kwargs):
+    def __init__(self, stepper: BaseTimeStepper[cudaq_runtime.State] = None, **kwargs):
         if not has_dynamics:
             raise ImportError(
                 'CUDA-Q is missing dynamics support. Please check your installation'
@@ -42,11 +42,6 @@ class ScipyZvodeIntegrator(BaseIntegrator[cudaq_runtime.State]):
         self.stepper = stepper
         self.is_density_state = None
         self.batchSize = None
-
-    def __init__(self, **kwargs):
-        if not has_scipy:
-            raise ImportError("scipy is required to use this integrator.")
-        super().__init__(**kwargs)
 
     def compute_rhs(self, t, vec):
         state = cudaq_runtime.State.from_data(vec)

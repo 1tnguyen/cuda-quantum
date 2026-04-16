@@ -69,7 +69,6 @@ class BaseIntegrator(ABC, Generic[TState]):
             self.hamiltonian = hamiltonian
 
         self.collapse_operators = collapse_operators
-        self.stepper = None
 
     @abstractmethod
     def integrate(self, t):
