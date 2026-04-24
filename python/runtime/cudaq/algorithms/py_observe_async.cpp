@@ -158,7 +158,42 @@ pyObservePar(const PyParType &type, const std::string &shortName,
   // combine all the data via an all_reduce
   auto exp_val = localRankResult.expectation();
   auto globalExpVal = mpi::all_reduce(exp_val, std::plus<double>());
-  return observe_result{globalExpVal, spin_operator};
+
+  // Reconstruct per-term expectations across MPI ranks so that
+  // observe_result.expectation(sub_term=...) remains usable on the aggregate
+  // result.
+  std::vector<double> localExpectations(spin_operator.num_terms(), 0.0);
+  auto localData = localRankResult.raw_data();
+  std::size_t termIdx = 0;
+  for (const auto &term : spin_operator) {
+    // Iterate the global operator in its canonical term order so every rank
+    // contributes into the same dense vector slot.
+    const auto termId = term.get_term_id();
+    if (localData.has_expectation(termId))
+      // Only the rank that owns this term contributes its expectation; all
+      // other ranks leave the default 0.0 in this slot for the vector reduce.
+      localExpectations[termIdx] =
+          term.is_identity() ? 1.0 : localRankResult.expectation(term);
+    ++termIdx;
+  }
+
+  std::vector<double> globalExpectations(localExpectations.size(), 0.0);
+  // Elementwise sum across ranks, e.g. [0.2, 0.0, -0.4] + [0.0, 0.5, 0.0]
+  // becomes [0.2, 0.5, -0.4] on every rank.
+  mpi::all_reduce(globalExpectations, localExpectations, std::plus<double>());
+
+  std::vector<ExecutionResult> termResults;
+  termResults.reserve(spin_operator.num_terms());
+  termIdx = 0;
+  for (const auto &term : spin_operator) {
+    // Rebuild per-term execution results in the same global term order used
+    // for the dense reduction vector above.
+    termResults.emplace_back(CountsDictionary{}, term.get_term_id(),
+                             globalExpectations[termIdx++]);
+  }
+
+  return observe_result{globalExpVal, spin_operator,
+                        sample_result(globalExpVal, termResults)};
 }
 
 /// Observe can be a single observe call, a parallel observe call, or a observe

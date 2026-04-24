@@ -148,6 +148,18 @@ CUDAQ_ALL_REDUCE_IMPL(float, std::multiplies, PROD)
 CUDAQ_ALL_REDUCE_IMPL(double, std::plus, SUM)
 CUDAQ_ALL_REDUCE_IMPL(double, std::multiplies, PROD)
 
+#define CUDAQ_ALL_REDUCE_VECTOR_IMPL(TYPE, BINARY, REDUCE_OP)                  \
+  void allReduce(std::vector<TYPE> &global, const std::vector<TYPE> &local,    \
+                 const BINARY<TYPE> &) {                                       \
+    static_assert(std::is_floating_point<TYPE>::value,                         \
+                  "all_reduce argument must be a floating point vector");      \
+    auto *commPlugin = getMpiPlugin();                                         \
+    commPlugin->all_reduce(global, local, REDUCE_OP);                          \
+  }
+
+CUDAQ_ALL_REDUCE_VECTOR_IMPL(double, std::plus, SUM)
+CUDAQ_ALL_REDUCE_VECTOR_IMPL(double, std::multiplies, PROD)
+
 } // namespace details
 
 #define CUDAQ_ALL_GATHER_IMPL(TYPE)                                            \

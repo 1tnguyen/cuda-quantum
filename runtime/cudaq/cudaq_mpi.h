@@ -48,12 +48,27 @@ CUDAQ_ALL_REDUCE_DEF(float, std::multiplies)
 CUDAQ_ALL_REDUCE_DEF(double, std::plus)
 CUDAQ_ALL_REDUCE_DEF(double, std::multiplies)
 
+#define CUDAQ_ALL_REDUCE_VECTOR_DEF(TYPE, BINARY)                              \
+  void allReduce(std::vector<TYPE> &, const std::vector<TYPE> &,               \
+                 const BINARY<TYPE> &);
+
+CUDAQ_ALL_REDUCE_VECTOR_DEF(double, std::plus)
+CUDAQ_ALL_REDUCE_VECTOR_DEF(double, std::multiplies)
+
 } // namespace details
 
 /// @brief Reduce all values across ranks with the specified binary function.
 template <typename T, typename BinaryFunction>
 T all_reduce(const T &localValue, const BinaryFunction &function) {
   return details::allReduce(localValue, function);
+}
+
+/// @brief Reduce all vector values across ranks with the specified binary
+/// function.
+template <typename T, typename BinaryFunction>
+void all_reduce(std::vector<T> &global, const std::vector<T> &local,
+                const BinaryFunction &function) {
+  details::allReduce(global, local, function);
 }
 
 /// @brief Gather all vector data (floating point numbers) locally into the
