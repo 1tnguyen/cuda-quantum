@@ -1,0 +1,84 @@
+# ============================================================================ #
+# Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                   #
+# All rights reserved.                                                         #
+#                                                                              #
+# This source code and the accompanying materials are made available under     #
+# the terms of the Apache License 2.0 which accompanies this distribution.     #
+# ============================================================================ #
+
+# This build profile produces the special-purpose CUDA-Q MLIR-only Python wheel.
+# It installs only the Python MLIR component and disables the compiler frontend,
+# runtime, tools, tests, and runtime Python bindings. 
+
+[project]
+name = "cuda-quantum-mlir"
+dynamic = ["version"]
+keywords = [ "cudaq", "cuda-quantum", "cuda", "quantum", "quantum computing", "nvidia", "high-performance computing" ]
+description = "Python bindings for the MLIR dialects of CUDA-Q."
+authors = [{name = "NVIDIA Corporation & Affiliates"}]
+maintainers = [{name = "NVIDIA Corporation & Affiliates"}]
+readme = { file = "python/README.md.in", content-type = "text/markdown" }
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "CITATION.cff"]
+dependencies = []
+classifiers = [
+    'Intended Audience :: Science/Research',
+    'Intended Audience :: Developers',
+    'Programming Language :: Python',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+    'Topic :: Software Development',
+    'Topic :: Scientific/Engineering',
+]
+
+[project.urls]
+Homepage = "https://developer.nvidia.com/cuda-q"
+Documentation = "https://nvidia.github.io/cuda-quantum"
+Repository = "https://github.com/NVIDIA/cuda-quantum"
+Releases = "https://nvidia.github.io/cuda-quantum/latest/releases.html"
+
+[build-system]
+requires = ["scikit-build-core==0.11.6", "cmake>=3.27,<3.29", "numpy>=1.24", "pytest==9.0.3", "nanobind>=2.9.0"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.packages = []
+build-dir = "_skbuild"
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+cmake.version = ">=3.27,<3.29"
+cmake.build-type = "Release"
+cmake.verbose = false
+install.components = ["CUDAQuantumPythonModules"]
+cmake.args = [
+    "-DCUDAQ_ENABLE_PYTHON=TRUE",
+    "-DCUDAQ_DISABLE_CPP_FRONTEND=TRUE",
+    "-DCUDAQ_DISABLE_RUNTIME=TRUE",
+    "-DCUDAQ_DISABLE_TOOLS=TRUE",
+    "-DCUDAQ_BUILD_TESTS=FALSE",
+    "-DCUDAQ_ENABLE_REST=OFF",
+    "-DCUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS=TRUE"
+]
+
+# Linux: use LLD as the linker
+[[tool.scikit-build.overrides]]
+if.platform-system = "linux"
+inherit.cmake.args = "append"
+cmake.args = [
+    "-DLLVM_USE_LINKER=lld",
+    "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -B/usr/local/llvm/bin",
+    "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld -B/usr/local/llvm/bin",
+    "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld -B/usr/local/llvm/bin",
+]
+
+# macOS: Disable symbol stripping. LLVM's JIT relies on local symbols for
+# internal data structures (eg., PassRegistry). On macOS with two-level
+# namespace they are removed by stripping, which can cause failures.
+[[tool.scikit-build.overrides]]
+if.platform-system = "darwin"
+install.strip = false
+
+[tool.setuptools_scm]
+write_to = "_version.py"

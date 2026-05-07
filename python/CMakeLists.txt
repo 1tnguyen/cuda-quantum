@@ -6,7 +6,9 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-add_subdirectory(utils)
+if (NOT CUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS)
+  add_subdirectory(utils)
+endif()
 
 # [RFC]:
 # Check how to solve this better than just disable the warning for the whole directory.
@@ -54,10 +56,14 @@ add_custom_target(
 
 add_dependencies(CUDAQuantumPythonModules CopyPythonFiles)
 
-add_subdirectory(runtime/cudaq/domains/plugins)
+if (NOT CUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS)
+  add_subdirectory(runtime/cudaq/domains/plugins)
+endif()
 
 if (NOT SKBUILD)
-  install(DIRECTORY cudaq DESTINATION .)
+  if (NOT CUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS)
+    install(DIRECTORY cudaq DESTINATION .)
+  endif()
 endif()
 install(FILES "${METADATA_FILE}" DESTINATION cudaq)
 
@@ -80,8 +86,10 @@ if(CUDAQ_BUILD_TESTS)
   endif()
 endif()
 
-add_subdirectory(runtime/interop)
+if (NOT CUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS)
+  add_subdirectory(runtime/interop)
 
-if (cuDensityMat_FOUND)
-  add_subdirectory(runtime/cudaq/dynamics)
+  if (cuDensityMat_FOUND)
+    add_subdirectory(runtime/cudaq/dynamics)
+  endif()
 endif()

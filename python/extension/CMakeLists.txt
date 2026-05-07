@@ -46,6 +46,18 @@ declare_mlir_dialect_python_bindings(
     dialects/cc.py
   DIALECT_NAME cc)
 
+if (CUDAQ_DISABLE_PYTHON_RUNTIME_BINDINGS)
+declare_mlir_python_extension(CUDAQuantumPythonSources.Extension
+  MODULE_NAME _quakeDialects
+  ADD_TO_PARENT CUDAQuantumPythonSources
+  SOURCES
+    CUDAQuantumMLIRExtension.cpp
+
+  EMBED_CAPI_LINK_LIBS
+   CUDAQuantumMLIRCAPI
+   MLIRCAPIExecutionEngine
+)
+else()
 if(APPLE)
   set(_quakeDialects_mlir_runtime_sources "")
   set(_quakeDialects_extra_link_libs
@@ -172,6 +184,7 @@ target_link_libraries(CUDAQuantumPythonSources.Extension INTERFACE
 )
 if (CUDAQ_ENABLE_REST)
   target_link_libraries(CUDAQuantumPythonSources.Extension INTERFACE unzip_util)
+endif()
 endif()
 
 ################################################################################
