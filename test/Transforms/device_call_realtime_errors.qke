@@ -1,0 +1,18 @@
+// ========================================================================== //
+// Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                 //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: not cudaq-opt -pass-pipeline='builtin.module(distributed-device-call{realtime=1})' %s 2>&1 | FileCheck %s
+
+func.func @kernel(%arg0: !cc.ptr<i32>) attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+  cc.device_call @incrementInt(%arg0) : (!cc.ptr<i32>) -> ()
+  return
+}
+
+func.func private @incrementInt(!cc.ptr<i32>) attributes {"cudaq-devicecall"}
+
+// CHECK: error: 'cc.device_call' op realtime device_call lowering does not support raw pointer arguments

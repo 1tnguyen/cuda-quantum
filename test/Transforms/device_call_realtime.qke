@@ -1,0 +1,61 @@
+// ========================================================================== //
+// Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                 //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt -pass-pipeline='builtin.module(canonicalize,distributed-device-call{realtime=1},cse,canonicalize)' %s | FileCheck %s
+
+func.func @kernel(%arg0 : i32, %arg1 : i32) -> i32 attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+  %0 = cc.device_call @addThem(%arg0, %arg1) : (i32, i32) -> i32
+  return %0 : i32
+}
+
+func.func private @addThem(i32, i32) -> i32 attributes {"cudaq-devicecall"}
+
+// clang-format off
+// CHECK-LABEL: func.func @kernel(
+// CHECK-SAME:    %[[ARG0:.*]]: i32, %[[ARG1:.*]]: i32) -> i32
+// CHECK-DAG:     %[[REQUEST_SIZE:.*]] = arith.constant 8 : i64
+// CHECK-DAG:     %[[RESULT_BYTES:.*]] = arith.constant 4 : i64
+// CHECK-DAG:     %[[FUNCTION_ID:.*]] = arith.constant 1517064222 : i32
+// CHECK-DAG:     %[[DEVICE_ID:.*]] = arith.constant 0 : i32
+// CHECK:         %[[FRAME_SLOT:.*]] = cc.alloca !cc.ptr<i8>
+// CHECK:         %[[REQUEST_SLOT:.*]] = cc.alloca !cc.ptr<i8>
+// CHECK:         %[[RESPONSE_SLOT:.*]] = cc.alloca !cc.ptr<i8>
+// CHECK:         %[[RESPONSE_LEN:.*]] = cc.alloca i64
+// CHECK:         cc.store {{.*}}, %[[RESPONSE_LEN]] : !cc.ptr<i64>
+// CHECK:         %[[ACQUIRE_STATUS:.*]] = call @__cudaq_device_call_acquire_realtime_frame(%[[DEVICE_ID]], %[[FUNCTION_ID]], %[[REQUEST_SIZE]], %[[RESULT_BYTES]], %[[FRAME_SLOT]], %[[REQUEST_SLOT]], %[[RESPONSE_SLOT]]) : (i32, i32, i64, i64, !cc.ptr<!cc.ptr<i8>>, !cc.ptr<!cc.ptr<i8>>, !cc.ptr<!cc.ptr<i8>>) -> i32
+// CHECK:         %[[ACQUIRE_FAILED:.*]] = arith.cmpi ne, %[[ACQUIRE_STATUS]], {{.*}} : i32
+// CHECK:         cc.if(%[[ACQUIRE_FAILED]]) {
+// CHECK:           func.call @__quantum__qis__trap
+// CHECK:         }
+// CHECK:         %[[FRAME:.*]] = cc.load %[[FRAME_SLOT]] : !cc.ptr<!cc.ptr<i8>>
+// CHECK:         %[[REQUEST:.*]] = cc.load %[[REQUEST_SLOT]] : !cc.ptr<!cc.ptr<i8>>
+// CHECK:         %[[REQUEST_ARRAY:.*]] = cc.cast %[[REQUEST]] : (!cc.ptr<i8>) -> !cc.ptr<!cc.array<i8 x ?>>
+// CHECK:         %[[RESPONSE:.*]] = cc.load %[[RESPONSE_SLOT]] : !cc.ptr<!cc.ptr<i8>>
+// CHECK:         %[[ARG0_TYPED:.*]] = cc.cast %[[REQUEST]] : (!cc.ptr<i8>) -> !cc.ptr<i32>
+// CHECK:         cc.store %[[ARG0]], %[[ARG0_TYPED]] : !cc.ptr<i32>
+// CHECK:         %[[ARG1_SLOT:.*]] = cc.compute_ptr %[[REQUEST_ARRAY]][4] : (!cc.ptr<!cc.array<i8 x ?>>) -> !cc.ptr<i8>
+// CHECK:         %[[ARG1_TYPED:.*]] = cc.cast %[[ARG1_SLOT]] : (!cc.ptr<i8>) -> !cc.ptr<i32>
+// CHECK:         cc.store %[[ARG1]], %[[ARG1_TYPED]] : !cc.ptr<i32>
+// CHECK:         %[[STATUS:.*]] = call @__cudaq_device_call_dispatch_realtime_frame(%[[FRAME]], %[[RESPONSE_LEN]]) : (!cc.ptr<i8>, !cc.ptr<i64>) -> i32
+// CHECK:         %[[FAILED:.*]] = arith.cmpi ne, %[[STATUS]], {{.*}} : i32
+// CHECK:         cc.if(%[[FAILED]]) {
+// CHECK:           call @__cudaq_device_call_safely_release_realtime_frame(%[[FRAME]]) : (!cc.ptr<i8>) -> ()
+// CHECK:           func.call @__quantum__qis__trap
+// CHECK:         }
+// CHECK:         %[[RESULT_PTR:.*]] = cc.cast %[[RESPONSE]] : (!cc.ptr<i8>) -> !cc.ptr<i32>
+// CHECK:         %[[RESULT:.*]] = cc.load %[[RESULT_PTR]] : !cc.ptr<i32>
+// CHECK:         call @__cudaq_device_call_safely_release_realtime_frame(%[[FRAME]]) : (!cc.ptr<i8>) -> ()
+// CHECK:         return %[[RESULT]] : i32
+// CHECK:       }
+// CHECK:       func.func private @addThem(i32, i32) -> i32 attributes
+// CHECK-SAME:  "cudaq-devicecall"
+// CHECK:       func.func private @__cudaq_device_call_acquire_realtime_frame(i32, i32, i64, i64, !cc.ptr<!cc.ptr<i8>>, !cc.ptr<!cc.ptr<i8>>, !cc.ptr<!cc.ptr<i8>>) -> i32
+// CHECK:       func.func private @__cudaq_device_call_dispatch_realtime_frame(!cc.ptr<i8>, !cc.ptr<i64>) -> i32
+// CHECK:       func.func private @__cudaq_device_call_safely_release_realtime_frame(!cc.ptr<i8>)
+// CHECK:       func.func private @__quantum__qis__trap(i64)
+// clang-format on
