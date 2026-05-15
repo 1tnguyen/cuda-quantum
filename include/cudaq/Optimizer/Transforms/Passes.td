@@ -428,7 +428,10 @@ def DistributedDeviceCall : Pass<"distributed-device-call", "mlir::ModuleOp"> {
       /*default=*/"false",
       "Enable pass to insert a default implementation (runtime trap) for "
       "device call (default=false). The default implementation has weak "
-      "linkage, i.e., allowed to be overridden at link time.">
+      "linkage, i.e., allowed to be overridden at link time.">,
+    Option<"realtimeLowering", "realtime", "bool",
+      /*default=*/"false",
+      "Lower device calls to the realtime device-call frame ABI.">
   ];
 }
 

@@ -1,0 +1,36 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt -pass-pipeline='builtin.module(canonicalize,distributed-device-call{realtime=1},cse,canonicalize)' %s | FileCheck %s
+
+func.func @kernel(%arg0 : i32) attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+  cc.device_call @fireAndForget(%arg0) : (i32) -> ()
+  return
+}
+
+func.func private @fireAndForget(i32) attributes {"cudaq-devicecall"}
+
+// clang-format off
+// CHECK-LABEL: func.func @kernel(
+// CHECK-SAME:    %[[ARG0:.*]]: i32)
+// CHECK-DAG:     %[[REQUEST_SIZE:.*]] = arith.constant 4 : i64
+// CHECK-DAG:     %[[RESPONSE_BYTES:.*]] = arith.constant 0 : i64
+// CHECK-DAG:     %[[FUNCTION_ID:.*]] = arith.constant 962244963 : i32
+// CHECK-DAG:     %[[DEVICE_ID:.*]] = arith.constant 0 : i32
+// CHECK:         %[[FRAME_SLOT:.*]] = cc.alloca !cc.ptr<i8>
+// CHECK:         %[[REQUEST_SLOT:.*]] = cc.alloca !cc.ptr<i8>
+// CHECK:         %[[RESPONSE_SLOT:.*]] = cc.alloca !cc.ptr<i8>
+// CHECK:         %[[ACQUIRE_STATUS:.*]] = call @__cudaq_device_call_acquire_realtime_frame(%[[DEVICE_ID]], %[[FUNCTION_ID]], %[[REQUEST_SIZE]], %[[RESPONSE_BYTES]], %[[FRAME_SLOT]], %[[REQUEST_SLOT]], %[[RESPONSE_SLOT]]) : (i32, i32, i64, i64, !cc.ptr<!cc.ptr<i8>>, !cc.ptr<!cc.ptr<i8>>, !cc.ptr<!cc.ptr<i8>>) -> i32
+// CHECK:         %[[FRAME:.*]] = cc.load %[[FRAME_SLOT]] : !cc.ptr<!cc.ptr<i8>>
+// CHECK:         %[[REQUEST:.*]] = cc.load %[[REQUEST_SLOT]] : !cc.ptr<!cc.ptr<i8>>
+// CHECK-NOT:     cc.load %[[RESPONSE_SLOT]]
+// CHECK:         call @__cudaq_device_call_dispatch_realtime_frame(%[[FRAME]], {{.*}}) : (!cc.ptr<i8>, !cc.ptr<i64>) -> i32
+// CHECK:         call @__cudaq_device_call_safely_release_realtime_frame(%[[FRAME]]) : (!cc.ptr<i8>) -> ()
+// CHECK:         return
+// CHECK:       func.func private @__cudaq_device_call_safely_release_realtime_frame(!cc.ptr<i8>)
+// clang-format on

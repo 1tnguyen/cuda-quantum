@@ -16,6 +16,11 @@ llvm_canonicalize_cmake_booleans(
   CUDA_FOUND
 )
 
+set(CUDAQ_DEVICE_CALL_REALTIME_E2E_TARGET
+  cudaq-test-device-call-realtime-e2e)
+set(CUDAQ_DEVICE_CALL_REALTIME_E2E_LIB
+  "${CMAKE_BINARY_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}${CUDAQ_DEVICE_CALL_REALTIME_E2E_TARGET}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+
 if (CUDAQ_DISABLE_RUNTIME)
   set(CUDAQ_EXTRA_CONFIG_EXCLUDES "NVQPP")
 endif()
@@ -44,6 +49,41 @@ set(NVQPP_TEST_DEPENDS
     test_argument_conversion
     CustomPassPlugin
 )
+
+if (CUDA_FOUND AND CUDAQ_ENABLE_REALTIME AND NOT CUDAQ_DISABLE_CPP_FRONTEND AND
+    NOT CUDAQ_DISABLE_RUNTIME)
+  find_package(CUDAToolkit REQUIRED)
+
+  set(_device_call_realtime_e2e_shim_source
+    ${CMAKE_CURRENT_SOURCE_DIR}/NVQPP/Inputs/device_call_realtime_shim.cu)
+
+  add_library(${CUDAQ_DEVICE_CALL_REALTIME_E2E_TARGET} SHARED
+    ${_device_call_realtime_e2e_shim_source})
+  target_include_directories(${CUDAQ_DEVICE_CALL_REALTIME_E2E_TARGET}
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/device_call/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/NVQPP/Inputs
+      ${CMAKE_SOURCE_DIR}/runtime/include
+      ${CMAKE_SOURCE_DIR}/runtime
+      ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(${CUDAQ_DEVICE_CALL_REALTIME_E2E_TARGET}
+    PRIVATE
+      cudaq-device-call-runtime-headers
+      cudaq::cudaq-realtime-dispatch
+      CUDA::cudart)
+  set_target_properties(${CUDAQ_DEVICE_CALL_REALTIME_E2E_TARGET}
+    PROPERTIES
+      CUDA_SEPARABLE_COMPILATION ON
+      CUDA_RESOLVE_DEVICE_SYMBOLS ON
+      CUDA_RUNTIME_LIBRARY Shared
+      CUDA_STANDARD 20
+      CXX_STANDARD 20
+      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+  list(APPEND NVQPP_TEST_DEPENDS
+    ${CUDAQ_DEVICE_CALL_REALTIME_E2E_TARGET})
+endif()
+
 if (NOT CUDAQ_DISABLE_CPP_FRONTEND)
   set(NVQPP_TEST_DEPENDS ${NVQPP_TEST_DEPENDS}
     cudaq-quake
