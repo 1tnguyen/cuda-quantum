@@ -35,6 +35,8 @@ config.substitutions.append(('%llvmInclude', config.llvm_install + "/include"))
 config.substitutions.append(('%cudaq_lib_dir', config.cudaq_lib_dir))
 config.substitutions.append(('%cudaq_device_call_realtime_e2e_lib',
                              config.cudaq_device_call_realtime_e2e_lib))
+config.substitutions.append(('%cudaq_device_call_realtime_tcp_e2e_server',
+                             config.cudaq_device_call_realtime_tcp_e2e_server))
 config.substitutions.append(('%cudaq_target_dir', config.cudaq_target_dir))
 config.substitutions.append(('%cudaq_src_dir', config.cudaq_src_dir))
 config.substitutions.append(('%cudaq_plugin_ext', config.cudaq_plugin_ext))

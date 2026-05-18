@@ -28,6 +28,7 @@ config.cudaq_intrinsic_modules_dir = "@CUDAQ_INTRINSIC_MODULES_DIR@"
 config.cudaq_llvm_tools_dir = "@CMAKE_BINARY_DIR@/bin"
 config.cudaq_lib_dir = "@CMAKE_BINARY_DIR@/lib"
 config.cudaq_device_call_realtime_e2e_lib = "@CUDAQ_DEVICE_CALL_REALTIME_E2E_LIB@"
+config.cudaq_device_call_realtime_tcp_e2e_server = "@CUDAQ_DEVICE_CALL_REALTIME_TCP_E2E_SERVER@"
 config.cudaq_target_dir = "@CMAKE_BINARY_DIR@/targets"
 config.cudaq_plugin_ext = "@LLVM_PLUGIN_EXT@"
 config.python_executable = "@PYTHON_EXECUTABLE@"
@@ -44,6 +45,10 @@ if cmake_boolvar_to_bool(config.cuda_found):
 if cmake_boolvar_to_bool(config.cuda_found) and os.path.exists(
     config.cudaq_device_call_realtime_e2e_lib):
   config.available_features.add('device-call-realtime-e2e-lib')
+
+if cmake_boolvar_to_bool(config.cuda_found) and os.path.exists(
+    config.cudaq_device_call_realtime_tcp_e2e_server):
+  config.available_features.add('device-call-realtime-tcp-e2e-server')
 
 config.test_remote_sim = "@CUDAQ_TEST_REMOTE_SIM@"
 if cmake_boolvar_to_bool(config.test_remote_sim):
