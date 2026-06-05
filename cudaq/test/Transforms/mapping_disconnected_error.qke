@@ -1,0 +1,30 @@
+// ========================================================================== //
+// Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                 //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --assign-wire-indices '--qubit-mapping=device=file(%S/Inputs/qm-disconnected-mapping.txt) raise-fatal-errors=1' %s -verify-diagnostics
+
+// The device's largest connected component is {5, 6} (two qubits). A kernel
+// that needs three mutually-connected qubits cannot be placed, so the mapper
+// must report a fatal error rather than emit a circuit with gates between
+// qubits that are in different connected components.
+
+quake.wire_set @wires[2147483647]
+
+// expected-error@+1 {{cannot map kernel: it uses 3 qubits that must be mutually connected, but the largest connected component of the device has only 2 qubits}}
+func.func @ghz3() attributes {"cudaq-entrypoint", "cudaq-kernel"} {
+  %0 = quake.null_wire
+  %1 = quake.null_wire
+  %2 = quake.null_wire
+  %3 = quake.h %0 : (!quake.wire) -> !quake.wire
+  %4:2 = quake.x [%3] %1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %5:2 = quake.x [%4#1] %2 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  quake.sink %4#0 : !quake.wire
+  quake.sink %5#0 : !quake.wire
+  quake.sink %5#1 : !quake.wire
+  return
+}

@@ -40,6 +40,59 @@ void identityPlacement(cudaq::Placement &placement) {
     placement.map(cudaq::Placement::VirtualQ(i), cudaq::Placement::DeviceQ(i));
 }
 
+/// Place the active virtual qubits onto a single connected component of the
+/// device that is large enough to hold them, then assign every remaining
+/// virtual qubit to a leftover physical qubit so the placement is a complete
+/// bijection. This is required for disconnected devices: an identity placement
+/// could otherwise put interacting qubits on physical qubits that have no path
+/// between them, which cannot be routed. Returns failure when no single
+/// connected component can hold all of the active qubits.
+LogicalResult placeOnConnectedComponent(cudaq::Placement &placement,
+                                        const cudaq::Device &device,
+                                        ArrayRef<unsigned> activeVirtualQubits) {
+  using VirtualQ = cudaq::Placement::VirtualQ;
+  using DeviceQ = cudaq::Placement::DeviceQ;
+  const unsigned numPhy = device.getNumQubits();
+
+  auto components = device.getConnectedComponents();
+
+  // Find the first connected component large enough to hold all active qubits.
+  const mlir::SmallVector<DeviceQ> *chosen = nullptr;
+  for (const auto &component : components)
+    if (component.size() >= activeVirtualQubits.size()) {
+      chosen = &component;
+      break;
+    }
+  if (!chosen)
+    return failure();
+
+  mlir::SmallVector<bool> phyAssigned(numPhy, false);
+  mlir::SmallVector<bool> virtualAssigned(placement.getNumVirtualQubits(),
+                                          false);
+
+  // Place each active virtual qubit on a physical qubit of the chosen
+  // connected component.
+  for (auto [idx, vr] : llvm::enumerate(activeVirtualQubits)) {
+    DeviceQ phy = (*chosen)[idx];
+    placement.map(VirtualQ(vr), phy);
+    phyAssigned[phy.index] = true;
+    virtualAssigned[vr] = true;
+  }
+
+  // Assign the remaining virtual qubits to the remaining physical qubits in
+  // ascending order so the placement is a complete bijection.
+  unsigned nextPhy = 0;
+  for (unsigned vr = 0, end = placement.getNumVirtualQubits(); vr < end; ++vr) {
+    if (virtualAssigned[vr])
+      continue;
+    while (nextPhy < numPhy && phyAssigned[nextPhy])
+      ++nextPhy;
+    placement.map(VirtualQ(vr), DeviceQ(nextPhy));
+    phyAssigned[nextPhy] = true;
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Routing
 //===----------------------------------------------------------------------===//
@@ -100,8 +153,11 @@ public:
         phyDecay(device.getNumQubits(), 1.0), phyToWire(device.getNumQubits()),
         allowMeasurementMapping(false) {}
 
-  /// Main entry point into SabreRouter routing algorithm
-  void route(Block &block, ArrayRef<cudaq::quake::BorrowWireOp> sources);
+  /// Main entry point into SabreRouter routing algorithm. Returns failure if an
+  /// operation acts on two qubits that are in different connected components of
+  /// the device and therefore can never be brought together with SWAPs.
+  LogicalResult route(Block &block,
+                      ArrayRef<cudaq::quake::BorrowWireOp> sources);
 
   /// After routing, this contains the final values for all the qubits
   ArrayRef<Value> getPhyToWire() { return phyToWire; }
@@ -349,8 +405,8 @@ SabreRouter::Swap SabreRouter::chooseSwap() {
   return candidates[minIdx];
 }
 
-void SabreRouter::route(Block &block,
-                        ArrayRef<cudaq::quake::BorrowWireOp> sources) {
+LogicalResult SabreRouter::route(Block &block,
+                                 ArrayRef<cudaq::quake::BorrowWireOp> sources) {
 #ifndef NDEBUG
   constexpr char logLineComment[] =
       "//===-------------------------------------------===//\n";
@@ -413,6 +469,21 @@ void SabreRouter::route(Block &block,
 
     LLVM_DEBUG(logger.getOStream() << "\n";);
 
+    // The front layer could not be advanced. If any stuck two-qubit operation
+    // acts on qubits that live in different connected components of the device,
+    // no sequence of SWAPs can ever bring them together: routing is impossible.
+    // Bail out rather than emitting a gate between unconnected qubits (or
+    // looping forever / dereferencing an empty SWAP candidate list).
+    for (auto &virtOp : frontLayer) {
+      if (virtOp.op->hasTrait<cudaq::QuantumMeasure>() ||
+          virtOp.qubits.size() != 2)
+        continue;
+      auto phy0 = placement.getPhy(virtOp.qubits[0]);
+      auto phy1 = placement.getPhy(virtOp.qubits[1]);
+      if (device.getDistance(phy0, phy1) == cudaq::Device::kUnreachable)
+        return failure();
+    }
+
     // Add a swap
     numSwapSearches++;
     auto [phy0, phy1] = chooseSwap();
@@ -428,6 +499,7 @@ void SabreRouter::route(Block &block,
     }
   }
   LLVM_DEBUG(logger.startLine() << '\n' << logLineComment << '\n';);
+  return success();
 }
 
 std::pair<bool, std::optional<cudaq::Device>>
@@ -801,6 +873,37 @@ struct MappingFunc : public cudaq::opt::impl::MappingFuncBase<MappingFunc> {
       return;
     }
 
+    // The qubits the kernel uses are exactly those that already have a borrow
+    // op (auxiliary borrows for the remaining device qubits are added later).
+    SmallVector<unsigned> activeVirtualQubits;
+    for (auto [v, source] : llvm::enumerate(sources))
+      if (source)
+        activeVirtualQubits.push_back(v);
+
+    // Every qubit the kernel uses must fit within a single connected component
+    // of the device, because routing can only move a qubit within its own
+    // component. Verify this *before* mutating the IR so that an infeasible
+    // kernel is left untouched rather than rewritten into a circuit with gates
+    // between qubits that have no path between them.
+    auto deviceComponents = deviceInstance->getConnectedComponents();
+    std::size_t largestComponent = 0;
+    for (auto &component : deviceComponents)
+      largestComponent = std::max(largestComponent, component.size());
+    if (activeVirtualQubits.size() > largestComponent) {
+      if (nonComposable) {
+        func.emitOpError(
+            "cannot map kernel: it uses " +
+            std::to_string(activeVirtualQubits.size()) +
+            " qubits that must be mutually connected, but the largest "
+            "connected component of the device has only " +
+            std::to_string(largestComponent) + " qubits");
+        signalPassFailure();
+      }
+      LLVM_DEBUG(llvm::dbgs()
+                 << "kernel does not fit in any connected component\n");
+      return;
+    }
+
     // Make all existing borrow_wire ops use the mapped wire set.
     func.walk([&](cudaq::quake::BorrowWireOp borrowOp) {
       borrowOp.setSetName(mappedWireSetName);
@@ -847,27 +950,57 @@ struct MappingFunc : public cudaq::opt::impl::MappingFuncBase<MappingFunc> {
       return WalkResult::advance();
     });
 
-    // Create or borrow auxillary qubits if needed. Place them after the last
-    // allocated qubit.
-    builder.setInsertionPointAfter(lastSource);
-    for (unsigned i = 0; i < deviceInstance->getNumQubits(); i++) {
-      if (!sources[i]) {
-        auto borrowOp = cudaq::quake::BorrowWireOp::create(
-            builder, unknownLoc, wireTy, mappedWireSetName, i);
-        wireToVirtualQ[borrowOp.getResult()] = cudaq::Placement::VirtualQ(i);
-        sources[i] = borrowOp;
-      }
+    // Place the virtual qubits onto the device. For a fully connected device we
+    // keep the historical identity placement. For a disconnected device the
+    // active qubits must land on a single connected component large enough to
+    // hold them, otherwise interacting qubits could be placed on physical
+    // qubits with no path between them. Feasibility was already verified above,
+    // so the placement cannot fail here.
+    cudaq::Placement placement(sources.size(), deviceInstance->getNumQubits());
+    if (deviceComponents.size() == 1) {
+      identityPlacement(placement);
+    } else if (failed(placeOnConnectedComponent(placement, *deviceInstance,
+                                                activeVirtualQubits))) {
+      // Unreachable given the feasibility check above. Fail loudly rather than
+      // emit a partially mapped (and therefore incorrect) circuit.
+      func.emitError("internal mapper error: unable to place qubits onto a "
+                     "connected component");
+      signalPassFailure();
+      return;
     }
 
-    // Place
-    cudaq::Placement placement(sources.size(), deviceInstance->getNumQubits());
-    identityPlacement(placement);
+    // Materialize one borrow op per physical qubit, indexed by the physical
+    // qubit it represents. Existing user borrows are renumbered to the physical
+    // qubit they are initially placed on; physical qubits without a user borrow
+    // get a fresh auxiliary borrow. New borrows are placed after the last
+    // allocated qubit.
+    builder.setInsertionPointAfter(lastSource);
+    for (unsigned phy = 0; phy < deviceInstance->getNumQubits(); phy++) {
+      auto vr = placement.getVr(cudaq::Placement::DeviceQ(phy));
+      if (sources[vr.index]) {
+        sources[vr.index].setIdentity(phy);
+      } else {
+        auto borrowOp = cudaq::quake::BorrowWireOp::create(
+            builder, unknownLoc, wireTy, mappedWireSetName, phy);
+        wireToVirtualQ[borrowOp.getResult()] = vr;
+        sources[vr.index] = borrowOp;
+      }
+    }
 
     // Route
     SabreRouter router(*deviceInstance, wireToVirtualQ, placement,
                        extendedLayerSize, extendedLayerWeight, decayDelta,
                        roundsDecayReset);
-    router.route(*blocks.begin(), sources);
+    if (failed(router.route(*blocks.begin(), sources))) {
+      if (nonComposable) {
+        func.emitError("The mapper cannot route the kernel: it contains a "
+                       "two-qubit operation between qubits that are in "
+                       "different connected components of the device.");
+        signalPassFailure();
+      }
+      LLVM_DEBUG(llvm::dbgs() << "kernel is not routable on this device\n");
+      return;
+    }
     sortTopologically(&block);
 
     // Ensure that the original measurement ordering is still honored by moving
@@ -881,17 +1014,21 @@ struct MappingFunc : public cudaq::opt::impl::MappingFuncBase<MappingFunc> {
                                      block.getOperations(), op->getIterator());
     }
 
-    // Remove any unused BorrowWireOps and add ReturnWireOp's where needed
-    // unsigned highestMappedQubit = 0;
+    // Remove any unused BorrowWireOps and add ReturnWireOp's where needed. Each
+    // borrow op's identity is the physical qubit it occupies, and `phyToWire`
+    // is indexed by physical qubit, so we return the final wire of that
+    // physical qubit. Using the borrow's identity (rather than the post-routing
+    // placement) keeps the emitted return order identical to the historical
+    // behavior for identity placement.
     builder.setInsertionPoint(block.getTerminator());
     auto phyToWire = router.getPhyToWire();
-    for (const auto &[i, s] : llvm::enumerate(sources)) {
+    for (auto s : sources) {
       if (s->getUsers().empty()) {
         s->erase();
       } else {
-        // highestMappedQubit = i;
-        cudaq::quake::ReturnWireOp::create(builder, phyToWire[i].getLoc(),
-                                           phyToWire[i]);
+        unsigned phy = s.getIdentity();
+        cudaq::quake::ReturnWireOp::create(builder, phyToWire[phy].getLoc(),
+                                           phyToWire[phy]);
       }
     }
 

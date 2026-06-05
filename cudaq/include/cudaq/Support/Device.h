@@ -11,6 +11,7 @@
 #include "cudaq/ADT/GraphCSR.h"
 #include "cudaq/Support/Graph.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include <limits>
 
 namespace cudaq {
 
@@ -168,10 +169,22 @@ public:
   /// Returns the number of physical qubits in the device.
   unsigned getNumQubits() const { return topology.getNumNodes(); }
 
-  /// Returns the distance between two qubits.
+  /// Sentinel distance returned by `getDistance` for two qubits that belong to
+  /// different connected components, i.e. there is no path between them.
+  static constexpr unsigned kUnreachable =
+      std::numeric_limits<unsigned>::max();
+
+  /// Returns the distance between two qubits, or `kUnreachable` if the qubits
+  /// are in different connected components (no path exists).
   unsigned getDistance(Qubit src, Qubit dst) const {
+    if (src == dst)
+      return 0;
     unsigned pairID = getPairID(src.index, dst.index);
-    return src == dst ? 0 : shortestPaths[pairID].size() - 1;
+    // An empty shortest path marks an unreachable pair (see
+    // `computeAllPairShortestPaths`).
+    if (shortestPaths[pairID].empty())
+      return kUnreachable;
+    return shortestPaths[pairID].size() - 1;
   }
 
   mlir::ArrayRef<Qubit> getNeighbours(Qubit src) const {
@@ -179,7 +192,43 @@ public:
   }
 
   bool areConnected(Qubit q0, Qubit q1) const {
-    return getDistance(q0, q1) == 1;
+    // Determine adjacency directly from the device's edges rather than from the
+    // shortest-path distance. Shortest-path state is meaningless for qubits in
+    // different connected components, so a distance-based check could otherwise
+    // report unreachable qubits as connected.
+    for (auto neighbour : topology.getNeighbours(q0))
+      if (neighbour == q1)
+        return true;
+    return false;
+  }
+
+  /// Returns the connected components of the device topology. Each component is
+  /// the list of physical qubits it contains, sorted in ascending order; the
+  /// components themselves are ordered by their smallest qubit index. A fully
+  /// connected device yields a single component containing every qubit.
+  mlir::SmallVector<mlir::SmallVector<Qubit>> getConnectedComponents() const {
+    unsigned numNodes = getNumQubits();
+    mlir::SmallVector<mlir::SmallVector<Qubit>> components;
+    mlir::SmallVector<bool> visited(numNodes, false);
+    mlir::SmallVector<Qubit> worklist;
+    for (unsigned root = 0; root < numNodes; ++root) {
+      if (visited[root])
+        continue;
+      auto &component = components.emplace_back();
+      visited[root] = true;
+      worklist.push_back(Qubit(root));
+      while (!worklist.empty()) {
+        Qubit q = worklist.pop_back_val();
+        component.push_back(q);
+        for (auto neighbour : topology.getNeighbours(q))
+          if (!visited[neighbour.index]) {
+            visited[neighbour.index] = true;
+            worklist.push_back(neighbour);
+          }
+      }
+      std::sort(component.begin(), component.end());
+    }
+    return components;
   }
 
   /// Returns a shortest path between two qubits.
@@ -214,17 +263,29 @@ private:
     return (u * getNumQubits()) - (((u - 1) * u) / 2) + v - u;
   }
 
-  /// Compute the shortest path between every qubit. This assumes that there
-  /// exists at least one path between every source and destination pair. I.e.
-  /// the graph cannot be bipartite.
+  /// Compute the shortest path between every pair of qubits. Pairs of qubits
+  /// that are in different connected components (no path between them) are left
+  /// with an empty path, which `getDistance` reports as `kUnreachable`.
   void computeAllPairShortestPaths() {
     std::size_t numNodes = topology.getNumNodes();
-    shortestPaths.resize(numNodes * (numNodes + 1) / 2);
+    shortestPaths.assign(numNodes * (numNodes + 1) / 2, PathRef());
     mlir::SmallVector<Qubit> path(numNodes);
+    mlir::SmallVector<bool> isNeighbour(numNodes, false);
     for (unsigned n = 0; n < numNodes; ++n) {
       auto parents = getShortestPathsBFS(topology, Qubit(n));
+      // `getShortestPathsBFS` leaves `parents[m] == n` both for the immediate
+      // neighbours of `n` and for nodes that are unreachable from `n`. Record
+      // the immediate neighbours so the two cases can be told apart below.
+      isNeighbour.assign(numNodes, false);
+      for (auto neighbour : topology.getNeighbours(Qubit(n)))
+        isNeighbour[neighbour.index] = true;
       // Reconstruct the paths
       for (auto m = n + 1; m < numNodes; ++m) {
+        // If `m` points back at the source but is not an immediate neighbour,
+        // there is no path between `n` and `m`: they live in different
+        // connected components. Leave the shortest path empty to mark it.
+        if (parents[m] == Qubit(n) && !isNeighbour[m])
+          continue;
         path.clear();
         path.push_back(Qubit(m));
         auto p = parents[m];
