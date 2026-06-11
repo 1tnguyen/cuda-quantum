@@ -58,6 +58,7 @@ namespace {
 struct CpuBridgeConfig {
   std::string device = "mlx5_0";
   std::string peer_ip = "192.168.0.2";
+  std::string local_ip;
   unsigned remote_qp = 2;
   unsigned num_pages = 64;
   std::size_t page_size = 384;
@@ -88,6 +89,8 @@ bool parse_args(int argc, char **argv, CpuBridgeConfig &cfg) {
           << "  --device=NAME       IB device (default: mlx5_0)\n"
           << "  --peer-ip=ADDR      Peer IPv4 (FPGA / emulator) (default: "
              "192.168.0.2)\n"
+          << "  --bridge-ip=ADDR    Local bridge IPv4 for source GID\n"
+          << "  --local-ip=ADDR     Alias for --bridge-ip\n"
           << "  --remote-qp=N       Remote QP number (default: 2)\n"
           << "  --num-pages=N       Ring slots, power of two (default: 64)\n"
           << "  --page-size=N       Per-slot stride in bytes (default: 384)\n"
@@ -101,6 +104,10 @@ bool parse_args(int argc, char **argv, CpuBridgeConfig &cfg) {
       cfg.device = a.substr(9);
     else if (starts_with(a, "--peer-ip="))
       cfg.peer_ip = a.substr(10);
+    else if (starts_with(a, "--bridge-ip="))
+      cfg.local_ip = a.substr(12);
+    else if (starts_with(a, "--local-ip="))
+      cfg.local_ip = a.substr(11);
     else if (starts_with(a, "--remote-qp="))
       cfg.remote_qp =
           static_cast<unsigned>(std::stoul(a.substr(12), nullptr, 0));
@@ -182,6 +189,8 @@ int main(int argc, char **argv) {
   std::cout << "=== HSB CPU Bridge (Phase 1) ===" << std::endl;
   std::cout << "Device:        " << cfg.device << std::endl;
   std::cout << "Peer IP:       " << cfg.peer_ip << std::endl;
+  if (!cfg.local_ip.empty())
+    std::cout << "Local IP:      " << cfg.local_ip << std::endl;
   std::cout << "Remote QP:     0x" << std::hex << cfg.remote_qp << std::dec
             << std::endl;
   std::cout << "Pages:         " << cfg.num_pages << std::endl;
@@ -209,6 +218,8 @@ int main(int argc, char **argv) {
     std::cerr << "ERROR: cpu_roce_create_transceiver failed" << std::endl;
     return 1;
   }
+  if (!cfg.local_ip.empty())
+    cpu_roce_set_local_ip(xcvr, cfg.local_ip.c_str());
 
   if (!cpu_roce_start(xcvr)) {
     std::cerr << "ERROR: cpu_roce_start failed" << std::endl;

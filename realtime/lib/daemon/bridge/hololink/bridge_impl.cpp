@@ -32,6 +32,7 @@ struct HololinkBridgeContext {
   cudaq::realtime::BridgeConfig config;
   hololink_transceiver_t transceiver = nullptr;
   std::unique_ptr<std::thread> hololink_thread;
+  hololink_doca_transport_ctx doca_ctx{};
   bool is_igpu = false;
   HololinkBridgeContext(const cudaq::realtime::BridgeConfig &cfg)
       : config(cfg) {
@@ -180,22 +181,21 @@ static cudaq_status_t hololink_bridge_get_transport_context(
     ringbuffer->tx_data = tx_ring_data;
     ringbuffer->rx_stride_sz = ctx->config.page_size;
     ringbuffer->tx_stride_sz = ctx->config.page_size;
-  } else if (context_type == UNIFIED) {
-    cudaq_unified_dispatch_ctx_t *dispatch_ctx =
-        reinterpret_cast<cudaq_unified_dispatch_ctx_t *>(out_context);
+  } else if (context_type == DEVICE_UNIFIED) {
+    cudaq_device_unified_dispatch_ctx_t *dispatch_ctx =
+        reinterpret_cast<cudaq_device_unified_dispatch_ctx_t *>(out_context);
 
-    static hololink_doca_transport_ctx doca_ctx{};
-    doca_ctx.gpu_dev_qp = hololink_get_gpu_dev_qp(transceiver);
-    doca_ctx.rx_ring_data = reinterpret_cast<uint8_t *>(
+    ctx->doca_ctx.gpu_dev_qp = hololink_get_gpu_dev_qp(transceiver);
+    ctx->doca_ctx.rx_ring_data = reinterpret_cast<uint8_t *>(
         hololink_get_rx_ring_data_addr(transceiver));
-    doca_ctx.rx_ring_stride_sz = hololink_get_page_size(transceiver);
-    doca_ctx.rx_ring_mkey = htonl(hololink_get_rkey(transceiver));
-    doca_ctx.rx_ring_stride_num = hololink_get_num_pages(transceiver);
-    doca_ctx.frame_size = ctx->config.frame_size;
-    doca_ctx.use_bf = ctx->is_igpu ? 0 : 1;
+    ctx->doca_ctx.rx_ring_stride_sz = hololink_get_page_size(transceiver);
+    ctx->doca_ctx.rx_ring_mkey = htonl(hololink_get_rkey(transceiver));
+    ctx->doca_ctx.rx_ring_stride_num = hololink_get_num_pages(transceiver);
+    ctx->doca_ctx.frame_size = ctx->config.frame_size;
+    ctx->doca_ctx.use_bf = ctx->is_igpu ? 0 : 1;
 
     dispatch_ctx->launch_fn = &hololink_launch_unified_dispatch;
-    dispatch_ctx->transport_ctx = &doca_ctx;
+    dispatch_ctx->transport_ctx = &ctx->doca_ctx;
   } else {
     std::cerr << "ERROR: Invalid transport context type" << std::endl;
     return CUDAQ_ERR_INVALID_ARG;
@@ -277,6 +277,16 @@ hololink_bridge_disconnect(cudaq_realtime_bridge_handle_t handle) {
   return CUDAQ_OK;
 }
 
+static uint64_t
+hololink_bridge_get_capabilities(cudaq_realtime_bridge_handle_t handle) {
+  auto *ctx = reinterpret_cast<HololinkBridgeContext *>(handle);
+  if (!ctx || ctx->config.forward)
+    return 0;
+  if (ctx->config.unified)
+    return CUDAQ_BRIDGE_CAP_DEVICE_UNIFIED_LAUNCH;
+  return CUDAQ_BRIDGE_CAP_DEVICE_RING;
+}
+
 cudaq_realtime_bridge_interface_t *cudaq_realtime_get_bridge_interface() {
   static cudaq_realtime_bridge_interface_t cudaq_hololink_bridge_interface = {
       CUDAQ_REALTIME_BRIDGE_INTERFACE_VERSION,
@@ -286,6 +296,7 @@ cudaq_realtime_bridge_interface_t *cudaq_realtime_get_bridge_interface() {
       hololink_bridge_connect,
       hololink_bridge_launch,
       hololink_bridge_disconnect,
+      hololink_bridge_get_capabilities,
   };
   return &cudaq_hololink_bridge_interface;
 }

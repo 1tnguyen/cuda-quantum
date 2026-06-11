@@ -21,6 +21,7 @@ set -euo pipefail
 # ============================================================================
 
 VERIFY=true
+DO_SETUP_NETWORK=false
 
 # Network defaults
 IB_DEVICE=""           # auto-detect
@@ -33,12 +34,70 @@ GPU_ID=0
 TIMEOUT=60
 NUM_SHOTS=100
 PAYLOAD_SIZE=8
-PAGE_SIZE=384
-NUM_PAGES=64
+PAGE_SIZE=512
+NUM_PAGES=128
 CONTROL_PORT=8193
 
 # Build parallelism
 JOBS=$(nproc 2>/dev/null || echo 8)
+
+print_usage() {
+    cat <<'EOF'
+Usage: hololink_test.sh [options]
+
+Options:
+  --device DEV           ConnectX IB device name (default: auto-detect)
+  --bridge-ip ADDR       Bridge tool IP (default: 10.0.0.1)
+  --emulator-ip ADDR     Emulator IP (default: 10.0.0.2)
+  --gpu N                GPU ordinal (default: 0)
+  --timeout N            Bridge timeout in seconds (default: 60)
+  --num-messages N       Number of RPC messages (default: 100)
+  --num-shots N          Alias for --num-messages
+  --payload-size N       Bytes per RPC payload (default: 8)
+  --page-size N          Ring slot size (default: 512)
+  --num-pages N          Ring slots (default: 128)
+  --control-port N       UDP control port for emulator (default: 8193)
+  --setup-network        Configure bridge/emulator IP aliases on the NIC
+  --no-verify            Skip ILA response verification
+  --help, -h             Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device)        IB_DEVICE="$2"; shift ;;
+        --device=*)      IB_DEVICE="${1#*=}" ;;
+        --bridge-ip)     BRIDGE_IP="$2"; shift ;;
+        --bridge-ip=*)   BRIDGE_IP="${1#*=}" ;;
+        --emulator-ip)   EMULATOR_IP="$2"; shift ;;
+        --emulator-ip=*) EMULATOR_IP="${1#*=}" ;;
+        --gpu)           GPU_ID="$2"; shift ;;
+        --gpu=*)         GPU_ID="${1#*=}" ;;
+        --timeout)       TIMEOUT="$2"; shift ;;
+        --timeout=*)     TIMEOUT="${1#*=}" ;;
+        --num-messages)  NUM_SHOTS="$2"; shift ;;
+        --num-messages=*) NUM_SHOTS="${1#*=}" ;;
+        --num-shots)     NUM_SHOTS="$2"; shift ;;
+        --num-shots=*)   NUM_SHOTS="${1#*=}" ;;
+        --payload-size)  PAYLOAD_SIZE="$2"; shift ;;
+        --payload-size=*) PAYLOAD_SIZE="${1#*=}" ;;
+        --page-size)     PAGE_SIZE="$2"; shift ;;
+        --page-size=*)   PAGE_SIZE="${1#*=}" ;;
+        --num-pages)     NUM_PAGES="$2"; shift ;;
+        --num-pages=*)   NUM_PAGES="${1#*=}" ;;
+        --control-port)  CONTROL_PORT="$2"; shift ;;
+        --control-port=*) CONTROL_PORT="${1#*=}" ;;
+        --setup-network) DO_SETUP_NETWORK=true ;;
+        --no-verify)     VERIFY=false ;;
+        --help|-h)       print_usage; exit 0 ;;
+        *)
+            echo "ERROR: Unknown option: $1" >&2
+            print_usage >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 
 # ============================================================================
@@ -110,9 +169,17 @@ do_setup_network() {
 cleanup_pids() {
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
+            kill -INT "$pid" 2>/dev/null || true
         fi
+    done
+    sleep 1
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    for pid in "${PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
     done
 }
 
@@ -132,12 +199,15 @@ do_run() {
 
     # Start emulator
     echo "--- Starting emulator ---"
+    > /tmp/emulator.log
     "$emulator_bin" \
         --device="$IB_DEVICE" \
         --port="$CONTROL_PORT" \
         --bridge-ip="$BRIDGE_IP" \
         --page-size="$PAGE_SIZE" \
-        2>&1 | tee /tmp/emulator.log &
+        > /tmp/emulator.log 2>&1 &
+    PIDS+=($!)
+    tail -f /tmp/emulator.log &
     PIDS+=($!)
 
     # Wait for emulator to print QP number
@@ -155,7 +225,8 @@ do_run() {
 
     # Start bridge
     echo "--- Starting bridge ---"
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+LD_LIBRARY_PATH:}@CMAKE_BINARY_DIR@/lib"
+    export LD_LIBRARY_PATH="@CMAKE_BINARY_DIR@/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    > /tmp/bridge.log
     "$bridge_bin" \
         --device="$IB_DEVICE" \
         --peer-ip="$FPGA_TARGET_IP" \
@@ -164,7 +235,9 @@ do_run() {
         --timeout="$TIMEOUT" \
         --page-size="$PAGE_SIZE" \
         --num-pages="$NUM_PAGES" \
-        2>&1 | tee /tmp/bridge.log &
+        > /tmp/bridge.log 2>&1 &
+    PIDS+=($!)
+    tail -f /tmp/bridge.log &
     PIDS+=($!)
 
     # Wait for bridge to print QP info
@@ -199,9 +272,10 @@ do_run() {
         --bridge-buffer="0x$BRIDGE_BUFFER" \
         --page-size="$PAGE_SIZE" \
         --num-pages="$NUM_PAGES" \
-        --num-shots="$NUM_SHOTS" \
+        --num-messages="$NUM_SHOTS" \
         --payload-size="$PAYLOAD_SIZE" \
         --bridge-ip="$BRIDGE_IP" \
+        --emulator \
         $verify_flag
     PLAYBACK_EXIT=$?
 
@@ -226,6 +300,10 @@ do_run() {
 
 echo "=== Hololink Generic RPC Test ==="
 echo "Mode: emulated"
+
+if $DO_SETUP_NETWORK; then
+    do_setup_network
+fi
 
 do_run
 echo "Done."

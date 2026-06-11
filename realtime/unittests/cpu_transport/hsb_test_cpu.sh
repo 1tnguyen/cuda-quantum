@@ -54,6 +54,7 @@ DO_RUN=true
 VERIFY=true
 UNIFIED=false
 FORWARD=false
+BRIDGE_BINARY="hsb_bridge_cpu"
 
 # Directory defaults.  Per the plan we point at the current HSB source
 # checkout at /workspaces/holoscan-sensor-bridge (not the legacy
@@ -105,6 +106,8 @@ Build options:
   --hololink-dir DIR     HSB source dir (default: /workspaces/holoscan-sensor-bridge)
   --cuda-quantum-dir DIR cuda-quantum source dir (default: /workspaces/cuda-quantum)
   --jobs N               Parallel build jobs (default: nproc)
+  --bridge-binary NAME   Bridge binary / CMake target name
+                         (default: hsb_bridge_cpu)
 
 Network options:
   --device DEV           ConnectX IB device name (default: auto-detect)
@@ -138,6 +141,7 @@ while [[ $# -gt 0 ]]; do
         --hololink-dir)     HOLOLINK_DIR="$2"; shift ;;
         --cuda-quantum-dir) CUDA_QUANTUM_DIR="$2"; shift ;;
         --bin-dir)          BIN_DIR="$2"; shift ;;
+        --bridge-binary)    BRIDGE_BINARY="$2"; shift ;;
         --jobs)             JOBS="$2"; shift ;;
         --device)           IB_DEVICE="$2"; shift ;;
         --bridge-ip)        BRIDGE_IP="$2"; shift ;;
@@ -258,7 +262,7 @@ do_build() {
         -DHOLOSCAN_SENSOR_BRIDGE_SOURCE_DIR="$HOLOLINK_DIR" \
         -DHOLOSCAN_SENSOR_BRIDGE_BUILD_DIR="$hololink_build"
     cmake --build "$realtime_build" -j"$JOBS" \
-        --target hsb_bridge_cpu hololink_fpga_emulator hololink_fpga_playback
+        --target "$BRIDGE_BINARY" hololink_fpga_emulator hololink_fpga_playback
 
     echo "=== Build complete ==="
 }
@@ -419,11 +423,11 @@ do_run() {
     local utils_dir="$build_dir/unittests/utils"
 
     if [ -n "$BIN_DIR" ]; then
-        local bridge_bin="$BIN_DIR/hsb_bridge_cpu"
+        local bridge_bin="$BIN_DIR/$BRIDGE_BINARY"
         local emulator_bin="$BIN_DIR/hololink_fpga_emulator"
         local playback_bin="$BIN_DIR/hololink_fpga_playback"
     else
-        local bridge_bin="$utils_dir/hsb_bridge_cpu"
+        local bridge_bin="$utils_dir/$BRIDGE_BINARY"
         local emulator_bin="$utils_dir/hololink_fpga_emulator"
         local playback_bin="$utils_dir/hololink_fpga_playback"
     fi
@@ -480,6 +484,7 @@ do_run() {
     local bridge_args=(
         --device="$IB_DEVICE"
         --peer-ip="$FPGA_TARGET_IP"
+        --bridge-ip="$BRIDGE_IP"
         --remote-qp="$FPGA_QP"
         --timeout="$TIMEOUT"
         --payload-size="$PAYLOAD_SIZE"
