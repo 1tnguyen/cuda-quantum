@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <thread>
 
 struct cudaq_dispatch_manager_t {
   int reserved = 0;
@@ -29,8 +30,18 @@ struct cudaq_dispatcher_t {
   cudaStream_t stream = nullptr;
   bool running = false;
   cudaq_host_dispatcher_handle_t *host_handle = nullptr;
+  std::thread host_unified_thread;
   void **h_mailbox_bank = nullptr;
 };
+
+// HOST + UNIFIED: the dispatcher runs its own generic host loop
+// (cudaq_host_unified_generic_loop) on a dispatcher-owned thread, driven by the
+// bridge host data-plane binding wired via cudaq_dispatcher_set_host_dataplane.
+static bool is_host_unified_dispatcher(const cudaq_dispatcher_t *dispatcher) {
+  return dispatcher &&
+         dispatcher->config.dispatch_path == CUDAQ_DISPATCH_PATH_HOST &&
+         dispatcher->config.kernel_type == CUDAQ_KERNEL_UNIFIED;
+}
 
 static bool is_valid_kernel_type(cudaq_kernel_type_t kernel_type) {
   switch (kernel_type) {
@@ -65,6 +76,13 @@ static cudaq_status_t validate_dispatcher(cudaq_dispatcher_t *dispatcher) {
     return CUDAQ_ERR_INVALID_ARG;
 
   if (dispatcher->config.dispatch_path == CUDAQ_DISPATCH_PATH_HOST) {
+    if (dispatcher->config.kernel_type == CUDAQ_KERNEL_UNIFIED) {
+      // Host-unified runs the library generic loop against the bridge host
+      // data-plane binding; no ring buffers are required.
+      if (!dispatcher->transport_ctx)
+        return CUDAQ_ERR_INVALID_ARG;
+      return CUDAQ_OK;
+    }
     if (!dispatcher->ringbuffer.rx_flags_host ||
         !dispatcher->ringbuffer.tx_flags_host ||
         !dispatcher->ringbuffer.rx_data_host ||
@@ -124,10 +142,18 @@ cudaq_status_t cudaq_dispatcher_create(cudaq_dispatch_manager_t *,
 cudaq_status_t cudaq_dispatcher_destroy(cudaq_dispatcher_t *dispatcher) {
   if (!dispatcher)
     return CUDAQ_ERR_INVALID_ARG;
-  if (dispatcher->running && dispatcher->host_handle) {
-    *dispatcher->shutdown_flag = 1;
-    cudaq_host_dispatcher_stop(dispatcher->host_handle);
-    dispatcher->host_handle = nullptr;
+  if (dispatcher->running) {
+    if (is_host_unified_dispatcher(dispatcher)) {
+      if (dispatcher->shutdown_flag)
+        *dispatcher->shutdown_flag = 1;
+      if (dispatcher->host_unified_thread.joinable())
+        dispatcher->host_unified_thread.join();
+    } else if (dispatcher->host_handle) {
+      *dispatcher->shutdown_flag = 1;
+      cudaq_host_dispatcher_stop(dispatcher->host_handle);
+      dispatcher->host_handle = nullptr;
+    }
+    dispatcher->running = false;
   }
   delete dispatcher;
   return CUDAQ_OK;
@@ -195,12 +221,38 @@ cudaq_dispatcher_set_unified_launch(cudaq_dispatcher_t *dispatcher,
   return CUDAQ_OK;
 }
 
+cudaq_status_t
+cudaq_dispatcher_set_host_dataplane(cudaq_dispatcher_t *dispatcher,
+                                    void *host_dataplane_binding) {
+  if (!dispatcher || !host_dataplane_binding)
+    return CUDAQ_ERR_INVALID_ARG;
+  dispatcher->transport_ctx = host_dataplane_binding;
+  return CUDAQ_OK;
+}
+
 cudaq_status_t cudaq_dispatcher_start(cudaq_dispatcher_t *dispatcher) {
   auto status = validate_dispatcher(dispatcher);
   if (status != CUDAQ_OK)
     return status;
   if (dispatcher->running)
     return CUDAQ_OK;
+
+  // Host-unified: the dispatcher owns the thread and runs its own generic loop.
+  // No CUDA device/stream is needed for the CPU data plane.
+  if (is_host_unified_dispatcher(dispatcher)) {
+    void *transport_ctx = dispatcher->transport_ctx;
+    cudaq_function_entry_t *entries = dispatcher->table.entries;
+    const size_t entry_count = dispatcher->table.count;
+    volatile int *shutdown_flag = dispatcher->shutdown_flag;
+    uint64_t *stats = dispatcher->stats;
+    dispatcher->host_unified_thread = std::thread(
+        [transport_ctx, entries, entry_count, shutdown_flag, stats] {
+          cudaq_host_unified_generic_loop(transport_ctx, entries, entry_count,
+                                          shutdown_flag, stats);
+        });
+    dispatcher->running = true;
+    return CUDAQ_OK;
+  }
 
   int device_id = dispatcher->config.device_id;
   if (device_id < 0)
@@ -256,6 +308,15 @@ cudaq_status_t cudaq_dispatcher_stop(cudaq_dispatcher_t *dispatcher) {
     return CUDAQ_ERR_INVALID_ARG;
   if (!dispatcher->running)
     return CUDAQ_OK;
+
+  if (is_host_unified_dispatcher(dispatcher)) {
+    if (dispatcher->shutdown_flag)
+      *dispatcher->shutdown_flag = 1;
+    if (dispatcher->host_unified_thread.joinable())
+      dispatcher->host_unified_thread.join();
+    dispatcher->running = false;
+    return CUDAQ_OK;
+  }
 
   if (dispatcher->config.dispatch_path == CUDAQ_DISPATCH_PATH_HOST &&
       dispatcher->host_handle) {

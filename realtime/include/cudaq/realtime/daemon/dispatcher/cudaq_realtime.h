@@ -136,16 +136,10 @@ typedef struct {
   uint8_t *tx_data_host;
 } cudaq_ringbuffer_t;
 
-// Host RPC callback for CUDAQ_DISPATCH_HOST_CALL.  The handler reads the
-// RPCHeader + args from `rx_slot` (the inbound request, read-only) and writes
-// the RPCResponse + result into `tx_slot` (the outbound slot the transport will
-// send).  The two slots are distinct host buffers (separate RX/TX rings), so
-// the handler must echo any preserved header fields (e.g. request_id,
-// ptp_timestamp) from rx_slot into tx_slot explicitly.  `slot_size` is the
-// usable byte size of each slot (RX and TX strides are equal by configuration;
-// the smaller of the two is passed defensively).
-typedef void (*cudaq_host_rpc_fn_t)(const void *rx_slot, void *tx_slot,
-                                    size_t slot_size);
+// Host RPC callback: reads RPCHeader + args from slot, writes RPCResponse +
+// result. slot_host is the host pointer to the slot (same layout as device
+// slot).
+typedef void (*cudaq_host_rpc_fn_t)(void *slot_host, size_t slot_size);
 
 // Unified function table entry with schema
 typedef struct {
@@ -305,6 +299,29 @@ cudaq_dispatcher_set_unified_launch(cudaq_dispatcher_t *dispatcher,
                                     cudaq_unified_launch_fn_t unified_launch_fn,
                                     void *transport_ctx);
 
+// Host-unified wiring (CUDAQ_DISPATCH_PATH_HOST + CUDAQ_KERNEL_UNIFIED).  Pass
+// the resolved host data-plane binding (a `cudaq_host_transport_binding_t*`
+// filled via `iface->get_host_dataplane`, see bridge_interface.h).  When set,
+// cudaq_dispatcher_start() runs the library's own generic host loop
+// (`cudaq_host_unified_generic_loop`) on a dispatcher-owned thread, and
+// cudaq_dispatcher_stop() signals shutdown and joins it.  No ring buffer is
+// required; this is the unified-path parallel to cudaq_dispatcher_set_ringbuffer.
+cudaq_status_t
+cudaq_dispatcher_set_host_dataplane(cudaq_dispatcher_t *dispatcher,
+                                    void *host_dataplane_binding);
+
+// Library-owned generic host loop driven through the bridge host data-plane
+// (rx_acquire / tx_acquire / tx_commit).  `binding_ctx` is a
+// `cudaq_host_transport_binding_t*` (from bridge_interface.h).  Normally the
+// dispatcher runs this for you once wired via
+// cudaq_dispatcher_set_host_dataplane; it is exposed here only for callers that
+// want to own the loop thread themselves.
+void cudaq_host_unified_generic_loop(void *binding_ctx,
+                                     cudaq_function_entry_t *function_table,
+                                     size_t func_count,
+                                     volatile int *shutdown_flag,
+                                     uint64_t *stats);
+
 // Start/stop
 cudaq_status_t cudaq_dispatcher_start(cudaq_dispatcher_t *dispatcher);
 cudaq_status_t cudaq_dispatcher_stop(cudaq_dispatcher_t *dispatcher);
@@ -338,6 +355,18 @@ void cudaq_host_dispatcher_stop(cudaq_host_dispatcher_handle_t *handle);
 cudaq_status_t
 cudaq_host_dispatcher_release_worker(cudaq_host_dispatcher_handle_t *handle,
                                      int worker_id);
+
+//==============================================================================
+// Per-slot HOST_CALL dispatch (shared by ring and unified host loops)
+//==============================================================================
+
+// Validate RPC_MAGIC_REQUEST, look up function_id in table, copy rx_slot ->
+// tx_slot, run the HOST_CALL handler in place, and return the framed
+// RPCResponse length (sizeof(RPCResponse) + result_len), or 0 to drop (bad
+// magic / unknown id / non-HOST_CALL / null handler).
+size_t cudaq_host_dispatch_rpc(const cudaq_function_table_t *table,
+                                 const void *rx_slot, void *tx_slot,
+                                 size_t slot_size);
 
 //==============================================================================
 // Ring buffer slot helpers (producer / consumer side)

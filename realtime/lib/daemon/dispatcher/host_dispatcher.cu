@@ -6,6 +6,8 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.
  ******************************************************************************/
 
+#include "cudaq/realtime/daemon/bridge/bridge_interface.h"
+#include "cudaq/realtime/daemon/dispatcher/cudaq_realtime.h"
 #include "cudaq/realtime/daemon/dispatcher/dispatch_kernel_launch.h"
 #include "cudaq/realtime/daemon/dispatcher/host_dispatcher.h"
 
@@ -89,31 +91,47 @@ static void finish_slot_and_advance(const cudaq_host_dispatch_loop_ctx_t *ctx,
   current_slot = (current_slot + 1) % num_slots;
 }
 
-// CUDAQ_DISPATCH_HOST_CALL handler: synchronous pure-C++ dispatch.  No GPU
-// graph worker is acquired (HOST_CALL bypasses the worker pool entirely).
-// Two-pointer ABI (`cudaq_host_rpc_fn_t(const void *rx, void *tx, size_t)`):
-// the dispatcher hands the handler the RX slot (inbound request) and the TX
-// slot (outbound response) directly, so the handler reads the request from RX
-// and writes its response straight into the TX ring where the consumer (e.g.
-// CpuRoceTransceiver TX thread or Hololink TX kernel) expects it -- no
-// intermediate RX->TX copy.
+// Core HOST_CALL dispatch given an already-resolved entry.  Semantics match
+// the user-facing `cudaq_host_rpc_fn_t(void *slot, size_t)` ABI: the host_fn
+// reads RPCHeader+args from `slot` and writes RPCResponse+result back into the
+// same slot.  Since the dispatcher uses separate RX/TX rings (host-loop bridge
+// requirement), we first memcpy the RX slot into the TX slot so the in-place
+// rewrite produces the response in the TX ring where the consumer (e.g.
+// CpuRoceTransceiver TX thread, Hololink TX kernel, or OPNIC doorbell) expects
+// it.  Returns the framed RPCResponse length, or 0 if `entry` has no HOST_CALL
+// handler.  Shared by the ring path (handle_host_call, entry pre-resolved) and
+// the public cudaq_host_dispatch_rpc (which resolves the entry itself).
+static size_t dispatch_host_call_entry(const cudaq_function_entry_t *entry,
+                                       const void *rx_slot, void *tx_slot,
+                                       size_t slot_size) {
+  if (!entry || entry->dispatch_mode != CUDAQ_DISPATCH_HOST_CALL ||
+      !entry->handler.host_fn)
+    return 0;
+  if (tx_slot != rx_slot)
+    std::memcpy(tx_slot, rx_slot, slot_size);
+  entry->handler.host_fn(tx_slot, slot_size);
+  const auto *resp = static_cast<const RPCResponse *>(tx_slot);
+  return sizeof(RPCResponse) + resp->result_len;
+}
+
+// Ring-path adapter.  No GPU graph worker is acquired (HOST_CALL bypasses the
+// worker pool entirely).  `entry` is already resolved by
+// parse_slot_with_function_table, so we dispatch directly without a second
+// table lookup, then publish the TX slot address to tx_flag.  No in-flight
+// sentinel is needed: the path is synchronous from the consumer's POV (the
+// store happens only after host_fn has filled tx_slot).
 static void handle_host_call(const cudaq_host_dispatch_loop_ctx_t *ctx,
                              const cudaq_function_entry_t *entry,
                              void *slot_host, size_t current_slot) {
-  if (!entry || !entry->handler.host_fn)
-    return;
   const size_t rx_stride = ctx->ringbuffer.rx_stride_sz;
   const size_t tx_stride = ctx->ringbuffer.tx_stride_sz;
-  // Usable slot size handed to the handler.  RX and TX strides are equal (the
-  // bridge configures both from the same slot_size); the smaller is passed
-  // defensively against a future asymmetric configuration.
-  const size_t slot_size = rx_stride < tx_stride ? rx_stride : tx_stride;
+  // Use the smaller of the two strides as the safe copy size; in practice RX
+  // and TX strides are equal (the bridge configures both from the same
+  // slot_size), so this is just defensive against a future asymmetric config.
+  const size_t copy_bytes = rx_stride < tx_stride ? rx_stride : tx_stride;
   uint8_t *tx_slot = ctx->ringbuffer.tx_data_host + current_slot * tx_stride;
-  entry->handler.host_fn(slot_host, tx_slot, slot_size);
-  // Publish: writing the slot's address to tx_flag signals "fresh data" to
-  // the consumer.  No in-flight sentinel needed because this entire path
-  // is synchronous from the consumer's POV (the store happens after the
-  // host_fn has already filled tx_slot).
+  if (dispatch_host_call_entry(entry, slot_host, tx_slot, copy_bytes) == 0)
+    return;
   as_atomic_u64(ctx->ringbuffer.tx_flags_host)[current_slot].store(
       reinterpret_cast<uint64_t>(tx_slot),
       cuda::std::memory_order_release);
@@ -135,12 +153,6 @@ static int acquire_graph_worker(const cudaq_host_dispatch_loop_ctx_t *ctx,
 
 static void
 sweep_completed_workers(const cudaq_host_dispatch_loop_ctx_t *ctx) {
-  // HOST_CALL dispatch uses no graph worker pool, so idle_mask/workers are
-  // null and num_workers is 0.  Guard against that here (not just via the
-  // caller's skip_stream_sweep flag) so a future caller can't crash on a null
-  // idle_mask if they forget to set it.
-  if (!ctx->idle_mask || !ctx->workers || ctx->num_workers == 0)
-    return;
   uint64_t busy =
       ~as_atomic_u64(ctx->idle_mask)->load(cuda::std::memory_order_acquire);
   busy &= (1ULL << ctx->num_workers) - 1;
@@ -216,6 +228,90 @@ static void launch_graph_worker(const cudaq_host_dispatch_loop_ctx_t *ctx,
 }
 
 } // anonymous namespace
+
+extern "C" size_t
+cudaq_host_dispatch_rpc(const cudaq_function_table_t *table, const void *rx_slot,
+                        void *tx_slot, size_t slot_size) {
+  if (!table || !table->entries || !rx_slot || !tx_slot)
+    return 0;
+
+  // Validate magic and resolve the entry, then run the shared dispatch core.
+  // Callers that have already parsed the slot (the ring loop) use
+  // dispatch_host_call_entry directly to avoid this second lookup.
+  const auto *header = static_cast<const RPCHeader *>(rx_slot);
+  if (header->magic != RPC_MAGIC_REQUEST)
+    return 0;
+
+  const cudaq_function_entry_t *entry =
+      lookup_function(table->entries, table->count, header->function_id);
+  return dispatch_host_call_entry(entry, rx_slot, tx_slot, slot_size);
+}
+
+// Option C: library-owned generic fused host loop.  Unlike the transport-fused
+// `opnic_unified_host_loop`, this loop knows nothing about the transport's
+// native contract -- it drives RX/TX entirely through a resolved
+// cudaq_host_dataplane_t (rx_acquire / tx_acquire / tx_commit).  Each slot
+// therefore costs three indirect, non-inlinable data-plane calls on top of the
+// one unavoidable handler indirection inside cudaq_host_dispatch_rpc; that delta
+// vs the fused loop is exactly what the host-unified benchmark quantifies.
+// Shutdown-flag handling matches the fused loop (plain volatile reads + the
+// function_id == 0 in-band convention).
+extern "C" void
+cudaq_host_unified_generic_loop(void *binding_ctx,
+                                cudaq_function_entry_t *function_table,
+                                size_t func_count, volatile int *shutdown_flag,
+                                uint64_t *stats) {
+  auto *binding = static_cast<cudaq_host_transport_binding_t *>(binding_ctx);
+  if (!binding)
+    return;
+  const cudaq_host_dataplane_t &dp = binding->dataplane;
+  if (!dp.rx_acquire || !dp.tx_acquire || !dp.tx_commit)
+    return;
+
+  void *host_ctx = dp.host_ctx;
+  const cudaq_function_table_t table{function_table,
+                                     static_cast<uint32_t>(func_count)};
+  uint64_t packet_count = 0;
+
+  while (*shutdown_flag == 0) {
+    // Stage 1: ask the transport for the next RX slot (non-blocking).
+    void *rx_slot = nullptr;
+    size_t rx_size = 0;
+    cudaq_rx_status_t status = dp.rx_acquire(host_ctx, &rx_slot, &rx_size);
+    if (status == CUDAQ_RX_EMPTY) {
+      CUDAQ_REALTIME_CPU_RELAX();
+      continue;
+    }
+    if (status == CUDAQ_RX_SHUTDOWN)
+      break;
+
+    // In-band shutdown convention stays in the loop, not the transport.
+    const auto *hdr = static_cast<const cudaq::realtime::RPCHeader *>(rx_slot);
+    if (hdr->function_id == 0) {
+      *shutdown_flag = 1;
+      break;
+    }
+
+    // Stage 2: get the TX slot (cursor only advances on commit).
+    void *tx_slot = nullptr;
+    size_t tx_size = 0;
+    if (dp.tx_acquire(host_ctx, &tx_slot, &tx_size) != CUDAQ_OK)
+      break;
+
+    // Stage 3: shared per-slot HOST_CALL dispatch (copy + handler + framing).
+    const size_t slot_size = rx_size < tx_size ? rx_size : tx_size;
+    if (cudaq_host_dispatch_rpc(&table, rx_slot, tx_slot, slot_size) == 0)
+      continue; // unknown function / bad magic: drop, no response
+
+    // Stage 4: publish (transport owns the fence + doorbell + cursor advance).
+    if (dp.tx_commit(host_ctx) != CUDAQ_OK)
+      break;
+    ++packet_count;
+  }
+
+  if (stats)
+    *stats += packet_count;
+}
 
 extern "C" void
 cudaq_host_dispatcher_loop(const cudaq_host_dispatch_loop_ctx_t *ctx) {

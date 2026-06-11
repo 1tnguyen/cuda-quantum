@@ -66,9 +66,11 @@ extern "C" cudaq_host_dispatcher_handle_t *cudaq_host_dispatcher_start_thread(
   if (config->num_slots == 0 || config->slot_size == 0)
     return nullptr;
 
+  // num_workers == 0 is valid: a HOST_CALL-only table (e.g. the OPNIC 3-thread
+  // ring path) needs no graph-worker pool.  The dispatch loop runs HOST_CALL
+  // entries inline; we allocate an empty pool (zero-length new[] is valid) and
+  // set skip_stream_sweep below so the loop never sweeps a non-existent pool.
   const size_t num_workers = count_graph_launch_workers(table);
-  if (num_workers == 0)
-    return nullptr;
 
   auto *handle = new (std::nothrow) cudaq_host_dispatcher_handle();
   if (!handle)
@@ -166,6 +168,8 @@ extern "C" cudaq_host_dispatcher_handle_t *cudaq_host_dispatcher_start_thread(
   ctx.inflight_slot_tags = handle->inflight_slot_tags;
   ctx.io_ctxs_host = io_ctxs_host_ptr;
   ctx.io_ctxs_dev = io_ctxs_dev_ptr;
+  // HOST_CALL-only tables have no graph workers to recycle.
+  ctx.skip_stream_sweep = (num_workers == 0);
 
   handle->thread = std::thread(
       [cfg = ctx]() { cudaq_host_dispatcher_loop(&cfg); });
