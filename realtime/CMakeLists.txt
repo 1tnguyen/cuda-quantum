@@ -141,6 +141,7 @@ endif()
 
 if (CUDAQ_REALTIME_BUILD_EXAMPLES)
   message(STATUS "RoCE/DOCA examples removed for RPC dispatch workflow.")
+  add_subdirectory(examples/hello_opx)
 endif()
 
 if (CUDAQ_REALTIME_BUILD_TESTS)
