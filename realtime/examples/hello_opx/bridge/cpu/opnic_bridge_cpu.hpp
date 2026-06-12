@@ -17,6 +17,8 @@ struct OpnicBridgeCpuConfig {
   std::uint16_t input_stream_id = 1;
   std::uint16_t output_stream_id = 1;
   std::size_t buffer_count = 1024;
+  /// When true, reset all OPNIC streams before configuring this context.
+  bool force_reset = true;
   /// When true, the bridge exposes only UNIFIED transport context (single-thread
   /// fused loop).  When false, it also supports RING_BUFFER and owns the RX/TX
   /// adapter threads started by `launch`.
@@ -38,6 +40,23 @@ struct opnic_cpu_transport_ctx {
   std::size_t tx_alloc_size;         ///< Per-packet stride in tx_buffer
 };
 
+/// @brief Type-erased base for CPU OPNIC bridge contexts.
+///
+/// The public bridge handle remains `void *`, but the bridge implementation
+/// deletes and drives contexts through this base so examples can instantiate
+/// the same bridge lifecycle with different QUA packet types.
+struct OpnicBridgeCpuContextBase {
+  virtual ~OpnicBridgeCpuContextBase() = default;
+
+  virtual cudaq_status_t
+  get_transport_context(cudaq_realtime_transport_context_t context_type,
+                        void *out_context) = 0;
+  virtual cudaq_status_t connect() = 0;
+  virtual cudaq_status_t launch() = 0;
+  virtual cudaq_status_t disconnect() = 0;
+  virtual cudaq_status_t get_host_dataplane(cudaq_host_dataplane_t *out) = 0;
+};
+
 /// @brief Construct a CPU OPNIC bridge context and return an opaque handle
 /// suitable for the bridge interface. Returns nullptr on failure.
 ///
@@ -45,6 +64,13 @@ struct opnic_cpu_transport_ctx {
 /// interface's `destroy` function pointer.
 extern "C" cudaq_realtime_bridge_handle_t
 opnic_bridge_cpu_create_context(const OpnicBridgeCpuConfig *cfg);
+
+/// @brief Synchronize all OPNIC streams registered in this process.
+///
+/// Use this for multi-stream phases where the QUA program performs one global
+/// sync across all declared streams. Single-stream users should prefer the
+/// bridge interface's per-context `connect`.
+extern "C" cudaq_status_t opnic_bridge_cpu_sync_all();
 
 /// @brief Get the CPU OPNIC bridge interface. The returned pointer is to a
 /// static instance; callers must NOT free it.

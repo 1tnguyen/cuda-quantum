@@ -25,3 +25,6 @@ endif()
 # GPU (device dispatch) variant when CUDA is found; each links the matching
 # bridge library (cudaq-realtime-opnic-cpu / -gpu).
 add_subdirectory(incrementer)
+
+add_subdirectory(decoder)
+add_subdirectory(decoder-2)
