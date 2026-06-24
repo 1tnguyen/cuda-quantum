@@ -41,6 +41,31 @@ static bool exceedsThresholdValue(cudaq::cc::LoopOp loop,
   return upperBound >= threshold;
 }
 
+/// Returns true if \p loop indexes qubits by a dynamic (non-constant) index and
+/// therefore blocks conversion to value (wire) semantics: it contains a
+/// `quake.extract_ref` with a dynamic index in its own body. The walk does NOT
+/// descend into nested `cc.loop` ops -- a nested loop is classified (and
+/// unrolled) on its own, and once it is unrolled its accesses become
+/// constant-index, at which point this loop no longer blocks. This lets a
+/// purely-repeating outer loop stay rolled while inner index-dependent loops
+/// are unrolled. A loop with only constant-index references (or only
+/// `!quake.wire` values) does not block: mem2reg can thread those qubits as
+/// loop iter-args.
+static bool loopBlocksWireConversion(cudaq::cc::LoopOp loop) {
+  bool found = false;
+  loop->walk<mlir::WalkOrder::PreOrder>([&](Operation *op) -> WalkResult {
+    if (op != loop.getOperation() && isa<cudaq::cc::LoopOp>(op))
+      return WalkResult::skip(); // nested loops are handled separately
+    if (auto ext = dyn_cast<cudaq::quake::ExtractRefOp>(op))
+      if (ext.getRawIndex() == cudaq::quake::ExtractRefOp::kDynamicIndex) {
+        found = true;
+        return WalkResult::interrupt();
+      }
+    return WalkResult::advance();
+  });
+  return found;
+}
+
 namespace {
 
 /// We fully unroll a counted loop (so marked with the counted attribute) as
@@ -55,9 +80,9 @@ namespace {
 /// specific number of times, even if that number is only known at runtime.
 struct UnrollCountedLoop : public OpRewritePattern<cudaq::cc::LoopOp> {
   explicit UnrollCountedLoop(MLIRContext *ctx, std::size_t t, bool sf, bool ab,
-                             unsigned &p)
+                             unsigned &p, bool keepVS = false)
       : OpRewritePattern(ctx), threshold(t), signalFailure(sf), allowBreak(ab),
-        progress(p) {}
+        progress(p), keepValueSemanticLoops(keepVS) {}
 
   LogicalResult matchAndRewrite(cudaq::cc::LoopOp loop,
                                 PatternRewriter &rewriter) const override {
@@ -66,6 +91,13 @@ struct UnrollCountedLoop : public OpRewritePattern<cudaq::cc::LoopOp> {
     // this flag, it may not be possible to fully unroll every LoopOp anyway.
     // Check for cases that are clearly not going to be unrolled.
     if (loop->hasAttr(cudaq::opt::DeadLoopAttr))
+      return failure();
+    // Opt-in selective unrolling for value-semantics pipelines: a loop that
+    // does not itself index qubits by a dynamic index is left rolled (its
+    // qubits can be threaded as wire iter-args). Only loops that block wire
+    // conversion (dynamic qubit indexing) are unrolled here; a purely-repeating
+    // outer loop stays rolled even when it contains such inner loops.
+    if (keepValueSemanticLoops && !loopBlocksWireConversion(loop))
       return failure();
     if (!allowBreak && !cudaq::opt::isaCountedLoop(loop)) {
       if (signalFailure)
@@ -212,5 +244,6 @@ struct UnrollCountedLoop : public OpRewritePattern<cudaq::cc::LoopOp> {
   bool signalFailure;
   bool allowBreak;
   unsigned &progress;
+  bool keepValueSemanticLoops;
 };
 } // namespace

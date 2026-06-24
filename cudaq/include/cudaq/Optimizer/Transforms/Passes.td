@@ -866,6 +866,15 @@ def LoopUnroll : Pass<"cc-loop-unroll"> {
     necessary when synthesizing quantum circuits from CUDA-Q kernels, such
     as when generating a QIR base profile. A quantum circuit requires all loops
     be completely unrolled.
+
+    The keep-value-semantic-loops option opts in to selective unrolling for a
+    value-semantics (wire) pipeline: a counted loop whose body is already clean
+    value semantics (no reference-semantics quantum operations, i.e. nothing
+    operating on a `!quake.ref`/`!quake.veq`) is left rolled, while a loop that
+    still indexes qubits by reference (blocking wire conversion) is unrolled. A
+    loop that blocks wire conversion but cannot be unrolled (e.g. a non-constant
+    trip count) is a dead end and is reported as an error. This option defaults
+    to false, leaving the pass behavior unchanged for all existing pipelines.
   }];
 
   let dependentDialects = ["mlir::arith::ArithDialect",
@@ -878,7 +887,12 @@ def LoopUnroll : Pass<"cc-loop-unroll"> {
       "signal-failure-if-any-loop-cannot-be-completely-unrolled", "bool",
       /*default=*/"false", "Signal failure if pass can't unroll all loops.">,
     Option<"allowBreak", "allow-early-exit", "bool", /*default=*/"false",
-      "Allow unrolling of loop with early exit (i.e. break statement).">
+      "Allow unrolling of loop with early exit (i.e. break statement).">,
+    Option<"keepValueSemanticLoops", "keep-value-semantic-loops", "bool",
+      /*default=*/"false",
+      "Keep counted loops whose body is already clean value semantics rolled; "
+      "unroll only loops that block wire conversion (and error on a blocking "
+      "loop that cannot be unrolled).">
   ];
 }
 
