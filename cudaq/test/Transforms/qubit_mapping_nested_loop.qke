@@ -1,0 +1,119 @@
+// ========================================================================== //
+// Copyright (c) 2022 - 2026 NVIDIA Corporation & Affiliates.                 //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// Qubit mapping of nested rolled (kept) value-semantics loops. Both loops stay
+// rolled; the mapper recurses into the inner loop and routes its body (a mapped
+// inner loop is layout-preserving, so the outer loop needs no swaps). The
+// two-qubit gates live in the innermost loop.
+
+// clang-format off
+// RUN: cudaq-opt --cc-loop-unroll --canonicalize %s > %t.orig.mlir
+// RUN: cudaq-opt '--qubit-mapping=device=star(3)' %s | FileCheck --check-prefix=MAP %s
+// RUN: cudaq-opt '--qubit-mapping=device=star(3)' %s | cudaq-opt --cc-loop-unroll --canonicalize | CircuitCheck --up-to-mapping %t.orig.mlir
+// clang-format on
+
+module {
+  quake.wire_set @wires[2147483647] attributes {sym_visibility = "private"}
+  func.func @__nvqpp__mlirgen__function_kernel._Z6kernelv() -> i1 attributes {"cudaq-entrypoint", "cudaq-kernel", no_this} {
+    %c1_i32 = arith.constant 1 : i32
+    %c2_i32 = arith.constant 2 : i32
+    %c3_i32 = arith.constant 3 : i32
+    %c0_i32 = arith.constant 0 : i32
+    %0 = quake.borrow_wire @wires[0] : !quake.wire
+    %1 = quake.borrow_wire @wires[1] : !quake.wire
+    %2 = quake.borrow_wire @wires[2] : !quake.wire
+    %3:4 = cc.loop while ((%arg0 = %0, %arg1 = %1, %arg2 = %2, %arg3 = %c0_i32) -> (!quake.wire, !quake.wire, !quake.wire, i32)) {
+      %13 = arith.cmpi slt, %arg3, %c3_i32 : i32
+      cc.condition %13(%arg0, %arg1, %arg2, %arg3 : !quake.wire, !quake.wire, !quake.wire, i32)
+    } do {
+    ^bb0(%arg0: !quake.wire, %arg1: !quake.wire, %arg2: !quake.wire, %arg3: i32):
+      %13:4 = cc.loop while ((%arg4 = %arg0, %arg5 = %arg1, %arg6 = %arg2, %arg7 = %c0_i32) -> (!quake.wire, !quake.wire, !quake.wire, i32)) {
+        %14 = arith.cmpi slt, %arg7, %c2_i32 : i32
+        cc.condition %14(%arg4, %arg5, %arg6, %arg7 : !quake.wire, !quake.wire, !quake.wire, i32)
+      } do {
+      ^bb0(%arg4: !quake.wire, %arg5: !quake.wire, %arg6: !quake.wire, %arg7: i32):
+        %14:2 = quake.x [%arg4] %arg5 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+        %15:2 = quake.x [%14#1] %arg6 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+        cc.continue %14#0, %15#0, %15#1, %arg7 : !quake.wire, !quake.wire, !quake.wire, i32
+      } step {
+      ^bb0(%arg4: !quake.wire, %arg5: !quake.wire, %arg6: !quake.wire, %arg7: i32):
+        %14 = arith.addi %arg7, %c1_i32 : i32
+        cc.continue %arg4, %arg5, %arg6, %14 : !quake.wire, !quake.wire, !quake.wire, i32
+      }
+      cc.continue %13#0, %13#1, %13#2, %arg3 : !quake.wire, !quake.wire, !quake.wire, i32
+    } step {
+    ^bb0(%arg0: !quake.wire, %arg1: !quake.wire, %arg2: !quake.wire, %arg3: i32):
+      %13 = arith.addi %arg3, %c1_i32 : i32
+      cc.continue %arg0, %arg1, %arg2, %13 : !quake.wire, !quake.wire, !quake.wire, i32
+    }
+    %measOut, %wires = quake.mz %3#0 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %4 = quake.discriminate %measOut : (!cc.measure_handle) -> i1
+    %5 = cc.cast unsigned %4 : (i1) -> i32
+    %measOut_0, %wires_1 = quake.mz %3#1 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %6 = quake.discriminate %measOut_0 : (!cc.measure_handle) -> i1
+    %7 = cc.cast unsigned %6 : (i1) -> i32
+    %8 = arith.xori %5, %7 : i32
+    %measOut_2, %wires_3 = quake.mz %3#2 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %9 = quake.discriminate %measOut_2 : (!cc.measure_handle) -> i1
+    %10 = cc.cast unsigned %9 : (i1) -> i32
+    %11 = arith.xori %8, %10 : i32
+    %12 = arith.cmpi ne, %11, %c0_i32 : i32
+    return %12 : i1
+  }
+}
+
+// MAP-LABEL:   quake.wire_set @mapped_wireset[3] adjacency sparse<{{\[\[}}0, 2], [0, 1], [1, 0], [2, 0]], true> : tensor<3x3xi1> attributes {sym_visibility = "private"}
+// MAP:         quake.wire_set @wires[2147483647] attributes {sym_visibility = "private"}
+// MAP-LABEL:   func.func @__nvqpp__mlirgen__function_kernel._Z6kernelv() -> i1 attributes {"cudaq-entrypoint", "cudaq-kernel", mapping_v2p = [0, 1, 2], no_this} {
+// MAP:           %[[CONSTANT_0:.*]] = arith.constant 1 : i32
+// MAP:           %[[CONSTANT_1:.*]] = arith.constant 2 : i32
+// MAP:           %[[CONSTANT_2:.*]] = arith.constant 3 : i32
+// MAP:           %[[CONSTANT_3:.*]] = arith.constant 0 : i32
+// MAP:           %[[BORROW_WIRE_0:.*]] = quake.borrow_wire @mapped_wireset[0] : !quake.wire
+// MAP:           %[[BORROW_WIRE_1:.*]] = quake.borrow_wire @mapped_wireset[1] : !quake.wire
+// MAP:           %[[BORROW_WIRE_2:.*]] = quake.borrow_wire @mapped_wireset[2] : !quake.wire
+// MAP:           %[[LOOP_0:.*]]:4 = cc.loop while ((%[[VAL_0:.*]] = %[[BORROW_WIRE_0]], %[[VAL_1:.*]] = %[[BORROW_WIRE_1]], %[[VAL_2:.*]] = %[[BORROW_WIRE_2]], %[[VAL_3:.*]] = %[[CONSTANT_3]]) -> (!quake.wire, !quake.wire, !quake.wire, i32)) {
+// MAP:             %[[CMPI_0:.*]] = arith.cmpi slt, %[[VAL_3]], %[[CONSTANT_2]] : i32
+// MAP:             cc.condition %[[CMPI_0]](%[[VAL_0]], %[[VAL_1]], %[[VAL_2]], %[[VAL_3]] : !quake.wire, !quake.wire, !quake.wire, i32)
+// MAP:           } do {
+// MAP:           ^bb0(%[[VAL_4:.*]]: !quake.wire, %[[VAL_5:.*]]: !quake.wire, %[[VAL_6:.*]]: !quake.wire, %[[VAL_7:.*]]: i32):
+// MAP:             %[[LOOP_1:.*]]:4 = cc.loop while ((%[[VAL_8:.*]] = %[[VAL_4]], %[[VAL_9:.*]] = %[[VAL_5]], %[[VAL_10:.*]] = %[[VAL_6]], %[[VAL_11:.*]] = %[[CONSTANT_3]]) -> (!quake.wire, !quake.wire, !quake.wire, i32)) {
+// MAP:               %[[CMPI_1:.*]] = arith.cmpi slt, %[[VAL_11]], %[[CONSTANT_1]] : i32
+// MAP:               cc.condition %[[CMPI_1]](%[[VAL_8]], %[[VAL_9]], %[[VAL_10]], %[[VAL_11]] : !quake.wire, !quake.wire, !quake.wire, i32)
+// MAP:             } do {
+// MAP:             ^bb0(%[[VAL_12:.*]]: !quake.wire, %[[VAL_13:.*]]: !quake.wire, %[[VAL_14:.*]]: !quake.wire, %[[VAL_15:.*]]: i32):
+// MAP:               %[[X_0:.*]]:2 = quake.x {{\[}}%[[VAL_12]]] %[[VAL_13]] : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+// MAP:               %[[SWAP_0:.*]]:2 = quake.swap %[[X_0]]#1, %[[X_0]]#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+// MAP:               %[[X_1:.*]]:2 = quake.x {{\[}}%[[SWAP_0]]#1] %[[VAL_14]] : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+// MAP:               %[[SWAP_1:.*]]:2 = quake.swap %[[SWAP_0]]#0, %[[X_1]]#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+// MAP:               cc.continue %[[SWAP_1]]#1, %[[SWAP_1]]#0, %[[X_1]]#1, %[[VAL_15]] : !quake.wire, !quake.wire, !quake.wire, i32
+// MAP:             } step {
+// MAP:             ^bb0(%[[VAL_16:.*]]: !quake.wire, %[[VAL_17:.*]]: !quake.wire, %[[VAL_18:.*]]: !quake.wire, %[[VAL_19:.*]]: i32):
+// MAP:               %[[ADDI_0:.*]] = arith.addi %[[VAL_19]], %[[CONSTANT_0]] : i32
+// MAP:               cc.continue %[[VAL_16]], %[[VAL_17]], %[[VAL_18]], %[[ADDI_0]] : !quake.wire, !quake.wire, !quake.wire, i32
+// MAP:             }
+// MAP:             cc.continue %[[VAL_20:.*]]#0, %[[VAL_20]]#1, %[[VAL_20]]#2, %[[VAL_7]] : !quake.wire, !quake.wire, !quake.wire, i32
+// MAP:           } step {
+// MAP:           ^bb0(%[[VAL_21:.*]]: !quake.wire, %[[VAL_22:.*]]: !quake.wire, %[[VAL_23:.*]]: !quake.wire, %[[VAL_24:.*]]: i32):
+// MAP:             %[[ADDI_1:.*]] = arith.addi %[[VAL_24]], %[[CONSTANT_0]] : i32
+// MAP:             cc.continue %[[VAL_21]], %[[VAL_22]], %[[VAL_23]], %[[ADDI_1]] : !quake.wire, !quake.wire, !quake.wire, i32
+// MAP:           }
+// MAP:           %[[VAL_25:.*]], %[[MZ_0:.*]] = quake.mz %[[VAL_26:.*]]#0 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+// MAP:           %[[DISCRIMINATE_0:.*]] = quake.discriminate %[[VAL_25]] : (!cc.measure_handle) -> i1
+// MAP:           %[[CAST_0:.*]] = cc.cast unsigned %[[DISCRIMINATE_0]] : (i1) -> i32
+// MAP:           %[[VAL_27:.*]], %[[MZ_1:.*]] = quake.mz %[[VAL_26]]#1 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+// MAP:           %[[DISCRIMINATE_1:.*]] = quake.discriminate %[[VAL_27]] : (!cc.measure_handle) -> i1
+// MAP:           %[[CAST_1:.*]] = cc.cast unsigned %[[DISCRIMINATE_1]] : (i1) -> i32
+// MAP:           %[[XORI_0:.*]] = arith.xori %[[CAST_0]], %[[CAST_1]] : i32
+// MAP:           %[[VAL_28:.*]], %[[MZ_2:.*]] = quake.mz %[[VAL_26]]#2 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+// MAP:           %[[DISCRIMINATE_2:.*]] = quake.discriminate %[[VAL_28]] : (!cc.measure_handle) -> i1
+// MAP:           %[[CAST_2:.*]] = cc.cast unsigned %[[DISCRIMINATE_2]] : (i1) -> i32
+// MAP:           %[[XORI_1:.*]] = arith.xori %[[XORI_0]], %[[CAST_2]] : i32
+// MAP:           %[[CMPI_2:.*]] = arith.cmpi ne, %[[XORI_1]], %[[CONSTANT_3]] : i32
+// MAP:           return %[[CMPI_2]] : i1
+// MAP:         }

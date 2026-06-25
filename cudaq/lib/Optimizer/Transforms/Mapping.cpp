@@ -421,7 +421,7 @@ cudaq::Placement::VirtualQ requireVirtualQ(
 /// borrows. Edges and source successors are captured in MLIR use-list order so
 /// the walk visits successors in the same order as the SSA use-def chains.
 RoutingProblem buildRoutingProblem(
-    Block &block, ArrayRef<cudaq::quake::BorrowWireOp> sources,
+    Block &block, ArrayRef<Value> sourceWires,
     const DenseMap<Value, cudaq::Placement::VirtualQ> &wireToVirtualQ) {
   RoutingProblem problem;
   DenseMap<Operation *, RoutingProblem::NodeRef> nodeIndex;
@@ -458,8 +458,8 @@ RoutingProblem buildRoutingProblem(
   for (auto &node : problem.nodes)
     for (Value wire : cudaq::quake::getQuantumResults(node.op))
       recordWireUsers(wire, node.successors);
-  for (auto borrow : sources)
-    recordWireUsers(borrow.getResult(), problem.sourceUsers);
+  for (Value wire : sourceWires)
+    recordWireUsers(wire, problem.sourceUsers);
 
   return problem;
 }
@@ -1132,8 +1132,24 @@ public:
     }
 
     OpBuilder builder(&block, block.begin());
+    replayTrace(builder, result.trace);
+    return phyToWire;
+  }
+
+  /// Seed the wire currently on physical qubit `phy`. Used to start emitting
+  /// into a region (e.g. a loop body) whose entry wires are not borrow ops.
+  void seedPhysical(unsigned phy, Value wire) { phyToWire[phy] = wire; }
+
+  /// The wire currently threaded onto physical qubit `phy`.
+  Value wireOnPhysical(unsigned phy) const { return phyToWire[phy]; }
+
+  /// Replay `trace` onto the IR, rewiring gates onto their physical qubits and
+  /// materializing swaps as `quake.swap` ops, advancing `phyToWire`. The caller
+  /// must have seeded `phyToWire` (via `emit`'s sources or `seedPhysical`) and
+  /// positioned `builder` at the insertion point.
+  void replayTrace(OpBuilder &builder, ArrayRef<RoutingEvent> trace) {
     auto wireType = builder.getType<cudaq::quake::WireType>();
-    for (const RoutingEvent &ev : result.trace) {
+    for (const RoutingEvent &ev : trace) {
       if (ev.kind == RoutingEvent::Kind::Gate) {
         // Rewire the operation onto its physical qubits.
         SmallVector<Value, 2> newOpWires;
@@ -1150,19 +1166,24 @@ public:
              llvm::zip_equal(cudaq::quake::getQuantumResults(ev.op), ev.phys))
           phyToWire[q.index] = w;
       } else {
-        // Insert the swap and advance both wires past it.
-        auto q0 = ev.phys[0];
-        auto q1 = ev.phys[1];
-        auto swap = cudaq::quake::SwapOp::create(
-            builder, builder.getUnknownLoc(), TypeRange{wireType, wireType},
-            false, ValueRange{}, ValueRange{},
-            ValueRange{phyToWire[q0.index], phyToWire[q1.index]},
-            DenseBoolArrayAttr{});
-        phyToWire[q0.index] = swap.getResult(0);
-        phyToWire[q1.index] = swap.getResult(1);
+        emitSwap(builder, wireType, ev.phys[0], ev.phys[1]);
       }
     }
-    return phyToWire;
+  }
+
+  /// Materialize a single `quake.swap` between the wires on physical qubits
+  /// `q0` and `q1`, advancing both wires past it. Returns nothing; updates
+  /// `phyToWire`. Exposed so restoring swaps can be emitted at a loop
+  /// back-edge.
+  void emitSwap(OpBuilder &builder, Type wireType, cudaq::Placement::DeviceQ q0,
+                cudaq::Placement::DeviceQ q1) {
+    auto swap = cudaq::quake::SwapOp::create(
+        builder, builder.getUnknownLoc(), TypeRange{wireType, wireType}, false,
+        ValueRange{}, ValueRange{},
+        ValueRange{phyToWire[q0.index], phyToWire[q1.index]},
+        DenseBoolArrayAttr{});
+    phyToWire[q0.index] = swap.getResult(0);
+    phyToWire[q1.index] = swap.getResult(1);
   }
 
 private:
@@ -1439,6 +1460,309 @@ struct MappingFunc : public cudaq::opt::impl::MappingFuncBase<MappingFunc> {
     return success();
   }
 
+  /// Wire-typed values in `range`, preserving order. Unlike getQuantumOperands,
+  /// this does not assume the wires are a contiguous suffix: a cc.loop's wire
+  /// iter-args are interleaved with the classical loop counter (in either
+  /// order), so loop operands/results are extracted with this.
+  static SmallVector<Value> wireValues(ValueRange range) {
+    SmallVector<Value> out;
+    for (Value v : range)
+      if (isa<cudaq::quake::WireType>(v.getType()))
+        out.push_back(v);
+    return out;
+  }
+
+  static bool loopCarriesWires(cudaq::cc::LoopOp loop) {
+    return !wireValues(loop.getOperands()).empty();
+  }
+
+  /// Record every two-qubit interaction reachable in `block` into
+  /// `interactions`, threading virtual qubits through wire-carrying cc.loops so
+  /// gates nested inside (possibly multiple) rolled loops are counted exactly
+  /// once each (the loop body is walked once, not per iteration).
+  /// `wireToVirtual` maps each live wire to its virtual qubit; the caller seeds
+  /// it from the function's borrows and this extends it as wires flow through
+  /// gates and loops. This is the global interaction graph greedy placement
+  /// needs, since a rolled loop's gates would otherwise be invisible to a
+  /// top-level-only scan.
+  void collectInteractions(
+      Block &block, DenseMap<Value, cudaq::Placement::VirtualQ> &wireToVirtual,
+      VirtualInteractionGraph &interactions) {
+    for (Operation &op : block) {
+      if (auto loop = dyn_cast<cudaq::cc::LoopOp>(op)) {
+        if (!loopCarriesWires(loop))
+          continue;
+        auto ops = wireValues(loop.getOperands());
+        auto args = wireValues(loop.getDoEntryArguments());
+        auto res = wireValues(loop.getResults());
+        if (ops.size() != args.size())
+          continue;
+        // The body args carry the operands' virtuals; recurse; then the loop is
+        // layout-preserving so its results carry the operands' virtuals too.
+        for (auto [a, o] : llvm::zip_equal(args, ops))
+          wireToVirtual[a] = requireVirtualQ(wireToVirtual, o);
+        collectInteractions(*loop.getDoEntryBlock(), wireToVirtual,
+                            interactions);
+        for (auto [o, r] : llvm::zip_equal(ops, res))
+          wireToVirtual[r] = requireVirtualQ(wireToVirtual, o);
+        continue;
+      }
+      if (!cudaq::quake::isSupportedMappingOperation(&op))
+        continue;
+      auto wires = cudaq::quake::getQuantumOperands(&op);
+      SmallVector<cudaq::Placement::VirtualQ, 2> vq;
+      for (Value w : wires) {
+        auto v = lookupVirtualQ(wireToVirtual, w);
+        if (!v) {
+          vq.clear();
+          break;
+        }
+        vq.push_back(*v);
+      }
+      if (vq.size() != wires.size())
+        continue;
+      if (!isa<cudaq::quake::MeasurementInterface>(op) && vq.size() == 2)
+        interactions.addInteraction(vq[0].index, vq[1].index);
+      for (auto [r, v] : llvm::zip(cudaq::quake::getQuantumResults(&op), vq))
+        wireToVirtual[r] = v;
+    }
+  }
+
+  /// Route the body of a wire-carrying `cc.loop`, keeping the loop rolled. A
+  /// flat body is routed from `placement` (the global virtual->physical layout
+  /// every loop is entered on), swaps are inserted to make its two-qubit gates
+  /// adjacent, then replays the body's swaps in reverse before the back-edge so
+  /// each iteration's net permutation is the identity (the layout is restored
+  /// to loop entry). A body that contains nested wire-carrying loops is handled
+  /// recursively: a mapped nested loop is layout-preserving, so the outer body
+  /// needs no swaps. Returns failure (loop left unmapped) for shapes not yet
+  /// supported.
+  LogicalResult mapLoopBody(cudaq::cc::LoopOp loop,
+                            DenseMap<Value, cudaq::Placement::VirtualQ> &topMap,
+                            ArrayRef<unsigned> placement) {
+    Block &body = *loop.getDoEntryBlock();
+    auto wireOperands = wireValues(loop.getOperands());
+    auto bodyArgs = wireValues(loop.getDoEntryArguments());
+    if (wireOperands.size() != bodyArgs.size())
+      return failure();
+    const unsigned numPhy = deviceInstance->getNumQubits();
+
+    // Body wire->virtual map seeded from the loop's incoming wires.
+    DenseMap<Value, cudaq::Placement::VirtualQ> bodyMap;
+    for (auto [arg, oper] : llvm::zip_equal(bodyArgs, wireOperands))
+      bodyMap[arg] = requireVirtualQ(topMap, oper);
+    DenseMap<std::size_t, Value> finalQubitWire;
+
+    // Nested wire-carrying loops: recurse into each (a mapped nested loop is
+    // layout-preserving). The outer body then needs no swaps and its
+    // cc.continue threading is unchanged, so its gates must be single-qubit.
+    // A two-qubit gate beside a nested loop would need routing interleaved with
+    // the nested loop and is not yet supported. This covers nested *repeating*
+    // loops whose two-qubit gates live in the innermost loop.
+    bool hasNestedLoop = false;
+    for (Operation &op : body)
+      if (auto inner = dyn_cast<cudaq::cc::LoopOp>(op))
+        hasNestedLoop |= loopCarriesWires(inner);
+    if (hasNestedLoop) {
+      for (Operation &op : body) {
+        if (auto inner = dyn_cast<cudaq::cc::LoopOp>(op)) {
+          if (!loopCarriesWires(inner))
+            continue;
+          if (failed(mapLoopBody(inner, bodyMap, placement)))
+            return failure();
+          for (auto [o, r] : llvm::zip_equal(wireValues(inner.getOperands()),
+                                             wireValues(inner.getResults())))
+            bodyMap[r] = requireVirtualQ(bodyMap, o);
+          continue;
+        }
+        if (!cudaq::quake::isSupportedMappingOperation(&op))
+          continue;
+        auto wires = cudaq::quake::getQuantumOperands(&op);
+        if (isa<cudaq::quake::OperatorInterface>(op) && wires.size() > 1)
+          return loop.emitOpError(
+              "qubit mapping of a loop with two-qubit gates outside the "
+              "innermost loop is not yet supported");
+        auto v = lookupVirtualOperands(op, wires, bodyMap);
+        if (!v)
+          return failure();
+        if (failed(
+                recordQuantumResults(op, wires, *v, bodyMap, finalQubitWire)))
+          return failure();
+      }
+      return success();
+    }
+
+    // Flat body: propagate virtual qubits through the gates (mirrors the
+    // top-level scan), then route from `placement`. Each virtual `v` enters the
+    // loop on physical `placement[v]` (the borrow feeding it was set to that
+    // identity, and single-qubit gates / layout-preserving nested loops
+    // upstream do not move it), so the entry layout for this body is exactly
+    // `placement`.
+    for (Operation &op : body) {
+      if (!cudaq::quake::isSupportedMappingOperation(&op))
+        continue;
+      auto wires = cudaq::quake::getQuantumOperands(&op);
+      auto v = lookupVirtualOperands(op, wires, bodyMap);
+      if (!v)
+        return failure();
+      if (failed(recordQuantumResults(op, wires, *v, bodyMap, finalQubitWire)))
+        return failure();
+    }
+    SmallVector<Value> sourceWires(bodyArgs.begin(), bodyArgs.end());
+    RoutingProblem problem = buildRoutingProblem(body, sourceWires, bodyMap);
+    SmallVector<SmallVector<unsigned>> seeds{
+        SmallVector<unsigned>(placement.begin(), placement.end())};
+    RoutingSearchStrategy router(*deviceInstance, problem, /*useSabre=*/false,
+                                 extendedLayerSize, extendedLayerWeight,
+                                 decayDelta, roundsDecayReset,
+                                 minStallSwapBudget, stallSwapBudgetPerQubit);
+    RoutingSearchStrategy::Selection sel = router.run(seeds, numPhy, numPhy);
+    const RoutingResult &result = sel.result;
+
+    // Emit the routed gates + swaps into the body, seeding each entry wire on
+    // its physical track under the chosen layout.
+    RoutingEmitter emitter(bodyMap, numPhy);
+    for (Value arg : bodyArgs)
+      emitter.seedPhysical(
+          result.initialLayout[requireVirtualQ(bodyMap, arg).index], arg);
+    OpBuilder builder(&body, body.begin());
+    emitter.replayTrace(builder, result.trace);
+
+    // Restore the entry layout at the back-edge by replaying the body's swaps
+    // in reverse (adjacent-swap transpositions are self-inverse, so the reverse
+    // sequence inverts the body's permutation exactly). Insert before the
+    // terminator.
+    Operation *term = body.getTerminator();
+    OpBuilder restoreBuilder(term);
+    auto wireType = restoreBuilder.getType<cudaq::quake::WireType>();
+    for (const RoutingEvent &ev : llvm::reverse(result.trace))
+      if (ev.kind == RoutingEvent::Kind::Swap)
+        emitter.emitSwap(restoreBuilder, wireType, ev.phys[0], ev.phys[1]);
+
+    sortTopologically(&body);
+
+    // Thread the (restored) wires back through the loop's continue terminator:
+    // each wire iter-arg returns to the physical track it entered on.
+    term = body.getTerminator();
+    SmallVector<Value> newContinue(term->getOperands());
+    unsigned wireIdx = 0;
+    for (Value &operand : newContinue)
+      if (isa<cudaq::quake::WireType>(operand.getType())) {
+        auto v = requireVirtualQ(bodyMap, bodyArgs[wireIdx++]);
+        operand = emitter.wireOnPhysical(result.initialLayout[v.index]);
+      }
+    term->setOperands(newContinue);
+    return success();
+  }
+
+  /// Compute the global virtual->physical initial layout every loop body is
+  /// routed from. `identity` keeps virtual v on physical v. `greedy` builds a
+  /// topology-aware layout from the function's two-qubit interactions,
+  /// collected across all (possibly nested) rolled loops, so highly-interacting
+  /// qubits sit on adjacent device qubits and fewer routing swaps are needed
+  /// inside the loop. The result is a permutation of `[0, numPhy)` indexed by
+  /// virtual.
+  /// (`auto` is treated as `identity` here: comparing identity vs greedy by
+  /// routed swap count across rolled loops is a future refinement; request
+  /// topology-aware placement explicitly with `placement=greedy`.)
+  SmallVector<unsigned> computeLoopPlacement(
+      func::FuncOp func,
+      const DenseMap<Value, cudaq::Placement::VirtualQ> &topMap,
+      unsigned numPhy) {
+    SmallVector<unsigned> placement(numPhy);
+    for (unsigned p = 0; p < numPhy; ++p)
+      placement[p] = p;
+    if (parsePlacementStrategy(this->placement) != PlacementStrategy::Greedy)
+      return placement;
+
+    VirtualInteractionGraph interactions(numPhy);
+    SmallVector<bool> userVirtualQubits(numPhy, false);
+    func.walk([&](cudaq::quake::BorrowWireOp b) {
+      userVirtualQubits[b.getIdentity()] = true;
+    });
+    DenseMap<Value, cudaq::Placement::VirtualQ> scan = topMap;
+    collectInteractions(func.front(), scan, interactions);
+    return GreedyInitialPlacer(*deviceInstance, interactions, userVirtualQubits)
+        .run();
+  }
+
+  /// Map a function whose quantum gates live inside wire-carrying cc.loops,
+  /// keeping the loops rolled. A single global initial layout (see
+  /// `computeLoopPlacement`) is applied to every borrow, each loop body is
+  /// routed from that layout and its layout restored at the back-edge, and the
+  /// layout is recorded in `mapping_v2p` so downstream result reordering stays
+  /// consistent.
+  void mapFuncWithLoops(func::FuncOp func) {
+    DenseMap<Value, cudaq::Placement::VirtualQ> topMap;
+    func.walk([&](cudaq::quake::BorrowWireOp b) {
+      topMap[b.getResult()] = cudaq::Placement::VirtualQ(b.getIdentity());
+    });
+    const unsigned numPhy = deviceInstance->getNumQubits();
+    SmallVector<unsigned> placement =
+        computeLoopPlacement(func, topMap, numPhy);
+
+    Block &block = func.front();
+    DenseMap<std::size_t, Value> finalQubitWire;
+    for (Operation &op : llvm::make_early_inc_range(block)) {
+      if (auto loop = dyn_cast<cudaq::cc::LoopOp>(op)) {
+        if (loopCarriesWires(loop)) {
+          if (failed(mapLoopBody(loop, topMap, placement))) {
+            signalPassFailure();
+            return;
+          }
+          // The loop is layout-preserving: results inherit operand virtuals.
+          auto ops = wireValues(loop.getOperands());
+          auto res = wireValues(loop.getResults());
+          for (auto [o, r] : llvm::zip_equal(ops, res))
+            topMap[r] = requireVirtualQ(topMap, o);
+        }
+        continue;
+      }
+      if (cudaq::quake::isSupportedMappingOperation(&op)) {
+        auto wires = cudaq::quake::getQuantumOperands(&op);
+        auto v = lookupVirtualOperands(op, wires, topMap);
+        if (!v) {
+          signalPassFailure();
+          return;
+        }
+        (void)recordQuantumResults(op, wires, *v, topMap, finalQubitWire);
+      }
+    }
+    // Materialize the chosen placement on each borrow: virtual v enters the
+    // loop on physical placement[v]. This is required for correctness (each
+    // loop body was routed assuming virtual v starts on physical placement[v])
+    // and is read back below into mapping_v2p. Identity placement is a no-op.
+    // topMap still holds each borrow's original identity (== its virtual).
+    func.walk([&](cudaq::quake::BorrowWireOp b) {
+      b.setIdentity(placement[requireVirtualQ(topMap, b.getResult()).index]);
+    });
+
+    // Record the virtual->physical layout (mapping_v2p[v] is the physical qubit
+    // that virtual qubit v was placed on) so downstream can reorder results.
+    // topMap still holds each borrow's original identity (== its virtual); its
+    // current identity is the chosen physical.
+    unsigned highest = 0;
+    bool anyBorrow = false;
+    func.walk([&](cudaq::quake::BorrowWireOp b) {
+      anyBorrow = true;
+      highest = std::max(highest, requireVirtualQ(topMap, b.getResult()).index);
+    });
+    if (anyBorrow) {
+      OpBuilder b(func->getContext());
+      SmallVector<Attribute> v2p(highest + 1, b.getI64IntegerAttr(0));
+      func.walk([&](cudaq::quake::BorrowWireOp bw) {
+        v2p[requireVirtualQ(topMap, bw.getResult()).index] =
+            b.getI64IntegerAttr(bw.getIdentity());
+      });
+      func->setAttr("mapping_v2p", b.getArrayAttr(v2p));
+    }
+
+    // Switch borrows to the mapped wire set so downstream treats them as
+    // physical qubits on the device.
+    func.walk(
+        [&](cudaq::quake::BorrowWireOp b) { b.setSetName(mappedWireSetName); });
+  }
+
   void runOnOperation() override {
     if (deviceBypass)
       return;
@@ -1447,6 +1771,24 @@ struct MappingFunc : public cudaq::opt::impl::MappingFuncBase<MappingFunc> {
     if (func.empty())
       return;
     auto &blocks = func.getBlocks();
+
+    // Value-semantics rolled loops: if the function threads qubits through a
+    // wire-carrying cc.loop, route each loop body and restore its layout at the
+    // back-edge, keeping the loops rolled. The flat (loop-free) path below is
+    // left unchanged.
+    {
+      bool hasWireLoop = false;
+      func.walk([&](cudaq::cc::LoopOp l) {
+        if (loopCarriesWires(l))
+          hasWireLoop = true;
+      });
+      if (hasWireLoop) {
+        auto mod = func->getParentOfType<ModuleOp>();
+        if (mod.lookupSymbol<cudaq::quake::WireSetOp>(mappedWireSetName))
+          mapFuncWithLoops(func);
+        return;
+      }
+    }
 
     // Current limitations:
     //  * Can only map a entry-point kernel
@@ -1781,8 +2123,12 @@ struct MappingFunc : public cudaq::opt::impl::MappingFuncBase<MappingFunc> {
 
     // Build the routing problem once (it does not depend on the layout), then
     // search over the seeds for the result with the fewest swaps.
+    SmallVector<Value> sourceWires;
+    sourceWires.reserve(sources.size());
+    for (auto src : sources)
+      sourceWires.push_back(src.getResult());
     RoutingProblem problem =
-        buildRoutingProblem(block, sources, wireToVirtualQ);
+        buildRoutingProblem(block, sourceWires, wireToVirtualQ);
     RoutingSearchStrategy search(
         *deviceInstance, problem, searchStrategy == SearchStrategy::Sabre,
         extendedLayerSize, extendedLayerWeight, decayDelta, roundsDecayReset,
