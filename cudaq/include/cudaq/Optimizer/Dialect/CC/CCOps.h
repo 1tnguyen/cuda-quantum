@@ -22,6 +22,11 @@
 #include "mlir/Interfaces/LoopLikeInterface.h"
 
 namespace cudaq::cc {
+/// Marks a `cc.scope` introduced around a call whose callee contains an
+/// unresolved `cc.unwind_return`. After inlining, the scope remains the return
+/// target for the inlined callee.
+inline constexpr char unwindReturnScopeAttrName[] = "cc.unwind_return_scope";
+
 constexpr int kInterleavedArgumentConstantBitWidth = 29;
 using InterleavedArgumentConstantIndex =
     llvm::PointerEmbeddedInt<std::int32_t,

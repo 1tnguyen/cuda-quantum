@@ -6128,8 +6128,13 @@ def compile_to_mlir(uniqueId, astModule, signature: KernelSignature, defFrame,
     # The `cudaq.pipeline.aot` span is the marker tooling uses to identify
     # pass events as AOT-pipeline (paired with `cudaq.pipeline.jit` emitted
     # from `QPU.cpp` `lower_to_qir_llvm`).
-    pm = PassManager.parse("builtin.module(aot-prep-pipeline)",
-                           context=bridge.ctx)
+    target = cudaq_runtime.get_target()
+    defer_unwind = target.codegen == "nop" and not target.is_emulated()
+    pipeline = "builtin.module(aot-prep-pipeline)"
+    if defer_unwind:
+        pipeline = ("builtin.module(aot-prep-pipeline{"
+                    "defer-unwind-lowering=true})")
+    pm = PassManager.parse(pipeline, context=bridge.ctx)
     try:
         with trace.span("cudaq.pipeline.aot"):
             cudaq_runtime.runPassManager(pm, bridge.module)

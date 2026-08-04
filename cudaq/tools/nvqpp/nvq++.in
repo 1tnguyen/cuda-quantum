@@ -556,6 +556,7 @@ SHOW_VERSION=false
 ENABLE_ARRAY_CONVERSION=true
 ENABLE_VARIABLE_COALESCE=true
 ENABLE_UNWIND_LOWERING=true
+DEFER_UNWIND_LOWERING=false
 ENABLE_DEVICE_CODE_LOADER=true
 ENABLE_REALTIME_LOWERING=false
 ENABLE_KERNEL_EXECUTION=true
@@ -920,6 +921,9 @@ if [ -n "${TARGET_CONFIG}" ]; then
 		run ${TOOLBIN}cudaq-target-conf ${TARGET_CONF_EXTERNAL_ARG} --arg="base64_"$(echo -n "${TARGET_ARGS[@]}" | base64 --wrap=0) -o ${OUT_CONFIG_FILENAME} ${TARGET_CONFIG_YML_FILE}
 		# Load the generated config variables
 		. "${OUT_CONFIG_FILENAME}"
+		if [[ "${CODEGEN_EMISSION}" == "nop" && "${CUDAQ_EMULATE_REMOTE}" == "false" ]]; then
+			DEFER_UNWIND_LOWERING=true
+		fi
 	else
 		error_exit "Invalid Target: ($TARGET_CONFIG)"
 	fi
@@ -1000,11 +1004,11 @@ if ${ENABLE_VARIABLE_COALESCE}; then
 	RUN_OPT=true
 	OPT_PASSES="func.func(variable-coalesce)"
 fi
-if ${ENABLE_UNWIND_LOWERING}; then
+if ${ENABLE_UNWIND_LOWERING} && ! ${DEFER_UNWIND_LOWERING}; then
 	RUN_OPT=true
 	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "func.func(unwind-lowering)")
 fi
-if ${ENABLE_ADD_DEALLOC}; then
+if ${ENABLE_ADD_DEALLOC} && ! ${DEFER_UNWIND_LOWERING}; then
 	RUN_OPT=true
 	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "func.func(add-dealloc)")
 fi
@@ -1015,6 +1019,14 @@ fi
 if ${ENABLE_APPLY_SPECIALIZATION}; then
 	RUN_OPT=true
 	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "func.func(memtoreg{quantum=0}),canonicalize,apply-op-specialization")
+fi
+if ${ENABLE_AGGRESSIVE_INLINE} && ${DEFER_UNWIND_LOWERING}; then
+	RUN_OPT=true
+	if ${DO_LINK}; then
+		OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "aggressive-inlining")
+	else
+		OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "indirect-to-direct-calls,inline")
+	fi
 fi
 if ${ENABLE_KERNEL_EXECUTION}; then
 	RUN_OPT=true
@@ -1033,7 +1045,7 @@ if ${ENABLE_KERNEL_EXECUTION}; then
 		OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "run-semantics-hackery")
 	fi
 fi
-if ${ENABLE_AGGRESSIVE_INLINE}; then
+if ${ENABLE_AGGRESSIVE_INLINE} && ! ${DEFER_UNWIND_LOWERING}; then
 	RUN_OPT=true
 	if ${DO_LINK}; then
 		OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "aggressive-inlining")
@@ -1050,9 +1062,29 @@ if [[ -n "$CUDAQ_OPT_EXTRA_PASSES" ]]; then
 	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "$CUDAQ_OPT_EXTRA_PASSES")
 fi
 if ${ENABLE_DEVICE_CODE_LOADER}; then
-	# Note: the JIT compiler will pick up at this point.
+	# For nop codegen, capture the high-level device module before lowering
+	# unwind operations for host compilation. The remote compiler is responsible
+	# for lowering the preserved unwind operations in the captured module.
 	RUN_OPT=true
 	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "device-code-loader")
+fi
+if ${DEFER_UNWIND_LOWERING}; then
+	if ${ENABLE_UNWIND_LOWERING}; then
+		RUN_OPT=true
+		OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "func.func(unwind-lowering,canonicalize)")
+	fi
+	if ${ENABLE_ADD_DEALLOC}; then
+		RUN_OPT=true
+		OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "func.func(add-dealloc)")
+	fi
+	if ${ENABLE_AGGRESSIVE_INLINE}; then
+		RUN_OPT=true
+		if ${DO_LINK}; then
+			OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "aggressive-inlining")
+		else
+			OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "indirect-to-direct-calls,inline")
+		fi
+	fi
 fi
 if ${ENABLE_LOWER_TO_CFG}; then
 	RUN_OPT=true

@@ -68,7 +68,9 @@ struct UnwindOpAnalysis {
 
 private:
   Operation *getParent(Operation *p) {
-    return (!p || isa<func::FuncOp, cudaq::cc::CreateLambdaOp>(p))
+    return (!p || isa<func::FuncOp, cudaq::cc::CreateLambdaOp>(p) ||
+            (isa<cudaq::cc::ScopeOp>(p) &&
+             p->hasAttr(cudaq::cc::unwindReturnScopeAttrName)))
                ? nullptr
                : p->getParentOp();
   }
@@ -424,8 +426,12 @@ struct ScopeOpPattern : public OpRewritePattern<cudaq::cc::ScopeOp> {
           cudaq::quake::DeallocOp::create(rewriter, a->getLoc(),
                                           adjustedDeallocArg(a));
         assert(asPrimitive);
-        Block *landingPad = getLandingPad(infoMap, scope).returnBlock;
-        cf::BranchOp::create(rewriter, loc, landingPad, blk->getArguments());
+        if (scope->hasAttr(cudaq::cc::unwindReturnScopeAttrName)) {
+          cf::BranchOp::create(rewriter, loc, nextBlock, blk->getArguments());
+        } else {
+          Block *landingPad = getLandingPad(infoMap, scope).returnBlock;
+          cf::BranchOp::create(rewriter, loc, landingPad, blk->getArguments());
+        }
         scope.getInitRegion().push_back(blk);
       }
     }
@@ -578,9 +584,10 @@ struct IfOpPattern : public OpRewritePattern<cudaq::cc::IfOp> {
     if (hasElse)
       rewriter.inlineRegionBefore(ifOp.getElseRegion(), endBlock);
     rewriter.setInsertionPointToEnd(initBlock);
-    rewriter.replaceOpWithNewOp<cf::CondBranchOp>(ifOp, ifOp.getCondition(),
-                                                  thenBlock, ValueRange{},
-                                                  elseBlock, ValueRange{});
+    cf::CondBranchOp::create(rewriter, loc, ifOp.getCondition(), thenBlock,
+                             ifOp.getLinearArgs(), elseBlock,
+                             ifOp.getLinearArgs());
+    rewriter.replaceOp(ifOp, endBlock->getArguments());
     return success();
   }
 

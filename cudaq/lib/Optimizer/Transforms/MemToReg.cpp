@@ -177,6 +177,18 @@ static bool isDescendantOf(Operation *op, Value defVal) {
   return false;
 }
 
+static cudaq::cc::ScopeOp findNearestUnwindReturnScope(Operation *op) {
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (auto scope = dyn_cast<cudaq::cc::ScopeOp>(parent);
+        scope && parent->hasAttr(cudaq::cc::unwindReturnScopeAttrName))
+      return scope;
+    if (isa<func::FuncOp, cudaq::cc::CreateLambdaOp>(parent))
+      break;
+  }
+  return {};
+}
+
 /// Return the type after \p ty is dereferenced.
 static Type dereferencedType(Type ty) {
   if (isa<cudaq::quake::RefType>(ty))
@@ -754,6 +766,8 @@ public:
     if (failed(convertToQLS()))
       return;
 
+    threadUnwindReturnState();
+
     // 2) Convert load/store memory ops to value form.
     MemoryAnalysis memAnalysis(func);
     SmallPtrSet<Operation *, 4> cleanUps;
@@ -787,6 +801,43 @@ public:
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Finalized:\n" << func << "\n\n");
+  }
+
+  // A local unwind return must carry the current values of external quantum
+  // references that are modified by the inlined callee. MemToReg later adds
+  // those wires to the marked scope results. Introduce explicit loads here so
+  // the normal data-flow traversal resolves the value at each return site.
+  void threadUnwindReturnState() {
+    if (!quantumValues)
+      return;
+
+    auto wireTy = cudaq::quake::WireType::get(&getContext());
+    getOperation().walk([&](cudaq::cc::ScopeOp scope) {
+      if (!scope->hasAttr(cudaq::cc::unwindReturnScopeAttrName))
+        return;
+
+      SetVector<Value> modifiedExternalRefs;
+      scope.walk([&](cudaq::quake::WrapOp wrap) {
+        if (findNearestUnwindReturnScope(wrap) != scope)
+          return;
+        Value ref = wrap.getRefValue();
+        if (!isDescendantOf(scope, ref))
+          modifiedExternalRefs.insert(ref);
+      });
+      if (modifiedExternalRefs.empty())
+        return;
+
+      scope.walk([&](cudaq::cc::UnwindReturnOp unwind) {
+        if (findNearestUnwindReturnScope(unwind) != scope)
+          return;
+        OpBuilder builder(unwind);
+        SmallVector<Value> wireValues;
+        for (Value ref : modifiedExternalRefs)
+          wireValues.push_back(cudaq::quake::UnwrapOp::create(
+              builder, unwind.getLoc(), wireTy, ref));
+        unwind->insertOperands(unwind->getNumOperands(), wireValues);
+      });
+    });
   }
 
   void handleSubRegions(Operation *parent, const MemoryAnalysis &memAnalysis,
@@ -1203,9 +1254,18 @@ public:
     if (getOperation()
             .walk([](Operation *op) {
               if (isa<cudaq::cc::CreateLambdaOp, cudaq::cc::UnwindBreakOp,
-                      cudaq::cc::UnwindContinueOp, cudaq::cc::UnwindReturnOp>(
-                      op))
+                      cudaq::cc::UnwindContinueOp>(op))
                 return WalkResult::interrupt();
+              if (isa<cudaq::cc::UnwindReturnOp>(op)) {
+                for (Operation *parent = op->getParentOp(); parent;
+                     parent = parent->getParentOp()) {
+                  if (parent->hasAttr(cudaq::cc::unwindReturnScopeAttrName))
+                    return WalkResult::advance();
+                  if (isa<func::FuncOp, cudaq::cc::CreateLambdaOp>(parent))
+                    return WalkResult::interrupt();
+                }
+                return WalkResult::interrupt();
+              }
               return WalkResult::advance();
             })
             .wasInterrupted())

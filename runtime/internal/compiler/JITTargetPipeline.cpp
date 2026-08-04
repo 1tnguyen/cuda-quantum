@@ -34,6 +34,10 @@ cudaq_internal::compiler::getPassPipeline(const cudaq::CompileTarget &target) {
                                                                     : "false";
   const std::string noLoopUnroll =
       pipelineConfig.codegenTranslation == "nop" ? " no-loop-unroll=true" : "";
+  const std::string deferUnwindLowering =
+      pipelineConfig.codegenTranslation == "nop" && !target.emulate
+          ? " defer-unwind-lowering=true"
+          : "";
 
   std::string passPipeline = "canonicalize";
 
@@ -45,10 +49,12 @@ cudaq_internal::compiler::getPassPipeline(const cudaq::CompileTarget &target) {
   if (target.emulate)
     appendPipelineStage(passPipeline, "emul-jit-prep-pipeline{erase-noise=true "
                                       "allow-early-exit=" +
-                                          allowEarlyExit + noLoopUnroll + "}");
+                                          allowEarlyExit + noLoopUnroll +
+                                          deferUnwindLowering + "}");
   else
     appendPipelineStage(passPipeline, "hw-jit-prep-pipeline{allow-early-exit=" +
-                                          allowEarlyExit + noLoopUnroll + "}");
+                                          allowEarlyExit + noLoopUnroll +
+                                          deferUnwindLowering + "}");
 
   const std::string lowerDeviceCalls =
       (pipelineConfig.codegenTranslation == "nop" && !target.emulate) ? "false"
@@ -58,7 +64,8 @@ cudaq_internal::compiler::getPassPipeline(const cudaq::CompileTarget &target) {
           ? "jit-deploy-pipeline{no-loop-unroll=true}"
           : "jit-deploy-pipeline";
   const std::string finalizeStage =
-      "jit-finalize-pipeline{lower-device-calls=" + lowerDeviceCalls + "}";
+      "jit-finalize-pipeline{lower-device-calls=" + lowerDeviceCalls +
+      deferUnwindLowering + "}";
 
   appendPipelineStage(passPipeline, pipelineConfig.highLevelPipeline);
   appendPipelineStage(passPipeline, deployStage);

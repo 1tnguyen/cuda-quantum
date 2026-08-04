@@ -31,6 +31,10 @@ struct TargetPrepPipelineOptions
       *this, "no-loop-unroll",
       llvm::cl::desc("Disable loop unrolling and preserve cc.loop operations."),
       llvm::cl::init(false)};
+  PassOptions::Option<bool> deferUnwindLowering{
+      *this, "defer-unwind-lowering",
+      llvm::cl::desc("Preserve unwind operations for a downstream compiler."),
+      llvm::cl::init(false)};
 };
 
 struct TargetDeployPipelineOptions
@@ -61,6 +65,10 @@ struct PythonAOTOptions : public PassPipelineOptions<PythonAOTOptions> {
   PassOptions::Option<std::size_t> codegenKind{
       *this, "codegen-kind", llvm::cl::desc("GKE launch codegen kind."),
       llvm::cl::init(0)};
+  PassOptions::Option<bool> deferUnwindLowering{
+      *this, "defer-unwind-lowering",
+      llvm::cl::desc("Preserve unwind operations for a downstream compiler."),
+      llvm::cl::init(false)};
 };
 struct TargetFinalizationJitPipelineOptions
     : public PassPipelineOptions<TargetFinalizationJitPipelineOptions> {
@@ -69,16 +77,23 @@ struct TargetFinalizationJitPipelineOptions
       llvm::cl::desc(
           "Lower device calls (to normal function calls) in JIT pipeline."),
       llvm::cl::init(true)};
+  PassOptions::Option<bool> deferUnwindLowering{
+      *this, "defer-unwind-lowering",
+      llvm::cl::desc("Preserve unwind operations for a downstream compiler."),
+      llvm::cl::init(false)};
 };
 } // namespace
 
 static void createTargetPrepPipeline(OpPassManager &pm,
                                      const TargetPrepPipelineOptions &options) {
-  pm.addNestedPass<func::FuncOp>(cudaq::opt::createAddDeallocs());
+  if (!options.deferUnwindLowering)
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createAddDeallocs());
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeAddMetadata());
   pm.addPass(cudaq::opt::createQuakePropagateMetadata());
-  pm.addNestedPass<func::FuncOp>(cudaq::opt::createUnwindLowering());
-  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  if (!options.deferUnwindLowering) {
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createUnwindLowering());
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  }
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createClassicalMemToReg());
   cudaq::opt::createClassicalOptimizationPipeline(
       pm, std::nullopt, {options.allowEarlyExit}, std::nullopt,
@@ -207,9 +222,11 @@ static void createPythonAOTPipeline(OpPassManager &pm,
                                     const PythonAOTOptions &options) {
   // NB: This pipeline should be kept in synch with the pipeline in nvq++.
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createVariableCoalesce());
-  pm.addNestedPass<func::FuncOp>(cudaq::opt::createUnwindLowering());
-  pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  pm.addNestedPass<func::FuncOp>(cudaq::opt::createAddDeallocs());
+  if (!options.deferUnwindLowering) {
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createUnwindLowering());
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createAddDeallocs());
+  }
   pm.addPass(cudaq::opt::createLambdaLifting());
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createClassicalMemToReg());
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
@@ -221,7 +238,8 @@ static void createPythonAOTPipeline(OpPassManager &pm,
   pm.addPass(cudaq::opt::createGenerateKernelExecution(gkeOpts));
   if (options.autoGenRunStack)
     pm.addPass(cudaq::opt::createRunSemanticsHackery());
-  cudaq::opt::addAggressiveInlining(pm);
+  if (!options.deferUnwindLowering)
+    cudaq::opt::addAggressiveInlining(pm);
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeAddMetadata());
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createConstantPropagation());
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createLiftArrayAlloc());

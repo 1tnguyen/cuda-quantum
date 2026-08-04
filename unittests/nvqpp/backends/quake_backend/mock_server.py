@@ -47,6 +47,32 @@ SERVER_EXECUTION_PIPELINE = (
     "lower-to-cfg,symbol-dce,cc-to-llvm"
     ")")
 
+BACKEND_UNWIND_PREP_PIPELINE = (
+    "builtin.module("
+    "func.func(unwind-lowering,canonicalize,add-dealloc),"
+    "canonicalize,cse,symbol-dce"
+    ")")
+
+BACKEND_REFERENCE_PREP_PIPELINE = (
+    "builtin.module("
+    "func.func(unwind-lowering,canonicalize,add-dealloc),"
+    "hw-jit-prep-pipeline{allow-early-exit=false no-loop-unroll=true "
+    "defer-unwind-lowering=true},"
+    "expand-measurements,jit-deploy-pipeline{no-loop-unroll=true},"
+    "func.func("
+    "expand-control-veqs,combine-quantum-alloc,canonicalize,"
+    "cc-loop-normalize,"
+    "cc-loop-unroll{unroll-only-wire-blocking-loops=true},"
+    "canonicalize,cse,factor-quantum-alloc,dqe,cable-rough-in,"
+    "canonicalize,memtoreg"
+    "),"
+    "canonicalize,cse,add-wireset,func.func(assign-wire-indices),"
+    "qubit-mapping{device=bypass},"
+    "decomposition{basis=h,s,t,r1,rx,ry,rz,x,y,z,z(1),x(1)},"
+    "jit-finalize-pipeline{lower-device-calls=false},"
+    "return-to-output-log,symbol-dce"
+    ")")
+
 
 def verifyValueSemanticsPayload(decoded_payload):
     required_tokens = ["quake.wire_set", "quake.borrow_wire"]
@@ -88,6 +114,69 @@ def verifyExpectedLoopCount(decoded_payload, entry_func_name):
             f"{actualCount}.")
 
 
+def verifyExpectedUnwindCount(decoded_payload, entry_func_name):
+    match = re.search(r"expected_(\d+)_unwinds?", entry_func_name)
+    if not match:
+        return
+
+    expectedCount = int(match.group(1))
+    actualCount = len(
+        re.findall(r"\bcc\.unwind_(return|break|continue)\b", decoded_payload))
+    if actualCount != expectedCount:
+        raise RuntimeError(
+            "Remote payload preserved an unexpected number of `cc.unwind_*` "
+            f"ops for `{entry_func_name}`: expected {expectedCount}, got "
+            f"{actualCount}.")
+
+
+def verifyExpectedIfCount(decoded_payload, entry_func_name):
+    match = re.search(r"expected_(\d+)_ifs?", entry_func_name)
+    if not match:
+        return
+
+    expectedCount = int(match.group(1))
+    actualCount = len(re.findall(r"\bcc\.if\b", decoded_payload))
+    if actualCount != expectedCount:
+        raise RuntimeError(
+            "Remote payload preserved an unexpected number of `cc.if` ops "
+            f"for `{entry_func_name}`: expected {expectedCount}, got "
+            f"{actualCount}.")
+
+
+def verifyExpectedCfgCount(decoded_payload, entry_func_name):
+    match = re.search(r"expected_(\d+)_cfg", entry_func_name)
+    if not match:
+        return
+
+    expectedCount = int(match.group(1))
+    actualCount = len(re.findall(r"\bcf\.[A-Za-z_]\w*", decoded_payload))
+    if actualCount != expectedCount:
+        raise RuntimeError(
+            "Remote payload contains an unexpected number of `cf.*` ops "
+            f"for `{entry_func_name}`: expected {expectedCount}, got "
+            f"{actualCount}.")
+
+
+def verifyExpectedQuantumKernelCallCount(decoded_payload, entry_func_name):
+    match = re.search(r"expected_(\d+)_qkernel_calls?", entry_func_name)
+    if not match:
+        return
+
+    expectedCount = int(match.group(1))
+    kernelSymbols = set(
+        re.findall(
+            r"func\.func(?:\s+private)?\s+@([^\s(]+)[^\n]*"
+            r"\"cudaq-kernel\"", decoded_payload))
+    calledSymbols = re.findall(r"\b(?:call|func\.call)\s+@([^\s(]+)",
+                               decoded_payload)
+    actualCount = sum(symbol in kernelSymbols for symbol in calledSymbols)
+    if actualCount != expectedCount:
+        raise RuntimeError(
+            "Remote payload contains an unexpected number of calls to quantum "
+            f"kernels for `{entry_func_name}`: expected {expectedCount}, got "
+            f"{actualCount}.")
+
+
 def getNumRequiredQubits(function):
     for a in function.attributes:
         if "required_num_qubits" in str(a):
@@ -124,6 +213,17 @@ def verifyModule(module, stage):
         raise RuntimeError(f"MLIR verification failed for {stage} module.")
 
 
+def preparePayloadForExecution(recovered_mod, ctx, pipeline):
+    pm = PassManager.parse(pipeline, context=ctx)
+    try:
+        pm.run(recovered_mod.operation)
+    except Exception as e:
+        raise RuntimeError("Failed to prepare structured unwind payload: "
+                           f"{e}\n{recovered_mod}") from e
+
+    verifyModule(recovered_mod, "backend-prepared")
+
+
 def lowerValueSemanticsPayloadForExecution(recovered_mod, ctx):
     # The client/server contract is checked before this point. The client has
     # already run the target JIT pipeline through `wireset` assignment. For
@@ -155,18 +255,9 @@ async def postJob(request: Request):
             "Input MLIR contains malloc or memcpy calls. These should have been"
             " eliminated by the eliminate-dead-heap-copy pass.")
 
-    verifyValueSemanticsPayload(decoded_payload)
-
     ctx = getMLIRContext()
     recovered_mod = Module.parse(decoded_payload, context=ctx)
     verifyModule(recovered_mod, "submitted")
-    pm = PassManager.parse(
-        "builtin.module(canonicalize,distributed-device-call,cse)", context=ctx)
-    try:
-        pm.run(recovered_mod.operation)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to run pass manager on the recovered module: {e}")
 
     entry_func_name = ""
     for op in recovered_mod.body.operations:
@@ -179,6 +270,33 @@ async def postJob(request: Request):
         raise RuntimeError(
             "Remote payload is missing a `cudaq-entrypoint` function.")
     verifyExpectedLoopCount(decoded_payload, entry_func_name)
+    verifyExpectedUnwindCount(decoded_payload, entry_func_name)
+    verifyExpectedIfCount(decoded_payload, entry_func_name)
+    verifyExpectedCfgCount(decoded_payload, entry_func_name)
+    verifyExpectedQuantumKernelCallCount(decoded_payload, entry_func_name)
+
+    submittedValueSemantics = "quake.wire_set" in decoded_payload
+    requiresSubmittedValueSemantics = re.search(r"expected_\d+_qkernel_calls?",
+                                                entry_func_name)
+    if submittedValueSemantics or requiresSubmittedValueSemantics:
+        verifyValueSemanticsPayload(decoded_payload)
+
+    if submittedValueSemantics:
+        if "cc.unwind_" in decoded_payload:
+            preparePayloadForExecution(recovered_mod, ctx,
+                                       BACKEND_UNWIND_PREP_PIPELINE)
+    else:
+        preparePayloadForExecution(recovered_mod, ctx,
+                                   BACKEND_REFERENCE_PREP_PIPELINE)
+        verifyValueSemanticsPayload(str(recovered_mod))
+
+    pm = PassManager.parse(
+        "builtin.module(canonicalize,distributed-device-call,cse)", context=ctx)
+    try:
+        pm.run(recovered_mod.operation)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to run pass manager on the recovered module: {e}")
 
     # Lower the module to LLVM IR.
     qir_code = lowerValueSemanticsPayloadForExecution(recovered_mod, ctx)

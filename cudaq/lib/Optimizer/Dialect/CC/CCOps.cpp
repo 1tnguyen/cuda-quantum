@@ -2079,7 +2079,8 @@ struct EraseScopeWhenNotNeeded : public OpRewritePattern<cudaq::cc::ScopeOp> {
 
   LogicalResult matchAndRewrite(cudaq::cc::ScopeOp scope,
                                 PatternRewriter &rewriter) const override {
-    if (scope.hasAllocation())
+    if (scope.hasAllocation() ||
+        scope->hasAttr(cudaq::cc::unwindReturnScopeAttrName))
       return failure();
 
     // scope does not allocate, so the region can be inlined into the parent.
@@ -3043,27 +3044,36 @@ void cudaq::cc::UnwindContinueOp::getCanonicalizationPatterns(
 //===----------------------------------------------------------------------===//
 
 LogicalResult cudaq::cc::UnwindReturnOp::verify() {
-  // The arguments to this op must correspond to the FuncOp's results.
-  bool foundFunc = true;
   auto *op = getOperation();
-  auto resultTypes = [&]() {
-    if (auto func = op->getParentOfType<CreateLambdaOp>()) {
-      auto lambdaTy = cast<CallableType>(func->getResult(0).getType());
-      return SmallVector<Type>(lambdaTy.getSignature().getResults());
+  SmallVector<Type> resultTypes;
+  bool foundReturnTarget = false;
+  for (Operation *parent = op->getParentOp(); parent;
+       parent = parent->getParentOp()) {
+    if (auto scope = dyn_cast<ScopeOp>(parent);
+        scope && scope->hasAttr(unwindReturnScopeAttrName)) {
+      llvm::append_range(resultTypes, scope.getResultTypes());
+      foundReturnTarget = true;
+      break;
     }
-    if (auto func = op->getParentOfType<func::FuncOp>())
-      return SmallVector<Type>(func.getResultTypes());
-    foundFunc = false;
-    return SmallVector<Type>();
-  }();
-  if (!foundFunc)
-    return emitOpError("cannot find nearest enclosing function/lambda");
+    if (auto lambda = dyn_cast<CreateLambdaOp>(parent)) {
+      auto lambdaTy = cast<CallableType>(lambda->getResult(0).getType());
+      llvm::append_range(resultTypes, lambdaTy.getSignature().getResults());
+      foundReturnTarget = true;
+      break;
+    }
+    if (auto func = dyn_cast<func::FuncOp>(parent)) {
+      llvm::append_range(resultTypes, func.getResultTypes());
+      foundReturnTarget = true;
+      break;
+    }
+  }
+  if (!foundReturnTarget)
+    return emitOpError("cannot find nearest enclosing return target");
   if (getOperands().size() != resultTypes.size())
-    return emitOpError(
-        "arity of arguments and function/lambda result mismatch");
+    return emitOpError("arity of arguments and return target result mismatch");
   for (auto p : llvm::zip(getOperands().getTypes(), resultTypes))
     if (std::get<0>(p) != std::get<1>(p))
-      return emitOpError("argument type mismatch with function/lambda result");
+      return emitOpError("argument type mismatch with return target result");
   return success();
 }
 

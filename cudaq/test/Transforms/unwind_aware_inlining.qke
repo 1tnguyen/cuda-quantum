@@ -1,0 +1,57 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --pass-pipeline="builtin.module(aggressive-inlining)" %s | FileCheck %s --check-prefix=INLINE
+// RUN: cudaq-opt --pass-pipeline="builtin.module(aggressive-inlining,func.func(memtoreg))" %s | FileCheck %s --check-prefix=MEMTOREG
+// RUN: cudaq-opt --pass-pipeline="builtin.module(aggressive-inlining,func.func(unwind-lowering),canonicalize)" %s | FileCheck %s --check-prefix=LOWERED
+
+module {
+  func.func @callee(%q: !quake.ref) -> i64 attributes {"cudaq-kernel"} {
+    %c1 = arith.constant 1 : i64
+    %c2 = arith.constant 2 : i64
+    %measurement = quake.mz %q : (!quake.ref) -> !cc.measure_handle
+    %condition = quake.discriminate %measurement : (!cc.measure_handle) -> i1
+    cc.if(%condition) {
+      cc.unwind_return %c1 : i64
+    }
+    return %c2 : i64
+  }
+
+  func.func @caller(%q: !quake.ref) -> i64 attributes {"cudaq-entrypoint", "cudaq-kernel"} {
+    %value = func.call @callee(%q) : (!quake.ref) -> i64
+    quake.x %q : (!quake.ref) -> ()
+    return %value : i64
+  }
+}
+
+// INLINE-LABEL: func.func @caller
+// INLINE-NOT:     func.call @callee
+// INLINE:         %[[VALUE:.*]] = cc.scope -> (i64) {
+// INLINE:           cc.if
+// INLINE:             cc.unwind_return
+// INLINE:           cc.continue
+// INLINE:         } {cc.unwind_return_scope}
+// INLINE:         quake.x
+// INLINE:         return %[[VALUE]] : i64
+
+// MEMTOREG-LABEL: func.func @caller
+// MEMTOREG:         %[[SCOPE:.*]]:2 = cc.scope -> (i64, !quake.wire) {
+// MEMTOREG:           cc.if
+// MEMTOREG:             cc.unwind_return {{.*}} : i64, !quake.wire
+// MEMTOREG:           cc.continue {{.*}} : i64, !quake.wire
+// MEMTOREG:         } {cc.unwind_return_scope}
+// MEMTOREG:         quake.x
+// MEMTOREG:         return %[[SCOPE]]#0 : i64
+
+// LOWERED-LABEL: func.func @caller
+// LOWERED-NOT:     cc.unwind_return
+// LOWERED-NOT:     cf.
+// LOWERED:         %[[RESULT:.*]] = arith.select
+// LOWERED:         quake.x
+// LOWERED-NOT:     cf.
+// LOWERED:         return %[[RESULT]] : i64

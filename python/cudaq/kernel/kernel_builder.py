@@ -1729,8 +1729,13 @@ class PyKernel(object):
         if not hasattr(self, 'qkeModule'):
             self.qkeModule = cudaq_runtime.cloneModule(self.module)
             ctx = getMLIRContext()
-            pm = PassManager.parse("builtin.module(aot-prep-pipeline)",
-                                   context=ctx)
+            target = cudaq_runtime.get_target()
+            defer_unwind = target.codegen == "nop" and not target.is_emulated()
+            pipeline = "builtin.module(aot-prep-pipeline)"
+            if defer_unwind:
+                pipeline = ("builtin.module(aot-prep-pipeline{"
+                            "defer-unwind-lowering=true})")
+            pm = PassManager.parse(pipeline, context=ctx)
             try:
                 with trace.span("cudaq.pipeline.aot"):
                     cudaq_runtime.runPassManager(pm, self.qkeModule)

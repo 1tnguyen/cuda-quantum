@@ -105,6 +105,12 @@ void bindRuntimeTarget(nanobind::module_ &mod, LinkedLibraryHolder &holder) {
               "`cudaq.Target` leverages.")
       .def_ro("description", &cudaq::RuntimeTarget::description,
               "A string describing the features for this `cudaq.Target`.")
+      .def_prop_ro(
+          "codegen",
+          [](const cudaq::RuntimeTarget &self) {
+            return self.config.getCodeGenSpec(self.runtimeConfig);
+          },
+          "The code-generation emission selected by this target.")
       .def(
           "num_qpus",
           [](cudaq::RuntimeTarget &_) { return cudaq::platform_num_qpus(); },

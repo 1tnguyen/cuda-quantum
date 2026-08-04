@@ -98,6 +98,21 @@ public:
       }
 
       if (!isa<cudaq::cc::DeviceCallOp, cudaq::cc::NoInlineCallOp>(op)) {
+        auto calleeFunc = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+            call, cast<SymbolRefAttr>(call.getCallableForCallee()));
+        const bool hasUnscopedUnwindReturn =
+            calleeFunc &&
+            calleeFunc
+                .walk([&](cudaq::cc::UnwindReturnOp unwind) {
+                  for (Operation *parent = unwind->getParentOp();
+                       parent != calleeFunc.getOperation();
+                       parent = parent->getParentOp())
+                    if (parent->hasAttr(cudaq::cc::unwindReturnScopeAttrName))
+                      return WalkResult::advance();
+                  return WalkResult::interrupt();
+                })
+                .wasInterrupted();
+
         // Move the call into a scope so as to preserve any live-ranges for
         // allocated resources.
         auto loc = call.getLoc();
@@ -108,6 +123,9 @@ public:
               builder.insert(clone);
               cudaq::cc::ContinueOp::create(builder, loc, clone->getResults());
             });
+        if (hasUnscopedUnwindReturn)
+          scope->setAttr(cudaq::cc::unwindReturnScopeAttrName,
+                         rewriter.getUnitAttr());
         LLVM_DEBUG(llvm::dbgs() << "Call moved into scope " << scope << '\n');
         op->replaceAllUsesWith(scope);
         op->erase();
