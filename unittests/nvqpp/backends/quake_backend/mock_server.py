@@ -6,45 +6,20 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-import cudaq
 from fastapi import FastAPI, HTTPException, Request
-import uvicorn, uuid, base64, ctypes, sys, re
+import uvicorn, uuid, base64, sys, re
 from llvmlite import binding as llvm
 from cudaq.mlir.passmanager import PassManager
 from cudaq.mlir.ir import Module
 from cudaq.kernel.utils import getMLIRContext
 from cudaq.mlir.dialects import func
-from cudaq.mlir.dialects import llvm as mlir_llvm
+from utils.mock_qpu.quake_execution import execute_quake
 
 # Define the REST Server App
 app = FastAPI()
 
-llvm.initialize_native_target()
-llvm.initialize_native_asmprinter()
-target = llvm.Target.from_default_triple()
-targetMachine = target.create_target_machine()
-backing_mod = llvm.parse_assembly("")
-engine = llvm.create_mcjit_compiler(backing_mod, targetMachine)
-
 # Keep track of Job Ids to their Names
 createdJobs = {}
-
-SERVER_EXECUTION_PIPELINE = (
-    "builtin.module("
-    "canonicalize,distributed-device-call,cse,"
-    "func.func("
-    "memtoreg,canonicalize,cc-loop-normalize,"
-    "cc-loop-unroll{maximum-iterations=1024 "
-    "signal-failure-if-any-loop-cannot-be-completely-unrolled=true "
-    "allow-early-exit=true},"
-    "canonicalize"
-    "),"
-    "canonicalize,cse,symbol-dce,lower-to-cfg,"
-    "func.func(stack-frame-prealloc,combine-quantum-alloc,canonicalize,cse),"
-    "symbol-dce,"
-    "lower-wireset-to-profile-qir{convert-to=qir-adaptive},"
-    "lower-to-cfg,symbol-dce,cc-to-llvm"
-    ")")
 
 
 def verifyValueSemanticsPayload(decoded_payload):
@@ -87,56 +62,9 @@ def verifyExpectedLoopCount(decoded_payload, entry_func_name):
             f"{actualCount}.")
 
 
-def getNumRequiredQubits(function):
-    for a in function.attributes:
-        if "required_num_qubits" in str(a):
-            return int(
-                str(a).split(f'required_num_qubits\"=')[-1].split(" ")
-                [0].replace("\"", "").replace("'", ""))
-        elif "requiredQubits" in str(a):
-            return int(
-                str(a).split(f'requiredQubits\"=')[-1].split(" ")[0].replace(
-                    "\"", "").replace("'", ""))
-
-
-def getNumRequiredResults(function):
-    for a in function.attributes:
-        if "required_num_results" in str(a):
-            return int(
-                str(a).split(f'required_num_results\"=')[-1].split(" ")
-                [0].replace("\"", "").replace("'", ""))
-        elif "requiredResults" in str(a):
-            return int(
-                str(a).split(f'requiredResults\"=')[-1].split(" ")[0].replace(
-                    "\"", "").replace("'", ""))
-
-
-def getKernelFunction(module):
-    for f in module.functions:
-        if not f.is_declaration:
-            return f
-    return None
-
-
 def verifyModule(module, stage):
     if not module.operation.verify():
         raise RuntimeError(f"MLIR verification failed for {stage} module.")
-
-
-def lowerValueSemanticsPayloadForExecution(recovered_mod, ctx):
-    # The client/server contract is checked before this point. The client has
-    # already run the target JIT pipeline through `wireset` assignment. For
-    # execution, the mock server fully unrolls the submitted value-semantic IR
-    # and lowers the `wireset` directly to QIR.
-    pm = PassManager.parse(SERVER_EXECUTION_PIPELINE, context=ctx)
-    try:
-        pm.run(recovered_mod.operation)
-    except Exception as e:
-        raise RuntimeError("Failed to lower recovered module for execution: "
-                           f"{e}\n{recovered_mod}") from e
-
-    verifyModule(recovered_mod, "server-lowered")
-    return mlir_llvm.translate_module_to_llvmir(recovered_mod.operation)
 
 
 @app.post("/job")
@@ -179,40 +107,10 @@ async def postJob(request: Request):
             "Remote payload is missing a `cudaq-entrypoint` function.")
     verifyExpectedLoopCount(decoded_payload, entry_func_name)
 
-    # Lower the module to LLVM IR.
-    qir_code = lowerValueSemanticsPayloadForExecution(recovered_mod, ctx)
-    m = llvm.module.parse_assembly(qir_code)
-    m.verify()
-
-    # Get the function, number of qubits, and kernel name.
-    function = getKernelFunction(m)
-    if function == None:
-        raise Exception("Could not find kernel function")
-    numQubitsRequired = getNumRequiredQubits(function)
-    numResultsRequired = getNumRequiredResults(function)
-    kernelFunctionName = function.name
-
     # Job ID
     newId = str(uuid.uuid4())
-
-    # JIT Compile and get Function Pointer
-    engine.add_module(m)
-    engine.finalize_object()
-    engine.run_static_constructors()
-    funcPtr = engine.get_function_address(kernelFunctionName)
-    kernel = ctypes.CFUNCTYPE(None)(funcPtr)
-    qir_log = f"HEADER\tschema_id\tlabeled\nHEADER\tschema_version\t1.0\nSTART\nMETADATA\tentry_point\nMETADATA\tqir_profiles\tadaptive_profile\nMETADATA\trequired_num_qubits\t{numQubitsRequired}\nMETADATA\trequired_num_results\t{numResultsRequired}\n"
-
-    shots = payload["shots"]
-    for i in range(shots):
-        shot_log = cudaq.testing.runKernel(numQubitsRequired, kernel)
-        if i > 0:
-            qir_log += "START\n"
-        qir_log += shot_log
-        qir_log += "END\t0\n"
-
-    engine.remove_module(m)
-    createdJobs[newId] = qir_log
+    createdJobs[newId] = execute_quake(decoded_payload, payload["shots"],
+                                       "qir-raw")
     # Job "created", return the id
     return ({"id": newId}, 201)
 

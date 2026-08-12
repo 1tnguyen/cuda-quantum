@@ -9,10 +9,29 @@
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import PlainTextResponse
 from typing import Union
+import base64
+import binascii
+import importlib.util
 import uuid
+import cudaq
 from pydantic import BaseModel
 import logging
-import copy
+
+from ..quake_execution import execute_quake_isolated
+
+_quake_to_qua_ast_type = None
+_qubit_mapping_mode_type = None
+_cudaq_frontend_import_error = None
+
+if importlib.util.find_spec("cudaq_frontend") is not None:
+    try:
+        from cudaq_frontend.translate.quake_to_qua_ast import QuakeToQuaAst
+        from cudaq_frontend.utils import QubitMappingMode
+
+        _quake_to_qua_ast_type = QuakeToQuaAst
+        _qubit_mapping_mode_type = QubitMappingMode
+    except Exception as error:
+        _cudaq_frontend_import_error = error
 
 # Define the REST Server App
 app = FastAPI()
@@ -28,33 +47,55 @@ class Job(BaseModel):
     shots: int
     content: str
     executor: str
-    qubit_mapping: str = None
+    qubit_mapping_mode: str = None
     api_key: str = None
     source: str = "oq2"
+    output_format: str = "histogram"
 
 
 createdJobs = {}
 
-# Could how many times the client has requested the Job
-countJobGetRequests = 0
 
-# Save how many qubits were needed for each test (emulates real backend)
-numQubitsRequired = 0
+def _decode_content(content: str):
+    try:
+        return base64.b64decode(content, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return content
 
-server_exec_response = {
-    "id": "12345678-1234-1234-1234-0123456789ab",
-    "results": {
-        "000": 19,
-        "001": 2,
-        "010": 27,
-        "011": 4,
-        "100": 11,
-        "101": 3,
-        "110": 30,
-        "111": 4
-    },
-    "status": "Done"
-}
+
+def _create_response(job: Job, job_id):
+    if job.source != "quake":
+        raise ValueError(f"Unsupported program source: {job.source}")
+
+    results = execute_quake_isolated(_decode_content(job.content), job.shots,
+                                     job.output_format)
+    return {"id": job_id, "results": results, "status": "Done"}
+
+
+def _validate_quake_ir(job: Job):
+    if job.source != "quake":
+        return
+
+    if _cudaq_frontend_import_error is not None:
+        raise HTTPException(
+            status_code=500,
+            detail=("cudaq_frontend is installed but could not be imported: "
+                    f"{_cudaq_frontend_import_error}"))
+
+    if _quake_to_qua_ast_type is None:
+        return
+
+    try:
+        quake_ir = _decode_content(job.content)
+
+        translator = _quake_to_qua_ast_type(
+            qubit_mapping=_qubit_mapping_mode_type.backend,
+            repetitions=job.shots)
+        translator.translate(quake_ir)
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Quake to QUA translation failed: {error}") from error
 
 
 @app.get("/v1/config/qubits", response_class=PlainTextResponse)
@@ -72,34 +113,31 @@ async def post_execute_job(job: Job,
                            token: Union[str,
                                         None] = Header(alias="Authorization",
                                                        default=None)):
-    global createdJobs
-    logging.info("In /v1/execute. code: {}", job)
+    logging.info("In /v1/execute. code: %s", job)
+    _validate_quake_ir(job)
     jobID = uuid.uuid4()
-    response = copy.deepcopy(server_exec_response)
-    response['id'] = jobID
-    createdJobs[jobID] = response
-    logging.info("In /v1/execute. response: {}", response)
+    try:
+        response = _create_response(job, jobID)
+    except Exception as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Quake simulation failed: {error}") from error
+    createdJobs[str(jobID)] = response
+    logging.info("In /v1/execute. response: %s", response)
     return response
 
 
-# Retrieve the job, simulate having to wait by counting to 3
-# until we return the job results
 @app.get("/v1/results/{id}")
 async def get_results(id: str):
-    global countJobGetRequests, createdJobs
-    if countJobGetRequests <= 3:
-        countJobGetRequests += 1
-        logging.info("In /v1/results/{}. countJobGetRequests: {}", id,
-                     countJobGetRequests)
-        return {"status": "InProgress"}
-    countJobGetRequests = 0
-    response = copy.deepcopy(server_exec_response)
-    response['id'] = id
-    logging.info("In /v1/results/{}. returning job results: {}", id, response)
+    response = createdJobs.get(id)
+    if response is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {id}")
+    logging.info("In /v1/results/%s. returning job results: %s", id, response)
     assert response
     return response
 
 
 def start_server(port):
     import uvicorn
+    cudaq.reset_target()
     uvicorn.run(app, port=port, host='0.0.0.0', log_level="info")
