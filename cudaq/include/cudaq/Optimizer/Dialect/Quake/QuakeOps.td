@@ -1137,14 +1137,14 @@ class Measurement<string mnemonic> : QuakeOp<mnemonic, [MeasurementInterface,
   // The classical result of a measurement is one of:
   //   - !quake.measure                   (the legacy SSA result),
   //   - !cc.measure_handle               (the cudaq::measure_handle alias),
-  //   - !cc.stdvec<!quake.measure>       (vector of legacy results),
-  //   - !cc.stdvec<!cc.measure_handle>   (vector of handles).
+  //   - !cc.sequence<!quake.measure>       (vector of legacy results),
+  //   - !cc.sequence<!cc.measure_handle>   (vector of handles).
   // The handle forms are emitted by the bridge for `cudaq::measure_handle`
   // callers (overloads of `mz`/`mx`/`my`) and are lowered to `i64` by
   // `--convert-to-qir-api`'s `TypeConverter`.
   let results = (outs
     AnyTypeOf<[MeasureType, cc_MeasureHandleType,
-               StdvecOf<[MeasureType, cc_MeasureHandleType]>]>:$measOut,
+               SequenceOf<[MeasureType, cc_MeasureHandleType]>]>:$measOut,
     Variadic<WireType>:$wires
   );
 
@@ -1222,8 +1222,8 @@ def quake_DiscriminateOp : QuakeOp<"discriminate",
     Multiple applications of discriminate on the same scalar measurement
     handle yield the same result, so the scalar form is treated as pure.
 
-    The vector form (`!cc.stdvec<!cc.measure_handle>` or
-    `!cc.stdvec<!quake.measure>`) operates on a `(data_ptr, size)`
+    The vector form (`!cc.sequence<!cc.measure_handle>` or
+    `!cc.sequence<!quake.measure>`) operates on a `(data_ptr, size)`
     descriptor that aliases mutable backing storage; storing a new handle
     into a slot through that storage changes the result of a subsequent
     discriminate of the same descriptor. The vector form therefore
@@ -1234,10 +1234,10 @@ def quake_DiscriminateOp : QuakeOp<"discriminate",
 
   let arguments = (ins
     AnyTypeOf<[MeasureType, cc_MeasureHandleType,
-               StdvecOf<[MeasureType, cc_MeasureHandleType]>]>:$measurement
+               SequenceOf<[MeasureType, cc_MeasureHandleType]>]>:$measurement
   );
   let results = (outs
-    AnyTypeOf<[AnySignlessInteger, StdvecOf<[AnySignlessInteger]>]>
+    AnyTypeOf<[AnySignlessInteger, SequenceOf<[AnySignlessInteger]>]>
   );
 
   let assemblyFormat = [{
@@ -1544,6 +1544,21 @@ def HOp : OneTargetOp<"h", [Hermitian]> {
      └───┘
     ```
   }];
+}
+
+def PhaseOp : OneTargetParamOp<"phase", [Rotation]> {
+  let summary = "phase correction attached to quantum dataflow";
+  let description = [{
+    Represents a scalar phase correction. With no controls, it denotes
+    `exp(i phi) I`, a global phase. With controls, it applies that phase only
+    to the branch satisfying the ordered control predicate. The scalar target
+    is solely an ordering and wire-flow anchor and does not affect the
+    represented unitary. Producers must choose an anchor outside the control
+    predicate so that an exact anchored lowering remains available for
+    non-scalar controls.
+  }];
+
+  let hasCanonicalizer = 1;
 }
 
 def PhasedRxOp : QuakeOperator<"phased_rx",
