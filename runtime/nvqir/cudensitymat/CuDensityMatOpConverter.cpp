@@ -10,11 +10,18 @@
 #include "BatchingUtils.h"
 #include "CuDensityMatErrorHandling.h"
 #include "CuDensityMatUtils.h"
+#include "CuSparseStateVectorRhs.h"
 #include "common/FmtCore.h"
+#include "cudaq/cudaq_mpi.h"
 #include "cudaq/runtime/logger/logger.h"
+#include <atomic>
+#include <exception>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <ranges>
+#include <thread>
+#include <unordered_map>
 
 namespace {
 std::vector<int64_t>
@@ -42,6 +49,322 @@ convertDimensions(const std::vector<int64_t> &modeExtents) {
   return dimensions;
 }
 
+struct FullSystemDiaFactor {
+  std::vector<std::size_t> degrees;
+  std::vector<std::size_t> extents;
+  std::vector<std::size_t> localStrides;
+  std::vector<std::size_t> globalStrides;
+  std::size_t dimension;
+  std::vector<std::complex<double>> data;
+  std::vector<std::int64_t> offsets;
+};
+
+struct FullSystemDiaTerm {
+  std::complex<double> coefficient;
+  std::vector<FullSystemDiaFactor> factors;
+  std::size_t branchCapacity{1};
+};
+
+std::optional<std::size_t>
+computeFullSystemDimension(const std::vector<int64_t> &modeExtents) {
+  std::size_t dimension = 1;
+  for (const auto extent : modeExtents) {
+    if (extent <= 0 || dimension > std::numeric_limits<std::size_t>::max() /
+                                       static_cast<std::size_t>(extent))
+      return std::nullopt;
+    dimension *= static_cast<std::size_t>(extent);
+  }
+  return dimension;
+}
+
+std::optional<std::vector<FullSystemDiaTerm>> prepareFullSystemDiaTerms(
+    const cudaq::sum_op<cudaq::matrix_handler> &op,
+    const std::unordered_map<std::string, std::complex<double>> &parameters,
+    const std::vector<int64_t> &modeExtents) {
+  if (!op.get_parameter_descriptions().empty())
+    return std::nullopt;
+
+  std::vector<std::size_t> globalStrides(modeExtents.size());
+  std::size_t stride = 1;
+  for (std::size_t i = 0; i < modeExtents.size(); ++i) {
+    globalStrides[i] = stride;
+    stride *= static_cast<std::size_t>(modeExtents[i]);
+  }
+
+  auto dimensions = convertDimensions(modeExtents);
+  std::vector<FullSystemDiaTerm> terms;
+  terms.reserve(op.num_terms());
+  for (const auto &productOp : op) {
+    const auto coefficient = productOp.get_coefficient();
+    if (!coefficient.is_constant())
+      return std::nullopt;
+
+    FullSystemDiaTerm term{coefficient.evaluate()};
+    if (term.coefficient == std::complex<double>{})
+      continue;
+    term.factors.reserve(productOp.num_ops());
+    for (const auto &component : productOp) {
+      const auto *element =
+          dynamic_cast<const cudaq::matrix_handler *>(&component);
+      if (!element)
+        return std::nullopt;
+
+      auto [data, offsets] =
+          element->to_diagonal_matrix(dimensions, parameters);
+      if (offsets.empty())
+        return std::nullopt;
+
+      FullSystemDiaFactor factor;
+      factor.degrees = element->degrees();
+      factor.data = std::move(data);
+      factor.offsets = std::move(offsets);
+      factor.dimension = 1;
+      std::size_t localStride = 1;
+      for (const auto degree : factor.degrees) {
+        if (degree >= modeExtents.size())
+          return std::nullopt;
+        const auto extent = static_cast<std::size_t>(modeExtents[degree]);
+        factor.extents.push_back(extent);
+        factor.localStrides.push_back(localStride);
+        factor.globalStrides.push_back(globalStrides[degree]);
+        localStride *= extent;
+        factor.dimension *= extent;
+      }
+      if (factor.data.size() != factor.dimension * factor.offsets.size())
+        return std::nullopt;
+
+      constexpr std::size_t maxReservedBranches = 4096;
+      if (term.branchCapacity > maxReservedBranches / factor.offsets.size())
+        term.branchCapacity = maxReservedBranches;
+      else
+        term.branchCapacity *= factor.offsets.size();
+      term.factors.emplace_back(std::move(factor));
+    }
+    terms.emplace_back(std::move(term));
+  }
+  return terms;
+}
+
+void accumulateBranch(
+    std::vector<std::pair<std::size_t, std::complex<double>>> &branches,
+    std::size_t index, std::complex<double> value) {
+  if (value == std::complex<double>{})
+    return;
+  const auto found = std::find_if(
+      branches.begin(), branches.end(),
+      [index](const auto &branch) { return branch.first == index; });
+  if (found == branches.end())
+    branches.emplace_back(index, value);
+  else
+    found->second += value;
+}
+
+struct FullSystemCsr {
+  std::vector<std::int32_t> rowOffsets;
+  std::vector<std::int32_t> columnIndices;
+  std::vector<std::complex<double>> values;
+};
+
+std::optional<FullSystemCsr>
+buildFullSystemCsr(const std::vector<FullSystemDiaTerm> &terms,
+                   std::size_t dimension, std::size_t maxBytes) {
+  const std::size_t rowOffsetBytes = (dimension + 1) * sizeof(std::int32_t);
+  constexpr std::size_t bytesPerNonzero =
+      sizeof(std::int32_t) + sizeof(std::complex<double>);
+  if (rowOffsetBytes >= maxBytes)
+    return std::nullopt;
+  const std::size_t maxNonzeros = std::min(
+      (maxBytes - rowOffsetBytes) / bytesPerNonzero,
+      static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()));
+  if (maxNonzeros == 0)
+    return std::nullopt;
+
+  std::size_t maxBranches = 1;
+  std::size_t entryCapacity = 0;
+  for (const auto &term : terms) {
+    maxBranches = std::max(maxBranches, term.branchCapacity);
+    entryCapacity =
+        std::min<std::size_t>(4096, entryCapacity + term.branchCapacity);
+  }
+
+  struct CscChunk {
+    std::size_t firstColumn{0};
+    std::vector<std::int32_t> columnOffsets;
+    std::vector<std::int32_t> rowIndices;
+    std::vector<std::complex<double>> values;
+  };
+
+  constexpr std::size_t parallelThreshold = 1UL << 18;
+  constexpr std::size_t maxWorkerCount = 16;
+  const std::size_t availableWorkers =
+      std::max(1U, std::thread::hardware_concurrency());
+  const std::size_t workerCount =
+      dimension >= parallelThreshold
+          ? std::min({maxWorkerCount, availableWorkers, dimension})
+          : 1;
+  std::vector<CscChunk> chunks(workerCount);
+  std::vector<std::exception_ptr> workerErrors(workerCount);
+  std::atomic<std::size_t> totalNonzeros{0};
+  std::atomic<bool> capacityExceeded{false};
+
+  const auto buildChunk = [&](std::size_t worker) {
+    try {
+      const std::size_t firstColumn = dimension * worker / workerCount;
+      const std::size_t endColumn = dimension * (worker + 1) / workerCount;
+      auto &chunk = chunks[worker];
+      chunk.firstColumn = firstColumn;
+      chunk.columnOffsets.resize(endColumn - firstColumn + 1);
+      constexpr std::size_t estimatedNonzerosPerColumn = 16;
+      const std::size_t columnCount = endColumn - firstColumn;
+      const std::size_t estimatedNonzeros =
+          columnCount <= maxNonzeros / estimatedNonzerosPerColumn
+              ? columnCount * estimatedNonzerosPerColumn
+              : maxNonzeros;
+      chunk.rowIndices.reserve(estimatedNonzeros);
+      chunk.values.reserve(estimatedNonzeros);
+
+      std::vector<std::pair<std::size_t, std::complex<double>>> current;
+      std::vector<std::pair<std::size_t, std::complex<double>>> next;
+      std::vector<std::pair<std::size_t, std::complex<double>>> entries;
+      current.reserve(maxBranches);
+      next.reserve(maxBranches);
+      entries.reserve(entryCapacity);
+
+      for (std::size_t column = firstColumn; column < endColumn; ++column) {
+        if (capacityExceeded.load(std::memory_order_relaxed))
+          return;
+        entries.clear();
+        for (const auto &term : terms) {
+          current.clear();
+          current.emplace_back(column, term.coefficient);
+          for (auto factorIter = term.factors.crbegin();
+               factorIter != term.factors.crend(); ++factorIter) {
+            const auto &factor = *factorIter;
+            next.clear();
+            for (const auto &[globalColumn, branchValue] : current) {
+              std::size_t localColumn = 0;
+              for (std::size_t i = 0; i < factor.degrees.size(); ++i) {
+                const auto digit = (globalColumn / factor.globalStrides[i]) %
+                                   factor.extents[i];
+                localColumn += digit * factor.localStrides[i];
+              }
+
+              for (std::size_t i = 0; i < factor.offsets.size(); ++i) {
+                const auto offset = factor.offsets[i];
+                const auto localRow =
+                    static_cast<std::int64_t>(localColumn) - offset;
+                if (localRow < 0 ||
+                    localRow >= static_cast<std::int64_t>(factor.dimension))
+                  continue;
+                const auto diaIndex = offset <= 0
+                                          ? localColumn
+                                          : static_cast<std::size_t>(localRow);
+                const auto matrixValue =
+                    factor.data[i * factor.dimension + diaIndex];
+                if (matrixValue == std::complex<double>{})
+                  continue;
+
+                std::int64_t globalRow =
+                    static_cast<std::int64_t>(globalColumn);
+                for (std::size_t j = 0; j < factor.degrees.size(); ++j) {
+                  const auto columnDigit =
+                      (localColumn / factor.localStrides[j]) %
+                      factor.extents[j];
+                  const auto rowDigit = (static_cast<std::size_t>(localRow) /
+                                         factor.localStrides[j]) %
+                                        factor.extents[j];
+                  globalRow +=
+                      (static_cast<std::int64_t>(rowDigit) -
+                       static_cast<std::int64_t>(columnDigit)) *
+                      static_cast<std::int64_t>(factor.globalStrides[j]);
+                }
+                accumulateBranch(next, static_cast<std::size_t>(globalRow),
+                                 branchValue * matrixValue);
+              }
+            }
+            current.swap(next);
+          }
+          for (const auto &[row, value] : current)
+            accumulateBranch(entries, row, value);
+        }
+
+        std::ranges::sort(entries, [](const auto &left, const auto &right) {
+          return left.first < right.first;
+        });
+        const auto nonzeroCount = static_cast<std::size_t>(
+            std::ranges::count_if(entries, [](const auto &entry) {
+              return entry.second != std::complex<double>{};
+            }));
+        const std::size_t previousCount =
+            totalNonzeros.fetch_add(nonzeroCount, std::memory_order_relaxed);
+        if (previousCount > maxNonzeros ||
+            nonzeroCount > maxNonzeros - previousCount) {
+          capacityExceeded.store(true, std::memory_order_relaxed);
+          return;
+        }
+        for (const auto &[row, value] : entries) {
+          if (value == std::complex<double>{})
+            continue;
+          chunk.rowIndices.emplace_back(static_cast<std::int32_t>(row));
+          chunk.values.emplace_back(value);
+        }
+        chunk.columnOffsets[column - firstColumn + 1] =
+            static_cast<std::int32_t>(chunk.values.size());
+      }
+    } catch (...) {
+      workerErrors[worker] = std::current_exception();
+      capacityExceeded.store(true, std::memory_order_relaxed);
+    }
+  };
+
+  if (workerCount == 1) {
+    buildChunk(0);
+  } else {
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+    for (std::size_t worker = 0; worker < workerCount; ++worker)
+      workers.emplace_back(buildChunk, worker);
+    for (auto &worker : workers)
+      worker.join();
+  }
+  for (const auto &error : workerErrors)
+    if (error)
+      std::rethrow_exception(error);
+  if (capacityExceeded.load(std::memory_order_relaxed) ||
+      totalNonzeros.load(std::memory_order_relaxed) == 0)
+    return std::nullopt;
+
+  FullSystemCsr result;
+  result.rowOffsets.resize(dimension + 1);
+  for (const auto &chunk : chunks)
+    for (const auto row : chunk.rowIndices)
+      ++result.rowOffsets[static_cast<std::size_t>(row) + 1];
+  for (std::size_t row = 0; row < dimension; ++row)
+    result.rowOffsets[row + 1] += result.rowOffsets[row];
+
+  const std::size_t nonzeroCount =
+      totalNonzeros.load(std::memory_order_relaxed);
+  result.columnIndices.resize(nonzeroCount);
+  result.values.resize(nonzeroCount);
+  auto nextRowOffset = result.rowOffsets;
+  for (const auto &chunk : chunks) {
+    const std::size_t columnCount = chunk.columnOffsets.size() - 1;
+    for (std::size_t localColumn = 0; localColumn < columnCount;
+         ++localColumn) {
+      for (std::int32_t index = chunk.columnOffsets[localColumn];
+           index < chunk.columnOffsets[localColumn + 1]; ++index) {
+        const auto row = static_cast<std::size_t>(
+            chunk.rowIndices[static_cast<std::size_t>(index)]);
+        const auto destination = static_cast<std::size_t>(nextRowOffset[row]++);
+        result.columnIndices[destination] =
+            static_cast<std::int32_t>(chunk.firstColumn + localColumn);
+        result.values[destination] =
+            chunk.values[static_cast<std::size_t>(index)];
+      }
+    }
+  }
+  return result;
+}
 } // namespace
 
 // Function to flatten a matrix into a 1D array (column major)
@@ -136,6 +459,26 @@ cudaq::dynamics::CuDensityMatOpConverter::CuDensityMatOpConverter(
       m_maxDiagonalsDiag = maxDiags.value();
     }
   }
+  {
+    const auto maxDimension = getIntEnvVarIfPresent(
+        "CUDAQ_DYNAMICS_MAX_FULL_SYSTEM_SPARSE_DIMENSION");
+    if (maxDimension.has_value()) {
+      CUDAQ_INFO("Setting full-system sparse max dimension to {}.",
+                 maxDimension.value());
+      m_maxFullSystemSparseDimension =
+          static_cast<std::size_t>(maxDimension.value());
+    }
+  }
+
+  {
+    const auto maxBytes =
+        getIntEnvVarIfPresent("CUDAQ_DYNAMICS_MAX_FULL_SYSTEM_SPARSE_BYTES");
+    if (maxBytes.has_value()) {
+      CUDAQ_INFO("Setting full-system sparse max bytes to {}.",
+                 maxBytes.value());
+      m_maxFullSystemSparseBytes = static_cast<std::size_t>(maxBytes.value());
+    }
+  }
 }
 
 void cudaq::dynamics::CuDensityMatOpConverter::clearCallbackContext() {
@@ -156,6 +499,12 @@ cudaq::dynamics::CuDensityMatOpConverter::~CuDensityMatOpConverter() {
   for (auto *buffer : m_deviceBuffers) {
     cudaq::dynamics::DeviceAllocator::free(buffer);
   }
+}
+std::shared_ptr<cudaq::dynamics::CuSparseStateVectorRhs>
+cudaq::dynamics::CuDensityMatOpConverter::getFullSystemSparseOperator(
+    cudensitymatOperator_t op) const {
+  const auto found = m_fullSystemSparseOperators.find(op);
+  return found == m_fullSystemSparseOperators.end() ? nullptr : found->second;
 }
 
 cudensitymatElementaryOperator_t
@@ -376,6 +725,48 @@ cudaq::dynamics::CuDensityMatOpConverter::createProductOperatorTerm(
       make_cuDoubleComplex(1.0, 0.0), cudensitymatScalarCallbackNone,
       cudensitymatScalarGradientCallbackNone));
   return term;
+}
+std::optional<cudensitymatOperator_t>
+cudaq::dynamics::CuDensityMatOpConverter::tryCreateFullSystemSparseOperator(
+    const sum_op<cudaq::matrix_handler> &op,
+    const std::unordered_map<std::string, std::complex<double>> &parameters,
+    const std::vector<int64_t> &modeExtents) {
+  const auto dimension = computeFullSystemDimension(modeExtents);
+  if (cudaq::mpi::is_initialized() && cudaq::mpi::num_ranks() > 1)
+    return std::nullopt;
+
+  if (!dimension.has_value() || dimension.value() == 0 ||
+      dimension.value() > m_maxFullSystemSparseDimension ||
+      m_maxFullSystemSparseBytes == 0)
+    return std::nullopt;
+
+  const auto terms = prepareFullSystemDiaTerms(op, parameters, modeExtents);
+  if (!terms.has_value() || terms->empty())
+    return std::nullopt;
+
+  auto csr = buildFullSystemCsr(terms.value(), dimension.value(),
+                                m_maxFullSystemSparseBytes);
+  if (!csr.has_value())
+    return std::nullopt;
+
+  const std::size_t nonzeroCount = csr->values.size();
+  const std::size_t csrBytes =
+      csr->rowOffsets.size() * sizeof(csr->rowOffsets[0]) +
+      nonzeroCount * (sizeof(csr->columnIndices[0]) + sizeof(csr->values[0]));
+  auto sparseRhs = std::make_shared<CuSparseStateVectorRhs>(
+      dimension.value(), std::move(csr->rowOffsets),
+      std::move(csr->columnIndices), std::move(csr->values));
+
+  // Keep the regular operator as a fallback for distributed and batched states.
+  const auto result =
+      convertToCudensitymatOperator(parameters, op, modeExtents);
+  m_fullSystemSparseOperators.emplace(result, std::move(sparseRhs));
+
+  CUDAQ_INFO(
+      "Materialized a {}-element full-system sparse RHS ({} nonzeros, {} "
+      "CSR bytes).",
+      dimension.value(), nonzeroCount, csrBytes);
+  return result;
 }
 
 cudensitymatOperator_t

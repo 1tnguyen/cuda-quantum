@@ -42,6 +42,7 @@ if (${cuDensityMat_VERSION} VERSION_GREATER_EQUAL "0.4")
     CuDensityMatState.cpp
     CuDensityMatContext.cpp
     CuDensityMatOpConverter.cpp
+    CuSparseStateVectorRhs.cpp
     CuDensityMatCallbackConverter.cpp
     CuDensityMatSuperOpCtor.cpp
     CuDensityMatUtils.cpp
@@ -71,6 +72,7 @@ if (${cuDensityMat_VERSION} VERSION_GREATER_EQUAL "0.4")
                           cuTensor::cuTensor
                           cuTensorNet::cuTensorNet
                           CUDA::cudart_static
+                          CUDA::cusparse
                       )
   target_link_libraries(${LIBRARY_NAME}
                       PUBLIC

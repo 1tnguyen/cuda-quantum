@@ -138,9 +138,11 @@ void dopri5::integrate(double targetTime) {
   auto evaluate = [&](const CuDensityMatState &input, CuDensityMatState &output,
                       double time) {
     auto params = cudmIntHelp::scheduleParamsAt(m_schedule, time);
-    deviceOps.clear(output.get_device_pointer());
+    if (!cudmStepper->overwritesOutput(input.getBatchSize()))
+      deviceOps.clear(output.get_device_pointer());
     cudmStepper->computeImpl(input.get_impl(), output.get_impl(), time, params,
-                             input.getBatchSize());
+                             input.getBatchSize(), input.get_device_pointer(),
+                             output.get_device_pointer());
   };
 
   // TorchDiffeq evaluates f(t0, y0) once, then reuses the final stage of every

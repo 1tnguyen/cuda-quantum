@@ -12,9 +12,13 @@
 #include "cudaq/operators/matrix.h"
 #include <cudensitymat.h>
 #include <deque>
+#include <memory>
+#include <optional>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cudaq::dynamics {
+class CuSparseStateVectorRhs;
 class CuDensityMatOpConverter {
 public:
   CuDensityMatOpConverter(cudensitymatHandle_t handle);
@@ -63,6 +67,9 @@ public:
       const std::vector<int64_t> &modeExtents,
       const std::unordered_map<std::string, std::complex<double>> &parameters);
 
+  std::shared_ptr<CuSparseStateVectorRhs>
+  getFullSystemSparseOperator(cudensitymatOperator_t op) const;
+
   /// @brief Clear the current callback context
   // Callback context may contain Python objects, hence needs to be clear before
   // shutdown to prevent race condition.
@@ -82,6 +89,11 @@ private:
 
   cudensitymatOperatorTerm_t createBatchedProductTerm(
       const std::vector<product_op<cudaq::matrix_handler>> &prodTerms,
+      const std::unordered_map<std::string, std::complex<double>> &parameters,
+      const std::vector<int64_t> &modeExtents);
+
+  std::optional<cudensitymatOperator_t> tryCreateFullSystemSparseOperator(
+      const sum_op<cudaq::matrix_handler> &op,
       const std::unordered_map<std::string, std::complex<double>> &parameters,
       const std::vector<int64_t> &modeExtents);
 
@@ -161,7 +173,12 @@ private:
   std::deque<ScalarCallBackContext> m_scalarCallbacks;
   std::deque<TensorCallBackContext> m_tensorCallbacks;
   std::vector<LiouvillianCacheEntry> m_liouvillianCache;
+  std::unordered_map<cudensitymatOperator_t,
+                     std::shared_ptr<CuSparseStateVectorRhs>>
+      m_fullSystemSparseOperators;
   int m_minDimensionDiag = 2;
   int m_maxDiagonalsDiag = 2;
+  std::size_t m_maxFullSystemSparseDimension = 1UL << 22;
+  std::size_t m_maxFullSystemSparseBytes = 1UL << 30;
 };
 } // namespace cudaq::dynamics

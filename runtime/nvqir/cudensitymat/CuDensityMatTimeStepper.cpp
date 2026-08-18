@@ -10,12 +10,16 @@
 #include "CuDensityMatContext.h"
 #include "CuDensityMatErrorHandling.h"
 #include "CuDensityMatUtils.h"
+#include "CuSparseStateVectorRhs.h"
 #include <map>
 
 namespace cudaq {
 CuDensityMatTimeStepper::CuDensityMatTimeStepper(
     cudensitymatHandle_t handle, cudensitymatOperator_t liouvillian)
-    : m_handle(handle), m_liouvillian(liouvillian) {};
+    : m_handle(handle), m_liouvillian(liouvillian),
+      m_fullSystemSparseRhs(dynamics::Context::getCurrentContext()
+                                ->getOpConverter()
+                                .getFullSystemSparseOperator(liouvillian)) {};
 
 CuDensityMatTimeStepper::~CuDensityMatTimeStepper() {
   for (auto &buffer : m_parameterBuffers) {
@@ -92,7 +96,8 @@ state CuDensityMatTimeStepper::compute(
   auto next_state = CuDensityMatState::zero_like(state);
   assert(next_state.getBatchSize() == state.getBatchSize());
   computeImpl(state.get_impl(), next_state.get_impl(), t, parameters,
-              state.getBatchSize());
+              state.getBatchSize(), state.get_device_pointer(),
+              next_state.get_device_pointer());
   return cudaq::state(
       std::make_unique<CuDensityMatState>(std::move(next_state)).release());
 }
@@ -100,7 +105,13 @@ state CuDensityMatTimeStepper::compute(
 void CuDensityMatTimeStepper::computeImpl(
     cudensitymatState_t inState, cudensitymatState_t outState, double t,
     const std::unordered_map<std::string, std::complex<double>> &parameters,
-    int64_t batchSize) {
+    int64_t batchSize, void *inputData, void *outputData) {
+  if (overwritesOutput(batchSize)) {
+    cudaq::dynamics::PerfMetricScopeTimer metricTimer("cusparseSpMV");
+    m_fullSystemSparseRhs->compute(inputData, outputData);
+    return;
+  }
+
   // The prepared action is valid for any input and output states with the same
   // shape, kind, and factorization. Reuse it across integration stages.
   if (!m_workspace || m_preparedBatchSize != batchSize) {
@@ -175,6 +186,10 @@ void CuDensityMatTimeStepper::computeImpl(
     HANDLE_CUDA_ERROR(cudaEventRecord(parameterBuffer->ready, 0));
     parameterBuffer->inUse = true;
   }
+}
+
+bool CuDensityMatTimeStepper::overwritesOutput(int64_t batchSize) const {
+  return m_fullSystemSparseRhs && batchSize == 1;
 }
 
 } // namespace cudaq

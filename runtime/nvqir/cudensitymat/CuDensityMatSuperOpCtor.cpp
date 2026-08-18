@@ -330,8 +330,14 @@ cudaq::dynamics::CuDensityMatOpConverter::constructLiouvillian(
     for (const auto &ham : hamOperators) {
       liouvillians.emplace_back(ham * std::complex<double>(0.0, -1.0));
     }
-    liouvillian =
-        convertToCudensitymatOperator(parameters, liouvillians, modeExtents);
+    const auto fullSystemSparse =
+        batchSize == 1 ? tryCreateFullSystemSparseOperator(
+                             liouvillians.front(), parameters, modeExtents)
+                       : std::nullopt;
+    liouvillian = fullSystemSparse.has_value()
+                      ? fullSystemSparse.value()
+                      : convertToCudensitymatOperator(parameters, liouvillians,
+                                                      modeExtents);
   } else {
     CUDAQ_INFO("Construct density matrix Liouvillian");
     HANDLE_CUDM_ERROR(cudensitymatCreateOperator(

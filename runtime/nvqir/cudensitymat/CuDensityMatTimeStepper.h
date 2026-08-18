@@ -11,7 +11,12 @@
 #include "CuDensityMatState.h"
 #include "cudaq/algorithms/base_time_stepper.h"
 #include <cudensitymat.h>
+#include <memory>
 #include <vector>
+
+namespace cudaq::dynamics {
+class CuSparseStateVectorRhs;
+}
 
 namespace cudaq {
 class CuDensityMatTimeStepper : public base_time_stepper {
@@ -29,7 +34,9 @@ public:
   void computeImpl(
       cudensitymatState_t inState, cudensitymatState_t outState, double t,
       const std::unordered_map<std::string, std::complex<double>> &parameters,
-      int64_t batchSize);
+      int64_t batchSize, void *inputData, void *outputData);
+
+  bool overwritesOutput(int64_t batchSize) const;
 
 private:
   struct ParameterBuffer {
@@ -50,5 +57,6 @@ private:
   int64_t m_preparedBatchSize{0};
   std::vector<ParameterBuffer> m_parameterBuffers;
   std::size_t m_nextParameterBuffer{0};
+  std::shared_ptr<dynamics::CuSparseStateVectorRhs> m_fullSystemSparseRhs;
 };
 } // namespace cudaq

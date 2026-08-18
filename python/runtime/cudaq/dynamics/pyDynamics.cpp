@@ -154,7 +154,9 @@ NB_MODULE(nvqir_dynamics_bindings, m) {
                     castOutputSimState->getBatchSize());
              self.computeImpl(castInputSimState->get_impl(),
                               castOutputSimState->get_impl(), t, params,
-                              castInputSimState->getBatchSize());
+                              castInputSimState->getBatchSize(),
+                              castInputSimState->get_device_pointer(),
+                              castOutputSimState->get_device_pointer());
            });
 
   // System dynamics data class
