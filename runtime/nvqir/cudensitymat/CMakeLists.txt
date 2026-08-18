@@ -25,6 +25,9 @@ endif()
 # We need cudensitymat v0.4.0
 if (${cuDensityMat_VERSION} VERSION_GREATER_EQUAL "0.4")
 
+  set(DOPRI5_SOURCE_DIR
+      "${CMAKE_SOURCE_DIR}/pulse/core/runtime/cudm/integrators")
+
   add_library(${LIBRARY_NAME} SHARED
     CuDensityMatSim.cpp
     mpi_support.cpp
@@ -32,6 +35,8 @@ if (${cuDensityMat_VERSION} VERSION_GREATER_EQUAL "0.4")
     RungeKuttaIntegrator.cpp
     CrankNicolsonIntegrator.cpp
     MagnusIntegrator.cpp
+    ${DOPRI5_SOURCE_DIR}/AdaptiveIntegrator.cpp
+    ${DOPRI5_SOURCE_DIR}/support/adaptive_integrator_kernels.cu
     CuDensityMatExpectation.cpp
     CuDensityMatEvolution.cpp
     CuDensityMatState.cpp

@@ -27,7 +27,9 @@ def set_up_target():
     cudaq.reset_target()
 
 
-all_integrator_classes = [RungeKuttaIntegrator, ScipyZvodeIntegrator]
+all_integrator_classes = [
+    DoPri5Integrator, RungeKuttaIntegrator, ScipyZvodeIntegrator
+]
 all_models = [
     TestCavityModel, TestCavityModelTimeDependentHam,
     TestCavityModelTimeDependentCollapseOp, TestCompositeSystems,

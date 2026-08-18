@@ -144,6 +144,9 @@ void cudaq::dynamics::CuDensityMatOpConverter::clearCallbackContext() {
 }
 
 cudaq::dynamics::CuDensityMatOpConverter::~CuDensityMatOpConverter() {
+  for (auto op : m_operators)
+    cudensitymatDestroyOperator(op);
+
   for (auto term : m_operatorTerms)
     cudensitymatDestroyOperatorTerm(term);
 
@@ -399,6 +402,7 @@ cudaq::dynamics::CuDensityMatOpConverter::convertToCudensitymatOperator(
   HANDLE_CUDM_ERROR(cudensitymatCreateOperator(
       m_handle, static_cast<int32_t>(modeExtents.size()), modeExtents.data(),
       &cudmOperator));
+  m_operators.emplace(cudmOperator);
 
   appendToCudensitymatOperator(cudmOperator, parameters, ops, modeExtents,
                                /*duality=*/0);

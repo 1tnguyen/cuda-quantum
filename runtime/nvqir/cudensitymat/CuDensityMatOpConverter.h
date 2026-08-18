@@ -23,7 +23,7 @@ public:
   /// @param parameters The parameters of the operator.
   /// @param ops The matrix operator to convert.
   /// @param modeExtents The extents of the modes.
-  /// @return The converted operator.
+  /// @return The converted operator. The converter retains ownership.
   cudensitymatOperator_t convertToCudensitymatOperator(
       const std::unordered_map<std::string, std::complex<double>> &parameters,
       const std::vector<sum_op<cudaq::matrix_handler>> &ops,
@@ -43,7 +43,8 @@ public:
   /// @param modeExtents The extents of the modes.
   /// @param parameters The parameters of the operators.
   /// @param isMasterEquation Whether the Liouvillian is a master equation.
-  /// @return The constructed Liouvillian operator.
+  /// @return The constructed Liouvillian operator. The converter retains
+  /// ownership.
   cudensitymatOperator_t constructLiouvillian(
       const std::vector<sum_op<cudaq::matrix_handler>> &hamOperators,
       const std::vector<std::vector<sum_op<cudaq::matrix_handler>>>
@@ -55,7 +56,8 @@ public:
   /// @param superOps The super operators.
   /// @param modeExtents The extents of the modes.
   /// @param parameters The parameters of the operators.
-  /// @return The constructed Liouvillian operator.
+  /// @return The constructed Liouvillian operator. The converter retains
+  /// ownership.
   cudensitymatOperator_t constructLiouvillian(
       const std::vector<super_op> &superOps,
       const std::vector<int64_t> &modeExtents,
@@ -69,6 +71,15 @@ public:
   ~CuDensityMatOpConverter();
 
 private:
+  struct LiouvillianCacheEntry {
+    std::vector<sum_op<cudaq::matrix_handler>> hamiltonians;
+    std::vector<std::vector<sum_op<cudaq::matrix_handler>>> collapseOperators;
+    std::vector<int64_t> modeExtents;
+    std::unordered_map<std::string, std::complex<double>> parameters;
+    bool isMasterEquation;
+    cudensitymatOperator_t liouvillian;
+  };
+
   cudensitymatOperatorTerm_t createBatchedProductTerm(
       const std::vector<product_op<cudaq::matrix_handler>> &prodTerms,
       const std::unordered_map<std::string, std::complex<double>> &parameters,
@@ -143,12 +154,14 @@ private:
   cudensitymatHandle_t m_handle;
   // Things that we create that need to be cleaned up.
   // Use a set so that it's safe to push pointer multiple times.
+  std::unordered_set<cudensitymatOperator_t> m_operators;
   std::unordered_set<void *> m_deviceBuffers;
   std::unordered_set<cudensitymatElementaryOperator_t> m_elementaryOperators;
   std::unordered_set<cudensitymatOperatorTerm_t> m_operatorTerms;
   std::deque<ScalarCallBackContext> m_scalarCallbacks;
   std::deque<TensorCallBackContext> m_tensorCallbacks;
-  int m_minDimensionDiag = 4;
-  int m_maxDiagonalsDiag = 1;
+  std::vector<LiouvillianCacheEntry> m_liouvillianCache;
+  int m_minDimensionDiag = 2;
+  int m_maxDiagonalsDiag = 2;
 };
 } // namespace cudaq::dynamics

@@ -36,6 +36,30 @@ def _get_bindings():
     return _bindings
 
 
+def _build_system_and_schedule(dimensions: Mapping[int,
+                                                   int], schedule: Schedule,
+                               hamiltonian, collapse_operators):
+    """Build native system and schedule objects for ``dopri5``."""
+    bindings = _get_bindings()
+    system_ = bindings.SystemDynamics()
+    system_.modeExtents = [dimensions[d] for d in range(len(dimensions))]
+    if not isinstance(hamiltonian, Sequence):
+        hamiltonian = [hamiltonian]
+        if len(collapse_operators) > 0:
+            collapse_operators = [
+                MatrixOperator(c_op) for c_op in collapse_operators
+            ]
+            collapse_operators = [collapse_operators]
+
+    if isinstance(hamiltonian[0], SuperOperator):
+        system_.superOp = hamiltonian
+    else:
+        system_.hamiltonian = hamiltonian
+        system_.collapseOps = collapse_operators
+    schedule_ = bindings.Schedule(schedule._steps, list(schedule._parameters))
+    return system_, schedule_
+
+
 class cuDensityMatTimeStepper(BaseTimeStepper[State]):
     # Thin wrapper around the `TimeStepper` C++ bindings
     def __init__(self, schedule, ham, collapsed_ops, dims, is_master_equation):
@@ -138,3 +162,64 @@ class RungeKuttaIntegrator(BaseIntegrator[State]):
 
     def integrate(self, t):
         self.rk_integrator.integrate(t)
+
+
+class DoPri5Integrator(BaseIntegrator[State]):
+    """Dormand-Prince RK5(4) adaptive-timestep integrator.
+
+    Exposes the native ``dopri5`` integrator, which selects its own step size
+    from an embedded RK5(4) error estimate. Options: ``rtol``, ``atol``,
+    ``dt_initial``, ``dt_min``, ``dt_max``.
+    """
+    rtol = 1e-6
+    atol = 1e-8
+    dt_initial = 0.01
+    dt_min = 1e-6
+    dt_max = 1.0
+
+    def __init__(self, **kwargs):
+        if not has_cupy:
+            raise ImportError('CuPy is required to use integrators.')
+        super().__init__(**kwargs)
+        self.integrator = _get_bindings().integrators.dopri5(
+            rtol=self.rtol,
+            atol=self.atol,
+            dt_initial=self.dt_initial,
+            dt_min=self.dt_min,
+            dt_max=self.dt_max)
+
+    def is_native(self):
+        return True
+
+    def support_distributed_state(self):
+        return True
+
+    def __post_init__(self):
+        for opt in ("rtol", "atol", "dt_initial", "dt_min", "dt_max"):
+            if opt in self.integrator_options:
+                setattr(self, opt, self.integrator_options[opt])
+        if self.rtol <= 0.0 or self.atol <= 0.0:
+            raise ValueError("'rtol' and 'atol' must be positive numbers")
+        if self.dt_min <= 0.0 or self.dt_max <= 0.0 or self.dt_min > self.dt_max:
+            raise ValueError("require 0 < 'dt_min' <= 'dt_max'")
+
+    def set_state(self, state, t):
+        self.integrator.setState(state, t)
+
+    def get_state(self):
+        return self.integrator.getState()
+
+    def set_system(self,
+                   dimensions: Mapping[int, int],
+                   schedule: Schedule,
+                   hamiltonian: Operator | SuperOperator | Sequence[Operator] |
+                   Sequence[SuperOperator],
+                   collapse_operators: Sequence[Operator] |
+                   Sequence[Sequence[Operator]] = []):
+        system_, schedule_ = _build_system_and_schedule(dimensions, schedule,
+                                                        hamiltonian,
+                                                        collapse_operators)
+        self.integrator.setSystem(system_, schedule_)
+
+    def integrate(self, t):
+        self.integrator.integrate(t)

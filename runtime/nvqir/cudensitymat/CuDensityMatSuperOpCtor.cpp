@@ -290,6 +290,21 @@ cudaq::dynamics::CuDensityMatOpConverter::constructLiouvillian(
         "Cannot construct Liouvillian operator from an empty list of "
         "Hamiltonians.");
   }
+  const auto cached =
+      std::find_if(m_liouvillianCache.begin(), m_liouvillianCache.end(),
+                   [&](const LiouvillianCacheEntry &entry) {
+                     return hamOperators == entry.hamiltonians &&
+                            collapseOperators == entry.collapseOperators &&
+                            entry.modeExtents == modeExtents &&
+                            entry.parameters == parameters &&
+                            entry.isMasterEquation == isMasterEquation;
+                   });
+  if (cached != m_liouvillianCache.end())
+    return cached->liouvillian;
+
+  const std::size_t scalarCallbackCount = m_scalarCallbacks.size();
+  const std::size_t tensorCallbackCount = m_tensorCallbacks.size();
+
   const auto batchSize = hamOperators.size();
   const auto numberProductTerms = hamOperators[0].num_terms();
   // Check if all Hamiltonians have the same number of product terms
@@ -307,6 +322,7 @@ cudaq::dynamics::CuDensityMatOpConverter::constructLiouvillian(
                     return ops.empty();
                   });
 
+  cudensitymatOperator_t liouvillian;
   if (!isMasterEquation && noCollapseOperators) {
     CUDAQ_INFO("Construct state vector Liouvillian");
     std::vector<sum_op<cudaq::matrix_handler>> liouvillians;
@@ -314,13 +330,14 @@ cudaq::dynamics::CuDensityMatOpConverter::constructLiouvillian(
     for (const auto &ham : hamOperators) {
       liouvillians.emplace_back(ham * std::complex<double>(0.0, -1.0));
     }
-    return convertToCudensitymatOperator(parameters, liouvillians, modeExtents);
+    liouvillian =
+        convertToCudensitymatOperator(parameters, liouvillians, modeExtents);
   } else {
     CUDAQ_INFO("Construct density matrix Liouvillian");
-    cudensitymatOperator_t liouvillian;
     HANDLE_CUDM_ERROR(cudensitymatCreateOperator(
         m_handle, static_cast<int32_t>(modeExtents.size()), modeExtents.data(),
         &liouvillian));
+    m_operators.emplace(liouvillian);
     // Append an operator term to the operator (super-operator)
     // Handle the Hamiltonian
     const std::map<std::string, std::complex<double>> sortedParameters(
@@ -365,9 +382,18 @@ cudaq::dynamics::CuDensityMatOpConverter::constructLiouvillian(
         }
       }
     }
-
-    return liouvillian;
   }
+
+  // Callback contexts are cleared after every evolve invocation, so only
+  // callback-free operators can safely outlive that boundary. Reusing their
+  // native operator ID lets cuDensityMat retrieve the prepared compute plan
+  // for subsequent structurally identical evolutions.
+  if (m_scalarCallbacks.size() == scalarCallbackCount &&
+      m_tensorCallbacks.size() == tensorCallbackCount) {
+    m_liouvillianCache.push_back({hamOperators, collapseOperators, modeExtents,
+                                  parameters, isMasterEquation, liouvillian});
+  }
+  return liouvillian;
 }
 
 cudensitymatOperator_t
@@ -385,6 +411,7 @@ cudaq::dynamics::CuDensityMatOpConverter::constructLiouvillian(
   HANDLE_CUDM_ERROR(cudensitymatCreateOperator(
       m_handle, static_cast<int32_t>(modeExtents.size()), modeExtents.data(),
       &liouvillian));
+  m_operators.emplace(liouvillian);
   // Append an operator term to the operator (super-operator)
   // Handle the Hamiltonian
   const std::map<std::string, std::complex<double>> sortedParameters(

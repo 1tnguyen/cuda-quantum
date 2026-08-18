@@ -110,5 +110,52 @@ private:
   std::optional<double> m_dt;
 };
 
+/// @brief Dormand-Prince RK5(4) adaptive-timestep integrator (`dopri5`).
+class dopri5 : public cudaq::base_integrator {
+public:
+  /// @brief Default relative tolerance for the embedded error estimate.
+  static constexpr double default_rtol = 1e-6;
+  /// @brief Default absolute tolerance for the embedded error estimate.
+  static constexpr double default_atol = 1e-8;
+
+  /// @brief Constructor.
+  /// @param rtol Relative tolerance for the embedded RK5(4) error estimate.
+  /// @param atol Absolute tolerance for the embedded RK5(4) error estimate.
+  /// @param dt_initial Initial adaptive step size.
+  /// @param dt_min Minimum allowed adaptive step size.
+  /// @param dt_max Maximum allowed adaptive step size.
+  explicit dopri5(double rtol = default_rtol, double atol = default_atol,
+                  double dt_initial = 0.01, double dt_min = 1e-6,
+                  double dt_max = 1.0);
+
+  void integrate(double targetTime) override;
+  void setState(const cudaq::state &initialState, double t0) override;
+  std::pair<double, cudaq::state> getState() override;
+  std::shared_ptr<base_integrator> clone() override;
+
+  /// @brief Adaptive-stepping statistics for diagnostics and tests.
+  struct Stats {
+    std::size_t accepted_steps = 0;
+    std::size_t rejected_steps = 0;
+    double min_dt_used = 1e300;
+    double max_dt_used = 0.0;
+    double avg_dt = 0.0;
+  };
+
+  Stats getStats() const { return m_stats; }
+  void resetStats() { m_stats = Stats{}; }
+
+private:
+  double m_rtol;
+  double m_atol;
+  double m_dt_initial;
+  double m_dt;
+  double m_dt_min;
+  double m_dt_max;
+  double m_t;
+  std::shared_ptr<cudaq::state> m_state;
+  Stats m_stats;
+};
+
 } // namespace integrators
 } // namespace cudaq

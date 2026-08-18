@@ -579,6 +579,7 @@ CuDensityMatState CuDensityMatState::zero_like(const CuDensityMatState &other) {
   state.dimension = other.dimension;
   state.isDensityMatrix = other.isDensityMatrix;
   state.batchSize = other.batchSize;
+  state.singleStateDimension = other.singleStateDimension;
   const size_t dataSize = state.dimension * sizeof(std::complex<double>);
   state.devicePtr = cudaq::dynamics::DeviceAllocator::allocate(dataSize);
   HANDLE_CUDA_ERROR(cudaMemset(state.devicePtr, 0, dataSize));

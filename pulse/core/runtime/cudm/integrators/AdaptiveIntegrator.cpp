@@ -8,13 +8,13 @@
 
 #include "CuDensityMatIntegratorBase.h"
 #include "CuDensityMatUtils.h"
+#include "support/adaptive_integrator_kernels.h"
 #include "cudaq/algorithms/integrator.h"
+#include "cudaq/cudaq_mpi.h"
 #include "cudaq/runtime/logger/logger.h"
 #include <array>
 #include <cmath>
-#include <complex>
 #include <stdexcept>
-#include <vector>
 
 namespace cudaq::integrators {
 
@@ -46,45 +46,11 @@ constexpr std::array<std::array<double, 6>, 7> kA = {
      {35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0, -2187.0 / 6784.0,
       11.0 / 84.0}}};
 
-// 5th-order solution weights.
-constexpr std::array<double, 7> kB5 = {
-    35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0, -2187.0 / 6784.0,
-    11.0 / 84.0,  0.0};
-
-// Embedded 4th-order solution weights.
-constexpr std::array<double, 7> kB4 = {5179.0 / 57600.0,    0.0,
-                                       7571.0 / 16695.0,    393.0 / 640.0,
-                                       -92097.0 / 339200.0, 187.0 / 2100.0,
-                                       1.0 / 40.0};
-
-// Step-size controller parameters.
+// Step-size controller parameters. These match torchdiffeq's Dopri5 defaults.
 constexpr double kSafetyFactor = 0.9;
-constexpr double kMaxScale = 5.0; // Max step-size growth per accepted step.
-constexpr double kMinScale = 0.2; // Max step-size shrink per rejected step.
-constexpr double kOrder = 5.0;    // Method order used for step adaptation.
-
-/// @brief Compute the scaled RMS error norm between the embedded solutions.
-///
-/// Returns a dimensionless error scaled so that a value <= 1 means the step
-/// meets the requested (rtol, atol) tolerance.
-double computeErrorNorm(const CuDensityMatState &y5,
-                        const CuDensityMatState &y4, double rtol, double atol) {
-  const std::size_t n = y5.getTensor().get_num_elements();
-  std::vector<std::complex<double>> data5(n), data4(n);
-  y5.toHost(data5.data(), data5.size());
-  y4.toHost(data4.data(), data4.size());
-
-  double errNormSq = 0.0, y5NormSq = 0.0, y4NormSq = 0.0;
-  for (std::size_t i = 0; i < n; ++i) {
-    errNormSq += std::norm(data5[i] - data4[i]);
-    y5NormSq += std::norm(data5[i]);
-    y4NormSq += std::norm(data4[i]);
-  }
-  const double errNorm = std::sqrt(errNormSq);
-  const double yNorm = std::sqrt(std::max(y5NormSq, y4NormSq));
-  const double scale = atol + rtol * yNorm;
-  return errNorm / (scale * std::sqrt(static_cast<double>(n)));
-}
+constexpr double kMaxScale = 10.0;
+constexpr double kMinScale = 0.2;
+constexpr double kOrder = 5.0;
 
 /// @brief Select the next step size from the scaled error estimate.
 double adaptStepSize(double errorNorm, double dtCurrent, double dtMin,
@@ -94,7 +60,8 @@ double adaptStepSize(double errorNorm, double dtCurrent, double dtMin,
     factor = kMaxScale;
   } else {
     factor = kSafetyFactor * std::pow(1.0 / errorNorm, 1.0 / kOrder);
-    factor = std::max(kMinScale, std::min(kMaxScale, factor));
+    const double minimumFactor = errorNorm < 1.0 ? 1.0 : kMinScale;
+    factor = std::max(minimumFactor, std::min(kMaxScale, factor));
   }
   return std::max(dtMin, std::min(dtMax, dtCurrent * factor));
 }
@@ -102,8 +69,8 @@ double adaptStepSize(double errorNorm, double dtCurrent, double dtMin,
 
 dopri5::dopri5(double rtol, double atol, double dt_initial, double dt_min,
                double dt_max)
-    : m_rtol(rtol), m_atol(atol), m_dt(dt_initial), m_dt_min(dt_min),
-      m_dt_max(dt_max), m_t(0.0) {
+    : m_rtol(rtol), m_atol(atol), m_dt_initial(dt_initial), m_dt(dt_initial),
+      m_dt_min(dt_min), m_dt_max(dt_max), m_t(0.0) {
   if (rtol <= 0.0 || atol <= 0.0)
     throw std::invalid_argument(
         "dopri5 integrator requires positive rtol and atol.");
@@ -114,8 +81,9 @@ dopri5::dopri5(double rtol, double atol, double dt_initial, double dt_min,
 
 std::shared_ptr<base_integrator> dopri5::clone() {
   auto cloned = std::make_shared<cudaq::integrators::dopri5>(
-      m_rtol, m_atol, m_dt, m_dt_min, m_dt_max);
+      m_rtol, m_atol, m_dt_initial, m_dt_min, m_dt_max);
   cloned->m_t = this->m_t;
+  cloned->m_dt = this->m_dt;
   cloned->m_state = this->m_state;
   cloned->m_system = this->m_system;
   cloned->m_schedule = this->m_schedule;
@@ -125,6 +93,7 @@ std::shared_ptr<base_integrator> dopri5::clone() {
 
 void dopri5::setState(const cudaq::state &initialState, double t0) {
   cudmIntHelp::setState(m_state, m_t, initialState, t0);
+  m_dt = m_dt_initial;
   resetStats();
 }
 
@@ -135,6 +104,48 @@ std::pair<double, cudaq::state> dopri5::getState() {
 void dopri5::integrate(double targetTime) {
   cudaq::dynamics::PerfMetricScopeTimer metricTimer("dopri5::integrate");
   cudmIntHelp::ensureStepper(m_stepper, m_state, m_system, m_schedule);
+
+  if (m_t >= targetTime)
+    return;
+
+  auto *cudmStepper = dynamic_cast<CuDensityMatTimeStepper *>(m_stepper.get());
+  if (!cudmStepper)
+    throw std::runtime_error("dopri5 requires a cuDensityMat time stepper.");
+
+  auto current = CuDensityMatState::clone(*cudmIntHelp::asCudmState(*m_state));
+  auto candidate = std::make_unique<CuDensityMatState>(
+      CuDensityMatState::zero_like(*current));
+  std::array<std::unique_ptr<CuDensityMatState>, 7> stages;
+  for (auto &stage : stages)
+    stage = std::make_unique<CuDensityMatState>(
+        CuDensityMatState::zero_like(*current));
+
+  const std::size_t elementCount = current->getTensor().get_num_elements();
+  detail::Dopri5DeviceOps deviceOps(elementCount);
+
+  const bool isDistributed =
+      cudaq::dynamics::Context::getCurrentContext()->isDistributed();
+  std::size_t globalElementCount = elementCount;
+  if (isDistributed) {
+    std::size_t stateDimension = 1;
+    for (const auto extent : current->get_hilbert_space_dims())
+      stateDimension *= static_cast<std::size_t>(extent);
+    globalElementCount = stateDimension * current->getBatchSize();
+    if (current->is_density_matrix())
+      globalElementCount *= stateDimension;
+  }
+
+  auto evaluate = [&](const CuDensityMatState &input, CuDensityMatState &output,
+                      double time) {
+    auto params = cudmIntHelp::scheduleParamsAt(m_schedule, time);
+    deviceOps.clear(output.get_device_pointer());
+    cudmStepper->computeImpl(input.get_impl(), output.get_impl(), time, params,
+                             input.getBatchSize());
+  };
+
+  // TorchDiffeq evaluates f(t0, y0) once, then reuses the final stage of every
+  // accepted Dormand-Prince step as the first stage of the next step (FSAL).
+  evaluate(*current, *stages[0], m_t);
 
   // Guard against runaway step rejection (e.g. dt driven to dt_min).
   constexpr std::size_t MAX_ITERATIONS = 100000;
@@ -147,50 +158,50 @@ void dopri5::integrate(double targetTime) {
           "convergence issue or step size driven below dt_min.");
 
     const double dt = std::min(m_dt, targetTime - m_t);
-    auto &y = *cudmIntHelp::asCudmState(*m_state);
 
-    // Evaluate the seven Dormand-Prince stages. Stage j uses the state
-    // y + dt * sum_{i<j} a[j][i] k_i, sampled at time t + c[j] dt.
-    std::array<std::shared_ptr<cudaq::state>, 7> kStates;
-    auto evalStage = [&](int j, CuDensityMatState &stageInput) {
-      auto params =
-          cudmIntHelp::scheduleParamsAt(m_schedule, m_t + kNodes[j] * dt);
-      cudaq::state stageState(CuDensityMatState::clone(stageInput).release());
-      auto result =
-          m_stepper->compute(stageState, m_t + kNodes[j] * dt, params);
-      kStates[j] = std::make_shared<cudaq::state>(std::move(result));
-    };
-
-    // k1 = f(t, y)
-    evalStage(0, y);
-    auto stageK = [&](int j) -> CuDensityMatState & {
-      return *cudmIntHelp::asCudmState(*kStates[j]);
-    };
-
+    // Stage zero is the cached derivative. Each remaining stage is assembled
+    // with one fused device kernel and evaluated into a preallocated buffer.
     for (int j = 1; j < 7; ++j) {
-      auto stageInput = CuDensityMatState::clone(y);
+      std::array<const void *, 6> stagePointers{};
       for (int i = 0; i < j; ++i)
-        if (kA[j][i] != 0.0)
-          stageInput->accumulate_inplace(stageK(i), dt * kA[j][i]);
-      evalStage(j, *stageInput);
+        stagePointers[i] = stages[i]->get_device_pointer();
+      deviceOps.combineStage(candidate->get_device_pointer(),
+                             current->get_device_pointer(), stagePointers,
+                             kA[j], dt);
+      evaluate(*candidate, *stages[j], m_t + kNodes[j] * dt);
     }
 
-    // Embedded 5th- and 4th-order solutions.
-    auto y5 = CuDensityMatState::clone(y);
-    auto y4 = CuDensityMatState::clone(y);
-    for (int j = 0; j < 7; ++j) {
-      if (kB5[j] != 0.0)
-        y5->accumulate_inplace(stageK(j), dt * kB5[j]);
-      if (kB4[j] != 0.0)
-        y4->accumulate_inplace(stageK(j), dt * kB4[j]);
-    }
+    // The seventh stage input is also the fifth-order solution because the
+    // final tableau row equals the solution weights. Compute TorchDiffeq's
+    // Shampine error estimate directly from the stage derivatives on device.
+    std::array<const void *, 7> stagePointers;
+    for (int j = 0; j < 7; ++j)
+      stagePointers[j] = stages[j]->get_device_pointer();
 
-    const double errorNorm = computeErrorNorm(*y5, *y4, m_rtol, m_atol);
+    double errorNorm;
+    {
+      cudaq::dynamics::PerfMetricScopeTimer errorTimer(
+          "dopri5::error_norm.device");
+      errorNorm = deviceOps.errorRatio(current->get_device_pointer(),
+                                       candidate->get_device_pointer(),
+                                       stagePointers, dt, m_rtol, m_atol);
+      if (isDistributed) {
+        const double localErrorSum =
+            errorNorm * errorNorm * static_cast<double>(elementCount);
+        const double globalErrorSum =
+            cudaq::mpi::all_reduce(localErrorSum, std::plus<double>());
+        errorNorm =
+            std::sqrt(globalErrorSum / static_cast<double>(globalElementCount));
+      }
+    }
     const double dtNext = adaptStepSize(errorNorm, dt, m_dt_min, m_dt_max);
-    const bool accept = (errorNorm <= 1.0);
+    const bool accept = errorNorm <= 1.0 || dt <= m_dt_min;
 
     if (accept) {
-      m_state = std::make_shared<cudaq::state>(y5.release());
+      std::swap(current, candidate);
+      // k7 = f(t + dt, y5) becomes the next step's k1. The old k1 buffer is
+      // recycled for the next k7 output.
+      std::swap(stages[0], stages[6]);
       m_t += dt;
       m_dt = dtNext;
       ++m_stats.accepted_steps;
@@ -203,6 +214,8 @@ void dopri5::integrate(double targetTime) {
       ++m_stats.rejected_steps;
     }
   }
+
+  m_state = std::make_shared<cudaq::state>(current.release());
 }
 
 } // namespace cudaq::integrators

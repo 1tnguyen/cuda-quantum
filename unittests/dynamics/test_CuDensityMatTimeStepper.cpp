@@ -61,6 +61,20 @@ TEST_F(CuDensityMatTimeStepperTest, Initialization) {
   ASSERT_FALSE(castSimState->is_density_matrix());
 }
 
+TEST_F(CuDensityMatTimeStepperTest, ReuseConstantLiouvillian) {
+  const std::vector<int64_t> dims = {4};
+  const sum_op<matrix_handler> hamiltonian(boson_op::number(0));
+  auto &converter =
+      cudaq::dynamics::Context::getCurrentContext()->getOpConverter();
+
+  const auto first =
+      converter.constructLiouvillian({hamiltonian}, {}, dims, {}, false);
+  const auto second =
+      converter.constructLiouvillian({hamiltonian}, {}, dims, {}, false);
+
+  EXPECT_EQ(first, second);
+}
+
 // Test a single compute step
 TEST_F(CuDensityMatTimeStepperTest, ComputeStep) {
   EXPECT_NO_THROW(time_stepper_->compute(state_, 0.0, {}));
@@ -112,7 +126,6 @@ TEST_F(CuDensityMatTimeStepperTest, ComputeStepCheckOutput) {
   for (std::size_t i = 0; i < expectedOutputState.size(); ++i) {
     EXPECT_TRUE(std::abs(expectedOutputState[i] - outputStateVec[i]) < 1e-12);
   }
-  HANDLE_CUDM_ERROR(cudensitymatDestroyOperator(cudmOp));
 }
 
 TEST_F(CuDensityMatTimeStepperTest, TimeSteppingWithLindblad) {
@@ -147,8 +160,6 @@ TEST_F(CuDensityMatTimeStepperTest, TimeSteppingWithLindblad) {
   EXPECT_NEAR(
       std::abs(output_state_vec[5 * 10 + 5] - std::complex<double>(-5.0, 0.0)),
       0.0, 1e-12);
-
-  HANDLE_CUDM_ERROR(cudensitymatDestroyOperator(cudm_lindblad_op));
 }
 
 TEST_F(CuDensityMatTimeStepperTest, CheckScalarCallback) {
@@ -195,7 +206,6 @@ TEST_F(CuDensityMatTimeStepperTest, CheckScalarCallback) {
   for (std::size_t i = 0; i < expectedOutputState.size(); ++i) {
     EXPECT_TRUE(std::abs(expectedOutputState[i] - outputStateVec[i]) < 1e-12);
   }
-  HANDLE_CUDM_ERROR(cudensitymatDestroyOperator(cudmOp));
 }
 
 TEST_F(CuDensityMatTimeStepperTest, CheckTensorCallback) {
@@ -253,7 +263,6 @@ TEST_F(CuDensityMatTimeStepperTest, CheckTensorCallback) {
   for (std::size_t i = 0; i < expectedOutputState.size(); ++i) {
     EXPECT_TRUE(std::abs(expectedOutputState[i] - outputStateVec[i]) < 1e-12);
   }
-  HANDLE_CUDM_ERROR(cudensitymatDestroyOperator(cudmOp));
 }
 
 static CuDensityMatState *asCudmState(cudaq::state &cudaqState) {
@@ -295,7 +304,6 @@ TEST_F(CuDensityMatTimeStepperTest, ComputeOperatorOrder) {
 
   std::vector<std::complex<double>> outputStateVec(4);
   outputState.to_host(outputStateVec.data(), outputStateVec.size());
-  HANDLE_CUDM_ERROR(cudensitymatDestroyOperator(cudmOp));
   for (std::size_t i = 0; i < expectedOutputStateVec.size(); ++i) {
     std::cout << "Result = " << outputStateVec[i]
               << "; vs. expected = " << expectedOutputStateVec[i] << "\n";
@@ -334,7 +342,6 @@ TEST_F(CuDensityMatTimeStepperTest, ComputeOperatorOrderDensityMatrix) {
   auto outputState = time_stepper->compute(inputState, 0.0, {});
   std::vector<std::complex<double>> outputStateVec(initialState.size());
   outputState.to_host(outputStateVec.data(), outputStateVec.size());
-  HANDLE_CUDM_ERROR(cudensitymatDestroyOperator(cudmOp));
   for (std::size_t i = 0; i < outputStateVec.size(); ++i) {
     const auto col = i / N;
     const auto row = i % N;

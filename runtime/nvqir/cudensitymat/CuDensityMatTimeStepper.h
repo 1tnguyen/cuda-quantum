@@ -11,12 +11,17 @@
 #include "CuDensityMatState.h"
 #include "cudaq/algorithms/base_time_stepper.h"
 #include <cudensitymat.h>
+#include <vector>
 
 namespace cudaq {
 class CuDensityMatTimeStepper : public base_time_stepper {
 public:
   explicit CuDensityMatTimeStepper(cudensitymatHandle_t handle,
                                    cudensitymatOperator_t liouvillian);
+  ~CuDensityMatTimeStepper() override;
+
+  CuDensityMatTimeStepper(const CuDensityMatTimeStepper &) = delete;
+  CuDensityMatTimeStepper &operator=(const CuDensityMatTimeStepper &) = delete;
 
   state compute(const state &inputState, double t,
                 const std::unordered_map<std::string, std::complex<double>>
@@ -27,7 +32,23 @@ public:
       int64_t batchSize);
 
 private:
+  struct ParameterBuffer {
+    void *device{nullptr};
+    std::complex<double> *host{nullptr};
+    std::size_t capacity{0};
+    cudaEvent_t ready{nullptr};
+    bool inUse{false};
+  };
+
+  ParameterBuffer &acquireParameterBuffer(std::size_t elementCount);
+
   cudensitymatHandle_t m_handle;
   cudensitymatOperator_t m_liouvillian;
+  cudensitymatWorkspaceDescriptor_t m_workspace{nullptr};
+  void *m_workspaceBuffer{nullptr};
+  std::size_t m_requiredBufferSize{0};
+  int64_t m_preparedBatchSize{0};
+  std::vector<ParameterBuffer> m_parameterBuffers;
+  std::size_t m_nextParameterBuffer{0};
 };
 } // namespace cudaq

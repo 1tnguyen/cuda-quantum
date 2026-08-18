@@ -7,7 +7,8 @@
 # ============================================================================ #
 
 import cudaq, os, pytest
-from cudaq import boson, spin, Schedule, RungeKuttaIntegrator
+from cudaq import (DoPri5Integrator, RungeKuttaIntegrator, Schedule, boson,
+                   spin)
 import numpy as np
 
 skipIfUnsupported = pytest.mark.skipif(
@@ -76,6 +77,41 @@ def testMpiRun():
 
     # Verify result exists
     assert evolution_result is not None
+
+
+@skipIfUnsupported
+def testMpiDopri5DistributedState():
+    """Test adaptive integration of a state split across MPI ranks."""
+    num_spins = 12
+    dimensions = {i: 2 for i in range(num_spins)}
+    frequency = 0.7
+    final_time = 0.3
+    target_spin = num_spins - 1
+    observable = spin.z(target_spin)
+
+    result = cudaq.evolve(frequency * spin.x(target_spin),
+                          dimensions,
+                          Schedule([0.0, final_time], []),
+                          cudaq.dynamics.InitialState.ZERO,
+                          observables=[observable],
+                          collapse_operators=[],
+                          store_intermediate_results=cudaq.
+                          IntermediateResultSave.EXPECTATION_VALUE,
+                          integrator=DoPri5Integrator(rtol=1e-8,
+                                                      atol=1e-10,
+                                                      dt_initial=0.01,
+                                                      dt_max=0.1))
+
+    expectation = result.expectation_values()[-1][0].expectation()
+    np.testing.assert_allclose(expectation,
+                               np.cos(2.0 * frequency * final_time),
+                               rtol=1e-7,
+                               atol=1e-9)
+
+    local_state = np.array(result.final_state())
+    local_norm = float(np.vdot(local_state, local_state).real)
+    global_norm = sum(cudaq.mpi.all_gather(cudaq.mpi.num_ranks(), [local_norm]))
+    np.testing.assert_allclose(global_norm, 1.0, rtol=1e-8, atol=1e-10)
 
 
 @skipIfUnsupported
