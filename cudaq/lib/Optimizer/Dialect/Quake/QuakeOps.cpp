@@ -1081,7 +1081,7 @@ LogicalResult verifyMeasurements(MEAS op, TypeRange targetsType,
                                  const Type bitsType) {
   if (failed(verifyWireResultsAreLinear(op)))
     return failure();
-  bool mustBeSequence =
+  const bool mustBeSequence =
       targetsType.size() > 1 ||
       (targetsType.size() == 1 && isa<cudaq::quake::VeqType>(targetsType[0]));
   if (mustBeSequence) {
@@ -1095,11 +1095,22 @@ LogicalResult verifyMeasurements(MEAS op, TypeRange targetsType,
           "`!cc.sequence<!cc.measure_handle>` when measuring a qvector, a "
           "series of qubits, or both");
   } else {
-    if (!isa<cudaq::quake::MeasureType, cudaq::cc::MeasureHandleType>(
-            op.getMeasOut().getType()))
+    // A single scalar target may retain vector semantics after the early
+    // measurement-expansion stage has replaced a `veq<1>` with its lone ref
+    // or wire. Accept that one-element sequence until late expansion.
+    const Type resultType = op.getMeasOut().getType();
+    if (auto sequenceTy = dyn_cast<cudaq::cc::SequenceType>(resultType)) {
+      if (!isa<cudaq::quake::MeasureType, cudaq::cc::MeasureHandleType>(
+              sequenceTy.getElementType()))
+        return op.emitOpError(
+            "must return a sequence of measurement results when preserving "
+            "one-element vector semantics");
+    } else if (!isa<cudaq::quake::MeasureType, cudaq::cc::MeasureHandleType>(
+                   resultType)) {
       return op->emitOpError(
           "must return `!quake.measure` or `!cc.measure_handle` when "
           "measuring exactly one qubit");
+    }
   }
   if (op.getRegisterName())
     if (op.getRegisterName()->empty())

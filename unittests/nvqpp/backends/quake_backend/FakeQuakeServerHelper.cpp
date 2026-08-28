@@ -50,8 +50,9 @@ public:
     // wire set directly to QIR. Mirror that execution-time lowering for local
     // emulation without changing the selectively unrolled client payload.
     return {{"%QUAKE_EMULATE_SUFFIX%",
-             ",return-to-output-log,func.func(cc-loop-unroll{maximum-"
-             "iterations=1024 "
+             ",func.func(expand-measurements{stage=late}),return-to-output-"
+             "log,func.func(memtoreg,canonicalize,cc-loop-normalize,"
+             "cc-loop-unroll{maximum-iterations=1024 "
              "signal-failure-if-any-loop-cannot-be-completely-unrolled=true "
              "allow-early-exit=true},canonicalize),lower-to-cfg"}};
   }

@@ -1569,11 +1569,40 @@ struct FoldSequenceInit : public OpRewritePattern<cudaq::cc::SequenceInitOp> {
     return failure();
   }
 };
+
+// %data = cc.sequence_data %seq : (!cc.sequence<i1>) ->
+//     !cc.ptr<!cc.array<i8 x ?>>
+// %size = cc.sequence_size %seq : (!cc.sequence<i1>) -> i64
+// %result = cc.sequence_init %data, %size :
+//     (!cc.ptr<!cc.array<i8 x ?>>, i64) -> !cc.sequence<i1>
+// ─────────────────────────────────────────────────────────────
+// replace all uses of %result with %seq
+struct FoldSequenceRoundTrip
+    : public OpRewritePattern<cudaq::cc::SequenceInitOp> {
+  using Base = OpRewritePattern<cudaq::cc::SequenceInitOp>;
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(cudaq::cc::SequenceInitOp init,
+                                PatternRewriter &rewriter) const override {
+    auto data = init.getBuffer().getDefiningOp<cudaq::cc::SequenceDataOp>();
+    Value length = init.getLength();
+    if (!data || !length)
+      return failure();
+    auto size = length.getDefiningOp<cudaq::cc::SequenceSizeOp>();
+    if (!size || data.getSequence() != size.getSequence() ||
+        data.getSequence().getType() != init.getType())
+      return failure();
+    rewriter.replaceOp(init, data.getSequence());
+    return success();
+  }
+};
 } // namespace
 
 void cudaq::cc::SequenceInitOp::getCanonicalizationPatterns(
     RewritePatternSet &patterns, MLIRContext *context) {
-  patterns.add<CollapseCastToSequenceInit, FoldSequenceInit>(context);
+  patterns
+      .add<CollapseCastToSequenceInit, FoldSequenceInit, FoldSequenceRoundTrip>(
+          context);
 }
 
 LogicalResult cudaq::cc::SequenceInitOp::verify() {

@@ -701,9 +701,21 @@ def ExpandMeasurements : Pass<"expand-measurements"> {
 
     The `reset` op can also take a veq argument and this pass will also expand
     that to a series of `reset` operations on single qubits.
+
+    The `early` stage only expands statically sized `veq` measurement targets
+    into individual `ref` operands. It preserves sequence-level measurements
+    and discriminates so quantum mem-to-reg can convert the references to wires
+    without first materializing the classical result in memory. The `late`
+    stage performs the normal scalarization after that conversion. The default
+    `all` stage retains the original one-pass behavior.
   }];
 
   let dependentDialects = ["cudaq::cc::CCDialect", "mlir::LLVM::LLVMDialect"];
+
+  let options = [
+    Option<"stage", "stage", "std::string", /*default=*/"\"all\"",
+           "Expansion stage: `early`, `late`, or `all`.">,
+  ];
 
   let constructor = "cudaq::opt::createExpandMeasurementsPass()";
 }

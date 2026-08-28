@@ -31,6 +31,53 @@ bool usesIndividualQubit(A x) {
       x.getType());
 }
 
+template <typename A>
+bool hasExpandableTarget(A measureOp) {
+  return llvm::any_of(measureOp.getTargets(), [](Value target) {
+    if (auto size = cudaq::quake::getVeqSize(target))
+      return *size != 0;
+    return false;
+  });
+}
+
+// Expand a statically sized veq into explicit ref operands while preserving
+// the sequence-level measurement result. This is the early half of staged
+// measurement expansion and deliberately creates no classical storage.
+template <typename A>
+class ExpandMeasurementTargets : public OpRewritePattern<A> {
+public:
+  using OpRewritePattern<A>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(A measureOp,
+                                PatternRewriter &rewriter) const override {
+    if (!measureOp.getWires().empty())
+      return failure();
+
+    SmallVector<Value> targets;
+    for (Value target : measureOp.getTargets()) {
+      if (!isa<cudaq::quake::VeqType>(target.getType())) {
+        targets.push_back(target);
+        continue;
+      }
+
+      const std::optional<std::size_t> size = cudaq::quake::getVeqSize(target);
+      if (!size || *size == 0)
+        return failure();
+      for (std::size_t i = 0; i < *size; ++i)
+        targets.push_back(cudaq::quake::ExtractRefOp::create(
+            rewriter, measureOp.getLoc(), target, i));
+    }
+
+    auto replacement =
+        A::create(rewriter, measureOp.getLoc(), measureOp->getResultTypes(),
+                  targets, measureOp.getRegisterNameAttr());
+    for (NamedAttribute attr : measureOp->getAttrs())
+      replacement->setAttr(attr.getName(), attr.getValue());
+    rewriter.replaceOp(measureOp, replacement->getResults());
+    return success();
+  }
+};
+
 // Generalized pattern for expanding a multiple qubit measurement (whether it is
 // mx, my, or mz) to a series of individual measurements.
 //
@@ -44,7 +91,7 @@ bool usesIndividualQubit(A x) {
 //     original handle-sequence type, so the rewrite additionally builds a
 //     per-element handle buffer and folds it into a `cc.sequence_init ->
 //     !cc.sequence<!cc.measure_handle>` that replaces all remaining uses.
-template <typename A>
+template <typename A, bool isLateStage = false>
 class ExpandRewritePattern : public OpRewritePattern<A> {
 public:
   using OpRewritePattern<A>::OpRewritePattern;
@@ -59,7 +106,7 @@ public:
     auto sequenceResTy =
         dyn_cast<cudaq::cc::SequenceType>(measureOp.getMeasOut().getType());
     auto handleTy = cudaq::cc::MeasureHandleType::get(ctx);
-    bool isHandleResult =
+    const bool isHandleResult =
         isa<cudaq::cc::MeasureHandleType>(sequenceResTy.getElementType());
 
     // Per-element scalar result type tracks the original sequence element
@@ -81,19 +128,36 @@ public:
       else
         hasNonDiscUser = true;
     }
-    // Allocation policy:
-    //   - Legacy `!cc.sequence<!quake.measure>` always allocates the i1 buffer.
-    //   - `!cc.sequence<!cc.measure_handle>` allocates each buffer only when a
-    //   consumer in that element-type class is present.
-    bool needI1Buf = !isHandleResult || !discUsers.empty();
-    bool needHandleBuf = isHandleResult && hasNonDiscUser;
+    const bool discriminateFeedsOnlyLogOutput = [&] {
+      if constexpr (!isLateStage)
+        return false;
+      const bool allTargetsAreScalar =
+          llvm::none_of(measureOp.getTargets(), [](Value target) {
+            return isa<cudaq::quake::VeqType>(target.getType());
+          });
+      return allTargetsAreScalar && !hasNonDiscUser && !discUsers.empty() &&
+             llvm::all_of(discUsers, [](cudaq::quake::DiscriminateOp disc) {
+               return !disc->use_empty() &&
+                      llvm::all_of(disc->getUsers(), [](Operation *user) {
+                        return isa<cudaq::quake::LogOutputOp>(user);
+                      });
+             });
+    }();
+
+    // A discriminate used only by log_output can be represented as a
+    // first-class fixed array in the late stage. Other sequence consumers
+    // still require addressable storage.
+    const bool needI1Buf =
+        isLateStage ? !discriminateFeedsOnlyLogOutput && !discUsers.empty()
+                    : !isHandleResult || !discUsers.empty();
+    const bool needHandleBuf = isHandleResult && hasNonDiscUser;
 
     // 1. Determine the total number of qubits we need to measure. This
     // determines the size of the buffer of bools to create to store the results
     // in.
     unsigned numQubits = 0u;
     for (auto v : measureOp.getTargets())
-      if (isa<cudaq::quake::RefType>(v.getType()))
+      if (!isa<cudaq::quake::VeqType>(v.getType()))
         ++numQubits;
     Value totalToRead =
         arith::ConstantIntOp::create(rewriter, loc, numQubits, 64);
@@ -119,11 +183,16 @@ public:
     // `perElemTy`; the resulting value is fanned out to whichever buffers we
     // allocated (i1 for discriminate consumers, handle for non-discriminate
     // consumers).
+    SmallVector<Value> loggedBits;
     auto storePerElement = [&](OpBuilder &builder, Location loc, Value meas,
                                Value offset) {
-      if (needI1Buf) {
-        auto bit =
+      if (needI1Buf || discriminateFeedsOnlyLogOutput) {
+        Value bit =
             cudaq::quake::DiscriminateOp::create(builder, loc, i1Ty, meas);
+        if (discriminateFeedsOnlyLogOutput) {
+          loggedBits.push_back(bit);
+          return;
+        }
         auto addr = cudaq::cc::ComputePtrOp::create(
             builder, loc, cudaq::cc::PointerType::get(i8Ty), i1Buff, offset);
         auto bitByte = cudaq::cc::CastOp::create(
@@ -142,13 +211,20 @@ public:
     // the buffer. For registers, loop over the entire set of qubits.
     Value buffOff = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
     Value one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+    SmallVector<Value> replacementWires;
     for (auto v : measureOp.getTargets()) {
-      if (isa<cudaq::quake::RefType>(v.getType())) {
-        auto meas = A::create(rewriter, loc, perElemTy, v).getMeasOut();
-        storePerElement(rewriter, loc, meas, buffOff);
+      if (!isa<cudaq::quake::VeqType>(v.getType())) {
+        SmallVector<Type> resultTypes{perElemTy};
+        if (isa<cudaq::quake::WireType>(v.getType()))
+          resultTypes.push_back(v.getType());
+        auto meas = A::create(rewriter, loc, resultTypes, v,
+                              measureOp.getRegisterNameAttr());
+        for (NamedAttribute attr : measureOp->getAttrs())
+          meas->setAttr(attr.getName(), attr.getValue());
+        storePerElement(rewriter, loc, meas.getMeasOut(), buffOff);
+        replacementWires.append(meas.getWires().begin(), meas.getWires().end());
         buffOff = arith::AddIOp::create(rewriter, loc, buffOff, one);
       } else {
-        assert(isa<cudaq::quake::VeqType>(v.getType()));
         Value vecSz = cudaq::quake::VeqSizeOp::create(rewriter, loc, i64Ty, v);
         cudaq::opt::factory::createInvariantLoop(
             rewriter, loc, vecSz,
@@ -159,6 +235,8 @@ public:
               auto meas = A::create(builder, loc, perElemTy, qv);
               if (auto registerName = measureOp.getRegisterNameAttr())
                 meas.setRegisterName(registerName);
+              for (NamedAttribute attr : measureOp->getAttrs())
+                meas->setAttr(attr.getName(), attr.getValue());
               Value offset = arith::AddIOp::create(builder, loc, iv, buffOff);
               storePerElement(builder, loc, meas.getMeasOut(), offset);
             });
@@ -166,9 +244,29 @@ public:
       }
     }
 
-    // 4. Replace each `quake.discriminate` consumer with a
-    // `cc.sequence_init -> !cc.sequence<i1>` over the i1 buffer.
-    if (needI1Buf) {
+    // 4. Replace each `quake.discriminate` consumer. A result that is logged
+    // directly becomes a first-class fixed array; all other consumers retain
+    // the addressable sequence representation.
+    if (discriminateFeedsOnlyLogOutput) {
+      auto arrayTy = cudaq::cc::ArrayType::get(ctx, i1Ty, loggedBits.size());
+      for (auto disc : discUsers) {
+        Value array = cudaq::cc::UndefOp::create(rewriter, loc, arrayTy);
+        for (auto [index, bit] : llvm::enumerate(loggedBits))
+          array = cudaq::cc::InsertValueOp::create(rewriter, loc, arrayTy,
+                                                   array, bit, index);
+        SmallVector<Operation *> users{disc->getUsers().begin(),
+                                       disc->getUsers().end()};
+        for (Operation *user : users) {
+          auto log = cast<cudaq::quake::LogOutputOp>(user);
+          rewriter.modifyOpInPlace(log, [&] {
+            for (OpOperand &operand : log->getOpOperands())
+              if (operand.get() == disc.getResult())
+                operand.set(array);
+          });
+        }
+        rewriter.eraseOp(disc);
+      }
+    } else if (needI1Buf) {
       auto sequenceI1Ty = cudaq::cc::SequenceType::get(ctx, i1Ty);
       auto ptrArrI1Ty =
           cudaq::cc::PointerType::get(cudaq::cc::ArrayType::get(i1Ty));
@@ -192,11 +290,6 @@ public:
       replacementVal = handleSequence.getResult();
     }
 
-    // The pass is scheduled before wire lowering, so the variadic `$wires`
-    // result group is structurally empty here.
-    assert(measureOp.getWires().empty() &&
-           "`expand-measurements` runs before wire lowering");
-
     // Step 5 builds a handle-vector replacement exactly when the
     // user-classification scan found a non-discriminate consumer. Without
     // this, `replaceOp` below would feed a null value through to a live
@@ -205,7 +298,11 @@ public:
            "handle-vector replacement must exist iff a non-discriminate "
            "consumer was present");
 
-    rewriter.replaceOp(measureOp, replacementVal);
+    assert(replacementWires.size() == measureOp.getWires().size() &&
+           "expanded measurements must preserve every wire result");
+    SmallVector<Value> replacements{replacementVal};
+    replacements.append(replacementWires);
+    rewriter.replaceOp(measureOp, replacements);
     return success();
   }
 };
@@ -214,6 +311,12 @@ namespace {
 using MxRewrite = ExpandRewritePattern<cudaq::quake::MxOp>;
 using MyRewrite = ExpandRewritePattern<cudaq::quake::MyOp>;
 using MzRewrite = ExpandRewritePattern<cudaq::quake::MzOp>;
+using MxLateRewrite = ExpandRewritePattern<cudaq::quake::MxOp, true>;
+using MyLateRewrite = ExpandRewritePattern<cudaq::quake::MyOp, true>;
+using MzLateRewrite = ExpandRewritePattern<cudaq::quake::MzOp, true>;
+using MxTargetRewrite = ExpandMeasurementTargets<cudaq::quake::MxOp>;
+using MyTargetRewrite = ExpandMeasurementTargets<cudaq::quake::MyOp>;
+using MzTargetRewrite = ExpandMeasurementTargets<cudaq::quake::MzOp>;
 
 // Expand `quake.discriminate : !cc.sequence<!cc.measure_handle> ->
 // !cc.sequence<i1>` when the input handle vector is *not* the direct result
@@ -317,47 +420,73 @@ class ExpandMeasurementsPass
 public:
   using Base::Base;
   void runOnOperation() override {
+    if (stage != "all" && stage != "early" && stage != "late") {
+      getOperation()->emitOpError("unknown expansion stage '") << stage << "'";
+      signalPassFailure();
+      return;
+    }
+
     auto *op = getOperation();
     auto *ctx = &getContext();
     RewritePatternSet patterns(ctx);
-    patterns.insert<MxRewrite, MyRewrite, MzRewrite, ResetRewrite,
-                    ExpandSequenceHandleDiscriminate>(ctx);
     ConversionTarget target(*ctx);
     target.addLegalDialect<cudaq::quake::QuakeDialect, cudaq::cc::CCDialect,
                            arith::ArithDialect, LLVM::LLVMDialect>();
-    target.addDynamicallyLegalOp<cudaq::quake::MxOp>([](cudaq::quake::MxOp x) {
-      return usesIndividualQubit(x.getMeasOut());
-    });
-    target.addDynamicallyLegalOp<cudaq::quake::MyOp>([](cudaq::quake::MyOp x) {
-      return usesIndividualQubit(x.getMeasOut());
-    });
-    target.addDynamicallyLegalOp<cudaq::quake::MzOp>([](cudaq::quake::MzOp x) {
-      return usesIndividualQubit(x.getMeasOut());
-    });
     target.addDynamicallyLegalOp<cudaq::quake::ResetOp>(
         [](cudaq::quake::ResetOp r) {
           return !isa<cudaq::quake::VeqType>(r.getTargets().getType());
         });
-    target.addDynamicallyLegalOp<cudaq::quake::DiscriminateOp>(
-        [](cudaq::quake::DiscriminateOp d) {
-          // Scalar discriminate is always legal.
-          auto sequenceTy =
-              dyn_cast<cudaq::cc::SequenceType>(d.getMeasurement().getType());
-          if (!sequenceTy)
-            return true;
-          // Vector discriminate of legacy `!quake.measure` is folded as
-          // a side-effect of the measurement-op rewrite (step 4); leave
-          // it legal here so the driver does not look for a standalone
-          // pattern.
-          if (!isa<cudaq::cc::MeasureHandleType>(sequenceTy.getElementType()))
-            return true;
-          // Vector discriminate of `!cc.measure_handle` whose source is
-          // a measurement op is similarly folded (step 4 again). Only
-          // the indirect case needs `ExpandSequenceHandleDiscriminate`.
-          return d.getMeasurement()
-                     .getDefiningOp<cudaq::quake::MeasurementInterface>() !=
-                 nullptr;
-        });
+
+    if (stage == "early") {
+      patterns.insert<MxTargetRewrite, MyTargetRewrite, MzTargetRewrite,
+                      ResetRewrite>(ctx);
+      target.addDynamicallyLegalOp<cudaq::quake::MxOp>(
+          [](cudaq::quake::MxOp x) { return !hasExpandableTarget(x); });
+      target.addDynamicallyLegalOp<cudaq::quake::MyOp>(
+          [](cudaq::quake::MyOp x) { return !hasExpandableTarget(x); });
+      target.addDynamicallyLegalOp<cudaq::quake::MzOp>(
+          [](cudaq::quake::MzOp x) { return !hasExpandableTarget(x); });
+      target.addLegalOp<cudaq::quake::DiscriminateOp>();
+    } else {
+      if (stage == "late")
+        patterns.insert<MxLateRewrite, MyLateRewrite, MzLateRewrite>(ctx);
+      else
+        patterns.insert<MxRewrite, MyRewrite, MzRewrite>(ctx);
+      patterns.insert<ResetRewrite, ExpandSequenceHandleDiscriminate>(ctx);
+      target.addDynamicallyLegalOp<cudaq::quake::MxOp>(
+          [](cudaq::quake::MxOp x) {
+            return usesIndividualQubit(x.getMeasOut());
+          });
+      target.addDynamicallyLegalOp<cudaq::quake::MyOp>(
+          [](cudaq::quake::MyOp x) {
+            return usesIndividualQubit(x.getMeasOut());
+          });
+      target.addDynamicallyLegalOp<cudaq::quake::MzOp>(
+          [](cudaq::quake::MzOp x) {
+            return usesIndividualQubit(x.getMeasOut());
+          });
+      target.addDynamicallyLegalOp<cudaq::quake::DiscriminateOp>(
+          [](cudaq::quake::DiscriminateOp d) {
+            // Scalar discriminate is always legal.
+            auto sequenceTy =
+                dyn_cast<cudaq::cc::SequenceType>(d.getMeasurement().getType());
+            if (!sequenceTy)
+              return true;
+            // Vector discriminate of legacy `!quake.measure` is folded as
+            // a side-effect of the measurement-op rewrite (step 4); leave
+            // it legal here so the driver does not look for a standalone
+            // pattern.
+            if (!isa<cudaq::cc::MeasureHandleType>(sequenceTy.getElementType()))
+              return true;
+            // Vector discriminate of `!cc.measure_handle` whose source is
+            // a measurement op is similarly folded (step 4 again). Only
+            // the indirect case needs `ExpandSequenceHandleDiscriminate`.
+            return d.getMeasurement()
+                       .getDefiningOp<cudaq::quake::MeasurementInterface>() !=
+                   nullptr;
+          });
+    }
+
     if (failed(applyPartialConversion(op, target, std::move(patterns)))) {
       op->emitOpError("could not expand measurements");
       signalPassFailure();

@@ -31,7 +31,8 @@ createdJobs = {}
 
 SERVER_EXECUTION_PIPELINE = (
     "builtin.module("
-    "canonicalize,distributed-device-call,cse,return-to-output-log,"
+    "canonicalize,distributed-device-call,cse,"
+    "func.func(expand-measurements{stage=late}),return-to-output-log,"
     "func.func("
     "memtoreg,canonicalize,cc-loop-normalize,"
     "cc-loop-unroll{maximum-iterations=1024 "
@@ -96,6 +97,36 @@ def verifyExpectedLoopCount(decoded_payload, entry_func_name):
             "Remote payload preserved an unexpected number of `cc.loop` ops "
             f"for `{entry_func_name}`: expected {expectedCount}, got "
             f"{actualCount}.")
+
+
+def verifyDelayedMeasurementExpansion(decoded_payload, entry_func_name):
+    if "delayed_measurement_vector" not in entry_func_name:
+        return
+
+    required_tokens = [
+        "!cc.sequence<!cc.measure_handle>",
+        "quake.discriminate",
+        "!cc.sequence<i1>",
+        "quake.log_output",
+    ]
+    for token in required_tokens:
+        if token not in decoded_payload:
+            raise RuntimeError(
+                "Delayed measurement payload is missing sequence-level token"
+                f" `{token}`.")
+
+    forbidden_tokens = [
+        "cc.alloca",
+        "cc.cast unsigned",
+        "cc.store",
+        "cc.sequence_init",
+        "cc.scope",
+    ]
+    for token in forbidden_tokens:
+        if token in decoded_payload:
+            raise RuntimeError(
+                "Delayed measurement payload contains early materialization"
+                f" token `{token}`.")
 
 
 def getNumRequiredQubits(function):
@@ -190,6 +221,7 @@ async def postJob(request: Request):
             "Remote payload is missing a `cudaq-entrypoint` function.")
     verifyExpectedMapping(decoded_payload, entry_func_name)
     verifyExpectedLoopCount(decoded_payload, entry_func_name)
+    verifyDelayedMeasurementExpansion(decoded_payload, entry_func_name)
 
     # Lower the module to LLVM IR.
     qir_code = lowerValueSemanticsPayloadForExecution(recovered_mod, ctx)

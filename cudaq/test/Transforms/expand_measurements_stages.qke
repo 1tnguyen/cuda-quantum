@@ -1,0 +1,126 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --expand-measurements="stage=early" %s | FileCheck --check-prefix=EARLY %s
+// RUN: cudaq-opt --expand-measurements="stage=late" --canonicalize %s | FileCheck --check-prefix=LATE %s
+// RUN: cudaq-opt --expand-measurements %s | FileCheck --check-prefix=ALL %s
+
+func.func @early(%v: !quake.veq<2>) -> !cc.sequence<i1> {
+  %m = quake.mz %v : (!quake.veq<2>) -> !cc.sequence<!cc.measure_handle>
+  %d = quake.discriminate %m : (!cc.sequence<!cc.measure_handle>) -> !cc.sequence<i1>
+  return %d : !cc.sequence<i1>
+}
+
+// EARLY-LABEL: func.func @early(
+// EARLY-SAME:    %[[V:.*]]: !quake.veq<2>) -> !cc.sequence<i1>
+// EARLY:         %[[Q0:.*]] = quake.extract_ref %[[V]][0]
+// EARLY-NEXT:    %[[Q1:.*]] = quake.extract_ref %[[V]][1]
+// EARLY-NEXT:    %[[HANDLES:.*]] = quake.mz %[[Q0]], %[[Q1]]
+// EARLY-SAME:      (!quake.ref, !quake.ref) -> !cc.sequence<!cc.measure_handle>
+// EARLY-NEXT:    %[[BITS:.*]] = quake.discriminate %[[HANDLES]]
+// EARLY-SAME:      (!cc.sequence<!cc.measure_handle>) -> !cc.sequence<i1>
+// EARLY-NOT:     cc.alloca
+// EARLY:         return %[[BITS]] : !cc.sequence<i1>
+
+func.func @early_singleton(%v: !quake.veq<1>) -> !cc.sequence<i1> {
+  %m = quake.mz %v : (!quake.veq<1>) -> !cc.sequence<!cc.measure_handle>
+  %d = quake.discriminate %m : (!cc.sequence<!cc.measure_handle>) -> !cc.sequence<i1>
+  return %d : !cc.sequence<i1>
+}
+
+// EARLY-LABEL: func.func @early_singleton(
+// EARLY-SAME:    %[[V:.*]]: !quake.veq<1>) -> !cc.sequence<i1>
+// EARLY:         %[[Q0:.*]] = quake.extract_ref %[[V]][0]
+// EARLY-NEXT:    %[[HANDLES:.*]] = quake.mz %[[Q0]]
+// EARLY-SAME:      (!quake.ref) -> !cc.sequence<!cc.measure_handle>
+// EARLY-NEXT:    %[[BITS:.*]] = quake.discriminate %[[HANDLES]]
+// EARLY-SAME:      (!cc.sequence<!cc.measure_handle>) -> !cc.sequence<i1>
+// EARLY-NOT:     cc.alloca
+// EARLY:         return %[[BITS]] : !cc.sequence<i1>
+
+func.func @late_log(%q0: !quake.wire, %q1: !quake.wire) {
+  %m, %w:2 = quake.mz %q0, %q1 : (!quake.wire, !quake.wire) -> (!cc.sequence<!cc.measure_handle>, !quake.wire, !quake.wire)
+  %d = quake.discriminate %m : (!cc.sequence<!cc.measure_handle>) -> !cc.sequence<i1>
+  quake.return_wire %w#0 : !quake.wire
+  quake.return_wire %w#1 : !quake.wire
+  quake.log_output %d : (!cc.sequence<i1>) -> ()
+  return
+}
+
+// LATE-LABEL: func.func @late_log(
+// LATE-NOT:     cc.alloca
+// LATE:         %[[H0:.*]], %[[W0:.*]] = quake.mz %{{.*}} : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+// LATE-NEXT:    %[[B0:.*]] = quake.discriminate %[[H0]]
+// LATE-NOT:     cc.cast
+// LATE-NOT:     cc.store
+// LATE:         %[[H1:.*]], %[[W1:.*]] = quake.mz %{{.*}} : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+// LATE-NEXT:    %[[B1:.*]] = quake.discriminate %[[H1]]
+// LATE-NOT:     cc.cast
+// LATE-NOT:     cc.store
+// LATE:         %[[ARRAY:.*]] = cc.undef !cc.array<i1 x 2>
+// LATE-NEXT:    %[[ARRAY0:.*]] = cc.insert_value %[[ARRAY]][0], %[[B0]]
+// LATE-NEXT:    %[[ARRAY1:.*]] = cc.insert_value %[[ARRAY0]][1], %[[B1]]
+// LATE:         quake.return_wire %[[W0]]
+// LATE-NEXT:    quake.return_wire %[[W1]]
+// LATE-NOT:     cc.sequence_init
+// LATE:         quake.log_output %[[ARRAY1]] : (!cc.array<i1 x 2>) -> ()
+
+func.func @late_sample(%q0: !quake.wire, %q1: !quake.wire) {
+  %m, %w:2 = quake.mz %q0, %q1 : (!quake.wire, !quake.wire) -> (!cc.sequence<!quake.measure>, !quake.wire, !quake.wire)
+  quake.return_wire %w#0 : !quake.wire
+  quake.return_wire %w#1 : !quake.wire
+  return
+}
+
+// LATE-LABEL: func.func @late_sample(
+// LATE-NOT:     cc.alloca
+// LATE:         %{{.*}}, %[[W0:.*]] = quake.mz %{{.*}} : (!quake.wire) -> (!quake.measure, !quake.wire)
+// LATE-NOT:     cc.store
+// LATE:         %{{.*}}, %[[W1:.*]] = quake.mz %{{.*}} : (!quake.wire) -> (!quake.measure, !quake.wire)
+// LATE-NOT:     cc.sequence_init
+// LATE:         quake.return_wire %[[W0]]
+// LATE-NEXT:    quake.return_wire %[[W1]]
+
+func.func @all_legacy_no_users(%v: !quake.veq<2>) {
+  %m = quake.mz %v : (!quake.veq<2>) -> !cc.sequence<!quake.measure>
+  return
+}
+
+// ALL-LABEL: func.func @all_legacy_no_users(
+// ALL:         %[[BUFFER:.*]] = cc.alloca i8
+// ALL:         cc.loop while
+// ALL:           %[[MEASURE:.*]] = quake.mz %{{.*}} : (!quake.ref) -> !quake.measure
+// ALL-NEXT:      %{{.*}} = arith.addi
+// ALL-NEXT:      %[[BIT:.*]] = quake.discriminate %[[MEASURE]] : (!quake.measure) -> i1
+// ALL-NEXT:      %[[ADDRESS:.*]] = cc.compute_ptr %[[BUFFER]]
+// ALL-NEXT:      %[[BYTE:.*]] = cc.cast unsigned %[[BIT]] : (i1) -> i8
+// ALL-NEXT:      cc.store %[[BYTE]], %[[ADDRESS]] : !cc.ptr<i8>
+// ALL:         return
+
+func.func @all_log_only(%q0: !quake.ref, %q1: !quake.ref) {
+  %m = quake.mz %q0, %q1 : (!quake.ref, !quake.ref) -> !cc.sequence<!cc.measure_handle>
+  %d = quake.discriminate %m : (!cc.sequence<!cc.measure_handle>) -> !cc.sequence<i1>
+  quake.log_output %d : (!cc.sequence<i1>) -> ()
+  return
+}
+
+// ALL-LABEL: func.func @all_log_only(
+// ALL-NOT:     cc.undef
+// ALL:         %[[BUFFER:.*]] = cc.alloca i8
+// ALL:         %[[MEASURE0:.*]] = quake.mz %{{.*}} : (!quake.ref) -> !cc.measure_handle
+// ALL-NEXT:    %[[BIT0:.*]] = quake.discriminate %[[MEASURE0]] : (!cc.measure_handle) -> i1
+// ALL:         %[[BYTE0:.*]] = cc.cast unsigned %[[BIT0]] : (i1) -> i8
+// ALL-NEXT:    cc.store %[[BYTE0]], %{{.*}} : !cc.ptr<i8>
+// ALL:         %[[MEASURE1:.*]] = quake.mz %{{.*}} : (!quake.ref) -> !cc.measure_handle
+// ALL-NEXT:    %[[BIT1:.*]] = quake.discriminate %[[MEASURE1]] : (!cc.measure_handle) -> i1
+// ALL:         %[[BYTE1:.*]] = cc.cast unsigned %[[BIT1]] : (i1) -> i8
+// ALL-NEXT:    cc.store %[[BYTE1]], %{{.*}} : !cc.ptr<i8>
+// ALL:         %[[BITS:.*]] = cc.sequence_init
+// ALL-NOT:     cc.insert_value
+// ALL:         quake.log_output %[[BITS]] : (!cc.sequence<i1>) -> ()
+// ALL:         return

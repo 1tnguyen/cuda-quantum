@@ -36,6 +36,18 @@ func.func @canonicalize_scope(%arg0: !quake.ref) attributes {"cudaq-kernel"} {
 // CHECK:           } : !cc.callable<() -> ()>
 // CHECK:           quake.compute_action %[[VAL_0]], %[[VAL_1]]
 
+func.func @fold_sequence_round_trip(%arg0: !cc.sequence<i1>) -> !cc.sequence<i1> {
+  %data = cc.sequence_data %arg0 : (!cc.sequence<i1>) -> !cc.ptr<!cc.array<i8 x ?>>
+  %size = cc.sequence_size %arg0 : (!cc.sequence<i1>) -> i64
+  %result = cc.sequence_init %data, %size : (!cc.ptr<!cc.array<i8 x ?>>, i64) -> !cc.sequence<i1>
+  return %result : !cc.sequence<i1>
+}
+
+// CHECK-LABEL:   func.func @fold_sequence_round_trip(
+// CHECK-SAME:      %[[ARG0:.*]]: !cc.sequence<i1>) -> !cc.sequence<i1> {
+// CHECK-NEXT:      return %[[ARG0]] : !cc.sequence<i1>
+// CHECK-NEXT:    }
+
 // Test here is that this does not crash.
 func.func @cast_to_sequence() {
     %c0_i64 = arith.constant 0 : i64

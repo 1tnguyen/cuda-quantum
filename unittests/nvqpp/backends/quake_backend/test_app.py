@@ -40,6 +40,13 @@ def all_ones() -> list[int]:
 
 
 @cudaq.kernel
+def delayed_measurement_vector() -> list[bool]:
+    q = cudaq.qvector(2)
+    x(q)
+    return mz(q)
+
+
+@cudaq.kernel
 def alternating_01() -> list[int]:
     q = cudaq.qvector(4)
     x(q[1])
@@ -76,6 +83,12 @@ try:
     for shot in res:
         assert list(shot) == [1, 1, 1,
                               1], f"expected [1,1,1,1], got {list(shot)}"
+
+    # The mock server also verifies that this kernel's submitted payload keeps
+    # sequence-level mz and discriminate operations until server lowering.
+    res = cudaq.run(delayed_measurement_vector)
+    for shot in res:
+        assert list(shot) == [1, 1], f"expected [1,1], got {list(shot)}"
 
     # Deterministic: X on qubits 1 and 3 -> [0,1,0,1].
     res = cudaq.run(alternating_01)
