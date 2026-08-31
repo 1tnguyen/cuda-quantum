@@ -1,0 +1,143 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --package-qm-measurements %s | FileCheck %s --check-prefix=PACKAGE
+// RUN: cudaq-opt --pass-pipeline='builtin.module(func.func(package-qm-measurements,lower-qm-measurements))' %s | FileCheck %s --check-prefix=LOWER
+
+module {
+  quake.wire_set @wires[16] attributes {sym_visibility = "private"}
+
+  func.func @package_bit_log() {
+    %c2 = arith.constant 2 : i64
+    %q0 = quake.borrow_wire @wires[0] : !quake.wire
+    %q1 = quake.borrow_wire @wires[1] : !quake.wire
+    %buffer = cc.alloca !cc.array<i8 x 2>
+    %m0, %w0 = quake.mz %q0 name "bits" : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %b0 = quake.discriminate %m0 : (!cc.measure_handle) -> i1
+    %slot0 = cc.cast %buffer : (!cc.ptr<!cc.array<i8 x 2>>) -> !cc.ptr<i8>
+    %byte0 = cc.cast unsigned %b0 : (i1) -> i8
+    cc.store %byte0, %slot0 : !cc.ptr<i8>
+    %m1, %w1 = quake.mz %q1 name "bits" : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %b1 = quake.discriminate %m1 : (!cc.measure_handle) -> i1
+    %slot1 = cc.compute_ptr %buffer[1] : (!cc.ptr<!cc.array<i8 x 2>>) -> !cc.ptr<i8>
+    %byte1 = cc.cast unsigned %b1 : (i1) -> i8
+    cc.store %byte1, %slot1 : !cc.ptr<i8>
+    %bitPtr = cc.cast %buffer : (!cc.ptr<!cc.array<i8 x 2>>) -> !cc.ptr<!cc.array<i1 x ?>>
+    %bits = cc.sequence_init %bitPtr, %c2 : (!cc.ptr<!cc.array<i1 x ?>>, i64) -> !cc.sequence<i1>
+    quake.log_output %bits : (!cc.sequence<i1>) -> ()
+    quake.return_wire %w0 : !quake.wire
+    quake.return_wire %w1 : !quake.wire
+    return
+  }
+
+  // PACKAGE-LABEL: func.func @package_bit_log()
+  // PACKAGE-NOT:     cc.alloca
+  // PACKAGE:         %[[MEASUREMENTS:.*]], %[[BIT_WIRES:.*]]:2 = quake.mz %{{.*}}, %{{.*}} name "bits"
+  // PACKAGE-SAME:      -> (!cc.sequence<!cc.measure_handle>, !quake.wire, !quake.wire)
+  // PACKAGE-NEXT:    %[[BITS:.*]] = quake.discriminate %[[MEASUREMENTS]] : (!cc.sequence<!cc.measure_handle>) -> !cc.sequence<i1>
+  // PACKAGE-NEXT:    quake.log_output %[[BITS]] : (!cc.sequence<i1>) -> ()
+  // PACKAGE-NOT:     cc.store
+
+  // LOWER-LABEL:     func.func @package_bit_log()
+  // LOWER-NOT:         !cc.sequence<!cc.measure_handle>
+  // LOWER:             %[[MEASURE0:.*]], %{{.*}} = quake.mz %{{.*}} name "bits" : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+  // LOWER-NEXT:        %[[BIT0:.*]] = quake.discriminate %[[MEASURE0]] : (!cc.measure_handle) -> i1
+  // LOWER:             %[[MEASURE1:.*]], %{{.*}} = quake.mz %{{.*}} name "bits" : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+  // LOWER-NEXT:        %[[BIT1:.*]] = quake.discriminate %[[MEASURE1]] : (!cc.measure_handle) -> i1
+  // LOWER:             %[[BIT_ARRAY:.*]] = cc.undef !cc.array<i1 x 2>
+  // LOWER-NEXT:        %[[INSERT0:.*]] = cc.insert_value %[[BIT_ARRAY]][0], %[[BIT0]]
+  // LOWER-NEXT:        %[[INSERT1:.*]] = cc.insert_value %[[INSERT0]][1], %[[BIT1]]
+  // LOWER-NEXT:        quake.log_output %[[INSERT1]] : (!cc.array<i1 x 2>) -> ()
+
+  func.func @package_handle_vector() -> !cc.sequence<!cc.measure_handle> {
+    %c2 = arith.constant 2 : i64
+    %q0 = quake.borrow_wire @wires[2] : !quake.wire
+    %q1 = quake.borrow_wire @wires[3] : !quake.wire
+    %buffer = cc.alloca !cc.array<!cc.measure_handle x 2>
+    %m0, %w0 = quake.mz %q0 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %slot0 = cc.cast %buffer : (!cc.ptr<!cc.array<!cc.measure_handle x 2>>) -> !cc.ptr<!cc.measure_handle>
+    cc.store %m0, %slot0 : !cc.ptr<!cc.measure_handle>
+    %m1, %w1 = quake.mz %q1 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %slot1 = cc.compute_ptr %buffer[1] : (!cc.ptr<!cc.array<!cc.measure_handle x 2>>) -> !cc.ptr<!cc.measure_handle>
+    cc.store %m1, %slot1 : !cc.ptr<!cc.measure_handle>
+    %handlePtr = cc.cast %buffer : (!cc.ptr<!cc.array<!cc.measure_handle x 2>>) -> !cc.ptr<!cc.array<!cc.measure_handle x ?>>
+    %handles = cc.sequence_init %handlePtr, %c2 : (!cc.ptr<!cc.array<!cc.measure_handle x ?>>, i64) -> !cc.sequence<!cc.measure_handle>
+    quake.return_wire %w0 : !quake.wire
+    quake.return_wire %w1 : !quake.wire
+    return %handles : !cc.sequence<!cc.measure_handle>
+  }
+
+  // PACKAGE-LABEL: func.func @package_handle_vector()
+  // PACKAGE-NOT:     cc.alloca
+  // PACKAGE:         %[[HANDLES:.*]], %[[HANDLE_WIRES:.*]]:2 = quake.mz
+  // PACKAGE-SAME:      -> (!cc.sequence<!cc.measure_handle>, !quake.wire, !quake.wire)
+  // PACKAGE:         return %[[HANDLES]] : !cc.sequence<!cc.measure_handle>
+
+  // LOWER-LABEL:     func.func @package_handle_vector()
+  // LOWER:             %[[HANDLE_BUFFER:.*]] = cc.alloca !cc.measure_handle
+  // LOWER:             %[[HANDLE0:.*]], %{{.*}} = quake.mz %{{.*}} : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+  // LOWER:             cc.store %[[HANDLE0]], %{{.*}} : !cc.ptr<!cc.measure_handle>
+  // LOWER:             %[[HANDLE1:.*]], %{{.*}} = quake.mz %{{.*}} : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+  // LOWER:             cc.store %[[HANDLE1]], %{{.*}} : !cc.ptr<!cc.measure_handle>
+  // LOWER:             %[[HANDLE_SEQUENCE:.*]] = cc.sequence_init %[[HANDLE_BUFFER]]
+  // LOWER:             return %[[HANDLE_SEQUENCE]] : !cc.sequence<!cc.measure_handle>
+
+  func.func @do_not_cross_quantum_operation() {
+    %c2 = arith.constant 2 : i64
+    %q0 = quake.borrow_wire @wires[4] : !quake.wire
+    %q1 = quake.borrow_wire @wires[5] : !quake.wire
+    %q2 = quake.borrow_wire @wires[6] : !quake.wire
+    %buffer = cc.alloca !cc.array<i8 x 2>
+    %m0, %w0 = quake.mz %q0 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %b0 = quake.discriminate %m0 : (!cc.measure_handle) -> i1
+    %slot0 = cc.cast %buffer : (!cc.ptr<!cc.array<i8 x 2>>) -> !cc.ptr<i8>
+    %byte0 = cc.cast unsigned %b0 : (i1) -> i8
+    cc.store %byte0, %slot0 : !cc.ptr<i8>
+    %w2 = quake.x %q2 : (!quake.wire) -> !quake.wire
+    %m1, %w1 = quake.mz %q1 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %b1 = quake.discriminate %m1 : (!cc.measure_handle) -> i1
+    %slot1 = cc.compute_ptr %buffer[1] : (!cc.ptr<!cc.array<i8 x 2>>) -> !cc.ptr<i8>
+    %byte1 = cc.cast unsigned %b1 : (i1) -> i8
+    cc.store %byte1, %slot1 : !cc.ptr<i8>
+    %bitPtr = cc.cast %buffer : (!cc.ptr<!cc.array<i8 x 2>>) -> !cc.ptr<!cc.array<i1 x ?>>
+    %bits = cc.sequence_init %bitPtr, %c2 : (!cc.ptr<!cc.array<i1 x ?>>, i64) -> !cc.sequence<i1>
+    quake.log_output %bits : (!cc.sequence<i1>) -> ()
+    quake.return_wire %w0 : !quake.wire
+    quake.return_wire %w1 : !quake.wire
+    quake.return_wire %w2 : !quake.wire
+    return
+  }
+
+  // PACKAGE-LABEL: func.func @do_not_cross_quantum_operation()
+  // PACKAGE:         cc.alloca !cc.array<i8 x 2>
+  // PACKAGE:         quake.mz %{{.*}} : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+  // PACKAGE:         quake.x %{{.*}} : (!quake.wire) -> !quake.wire
+  // PACKAGE:         quake.mz %{{.*}} : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+  // PACKAGE:         cc.sequence_init
+
+  func.func @do_not_package_singleton() {
+    %c1 = arith.constant 1 : i64
+    %q0 = quake.borrow_wire @wires[7] : !quake.wire
+    %buffer = cc.alloca !cc.array<i8 x 1>
+    %m0, %w0 = quake.mz %q0 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %b0 = quake.discriminate %m0 : (!cc.measure_handle) -> i1
+    %slot0 = cc.cast %buffer : (!cc.ptr<!cc.array<i8 x 1>>) -> !cc.ptr<i8>
+    %byte0 = cc.cast unsigned %b0 : (i1) -> i8
+    cc.store %byte0, %slot0 : !cc.ptr<i8>
+    %bitPtr = cc.cast %buffer : (!cc.ptr<!cc.array<i8 x 1>>) -> !cc.ptr<!cc.array<i1 x ?>>
+    %bits = cc.sequence_init %bitPtr, %c1 : (!cc.ptr<!cc.array<i1 x ?>>, i64) -> !cc.sequence<i1>
+    quake.log_output %bits : (!cc.sequence<i1>) -> ()
+    quake.return_wire %w0 : !quake.wire
+    return
+  }
+
+  // PACKAGE-LABEL: func.func @do_not_package_singleton()
+  // PACKAGE:         cc.alloca !cc.array<i8 x 1>
+  // PACKAGE:         quake.mz %{{.*}} : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+  // PACKAGE:         cc.sequence_init
+}

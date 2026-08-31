@@ -31,7 +31,8 @@ createdJobs = {}
 
 SERVER_EXECUTION_PIPELINE = (
     "builtin.module("
-    "canonicalize,distributed-device-call,cse,return-to-output-log,"
+    "func.func(lower-qm-measurements),canonicalize,distributed-device-call,cse,"
+    "return-to-output-log,"
     "func.func("
     "memtoreg,canonicalize,cc-loop-normalize,"
     "cc-loop-unroll{maximum-iterations=1024 "
@@ -96,6 +97,38 @@ def verifyExpectedLoopCount(decoded_payload, entry_func_name):
             "Remote payload preserved an unexpected number of `cc.loop` ops "
             f"for `{entry_func_name}`: expected {expectedCount}, got "
             f"{actualCount}.")
+
+
+def verifyPackagedMeasurements(decoded_payload, entry_func_name):
+    if "packaged_measurement_vector" not in entry_func_name:
+        return
+
+    required_tokens = [
+        "!cc.sequence<!cc.measure_handle>",
+        "quake.discriminate",
+        "!cc.sequence<i1>",
+        "quake.log_output",
+    ]
+    for token in required_tokens:
+        if token not in decoded_payload:
+            raise RuntimeError(
+                f"Packaged measurement kernel `{entry_func_name}` is missing"
+                f" `{token}`.")
+
+    measurement_count = len(re.findall(r"\bquake\.mz\b", decoded_payload))
+    if measurement_count != 1:
+        raise RuntimeError(
+            f"Packaged measurement kernel `{entry_func_name}` must contain"
+            f" one `quake.mz`, got {measurement_count}.")
+
+    forbidden_tokens = [
+        "cc.alloca", "cc.cast unsigned", "cc.store", "cc.sequence_init"
+    ]
+    for token in forbidden_tokens:
+        if token in decoded_payload:
+            raise RuntimeError(
+                f"Packaged measurement kernel `{entry_func_name}` still"
+                f" contains `{token}`.")
 
 
 def getNumRequiredQubits(function):
@@ -190,6 +223,7 @@ async def postJob(request: Request):
             "Remote payload is missing a `cudaq-entrypoint` function.")
     verifyExpectedMapping(decoded_payload, entry_func_name)
     verifyExpectedLoopCount(decoded_payload, entry_func_name)
+    verifyPackagedMeasurements(decoded_payload, entry_func_name)
 
     # Lower the module to LLVM IR.
     qir_code = lowerValueSemanticsPayloadForExecution(recovered_mod, ctx)

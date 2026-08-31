@@ -105,6 +105,8 @@ void createClassicalOptimizationPipeline(
     std::optional<bool> disableLoopUnrolling = std::nullopt);
 
 std::unique_ptr<mlir::Pass> createExpandMeasurementsPass();
+std::unique_ptr<mlir::Pass> createPackageQMMeasurementsPass();
+std::unique_ptr<mlir::Pass> createLowerQMMeasurementsPass();
 void addLowerToCFG(mlir::OpPassManager &pm);
 std::unique_ptr<mlir::Pass> createObserveAnsatzPass(const std::vector<bool> &);
 std::unique_ptr<mlir::Pass> createQuakeAddMetadata();

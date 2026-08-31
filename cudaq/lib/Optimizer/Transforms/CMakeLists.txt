@@ -69,6 +69,7 @@ add_cudaq_library(OptTransforms
   PruneNegligibleRotations.cpp
   PyFrontendCleanup.cpp
   PySynthCallableBlockArgs.cpp
+  QMMeasurements.cpp
   QuakePropagateMetadata.cpp
   QuakeSimplify.cpp
   QuakeSynthesizer.cpp

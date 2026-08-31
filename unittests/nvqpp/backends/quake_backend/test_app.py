@@ -54,6 +54,13 @@ def single_qubit_flip() -> list[int]:
     return mz(q)
 
 
+@cudaq.kernel
+def packaged_measurement_vector() -> list[bool]:
+    q = cudaq.qvector(2)
+    x(q)
+    return mz(q)
+
+
 try:
     res = cudaq.run(kernel)
     assert res is not None
@@ -89,6 +96,12 @@ try:
     assert len(res) > 0
     for shot in res:
         assert list(shot) == [1], f"expected [1], got {list(shot)}"
+
+    # The remote payload for this kernel must use the QM measurement package.
+    res = cudaq.run(packaged_measurement_vector)
+    assert len(res) > 0
+    for shot in res:
+        assert list(shot) == [1, 1], f"expected [1,1], got {list(shot)}"
 
 except Exception as e:
     print(e)

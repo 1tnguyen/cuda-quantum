@@ -709,6 +709,39 @@ def ExpandMeasurements : Pass<"expand-measurements"> {
   let constructor = "cudaq::opt::createExpandMeasurementsPass()";
 }
 
+def PackageQMMeasurements :
+    Pass<"package-qm-measurements", "mlir::func::FuncOp"> {
+  let summary = "Package expanded measurements for Quantum Machines codegen.";
+  let description = [{
+    Recognize the scalar measurement and classical buffer pattern produced by
+    `expand-measurements` and reconstruct a broadcast measurement after wire
+    conversion and qubit mapping. This is a Quantum Machines output-format
+    pass; it does not change the semantics or options of `expand-measurements`.
+  }];
+
+  let dependentDialects = ["cudaq::cc::CCDialect",
+                           "cudaq::quake::QuakeDialect"];
+
+  let constructor = "cudaq::opt::createPackageQMMeasurementsPass()";
+}
+
+def LowerQMMeasurements :
+    Pass<"lower-qm-measurements", "mlir::func::FuncOp"> {
+  let summary = "Lower packaged Quantum Machines measurements for execution.";
+  let description = [{
+    Scalarize broadcast wire measurements emitted by
+    `package-qm-measurements`. This pass exists for local emulation and the
+    Quantum Machines mock server; production Quantum Machines payloads retain
+    the packaged form.
+  }];
+
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "cudaq::cc::CCDialect",
+                           "cudaq::quake::QuakeDialect"];
+
+  let constructor = "cudaq::opt::createLowerQMMeasurementsPass()";
+}
+
 def FactorQuantumAllocations :
     Pass<"factor-quantum-alloc", "mlir::func::FuncOp"> {
   let summary = "Factors quake alloca operations.";
