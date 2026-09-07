@@ -1,0 +1,44 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --pass-pipeline='builtin.module(qubit-mapping{device=file(%S/mapping_directional_line.txt) placement=identity search=none},func.func(verify-qubit-mapping{device=file(%S/mapping_directional_line.txt)}))' %s | CircuitCheck --up-to-mapping %s
+
+quake.wire_set @wires[2147483647]
+
+// Exercise direction correction across a nontrivial network on the
+// forward-only line 0 -> 1 -> ... -> 5. The verification pass rejects any
+// mapped two-qubit operation that does not conform to that topology, while
+// CircuitCheck verifies that mapping preserves the circuit semantics.
+func.func @complex_directional_mapping() {
+  %q0 = quake.borrow_wire @wires[0] : !quake.wire
+  %q1 = quake.borrow_wire @wires[1] : !quake.wire
+  %q2 = quake.borrow_wire @wires[2] : !quake.wire
+  %q3 = quake.borrow_wire @wires[3] : !quake.wire
+  %q4 = quake.borrow_wire @wires[4] : !quake.wire
+  %q5 = quake.borrow_wire @wires[5] : !quake.wire
+
+  %x01:2 = quake.x [%q0] %q1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x12:2 = quake.x [%x01#1] %q2 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x23:2 = quake.x [%x12#1] %q3 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x34:2 = quake.x [%x23#1] %q4 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x45:2 = quake.x [%x34#1] %q5 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+
+  %x54:2 = quake.x [%x45#1] %x45#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x43:2 = quake.x [%x54#1] %x34#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x32:2 = quake.x [%x43#1] %x23#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x21:2 = quake.x [%x32#1] %x12#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %x10:2 = quake.x [%x21#1] %x01#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+
+  quake.return_wire %x10#1 : !quake.wire
+  quake.return_wire %x10#0 : !quake.wire
+  quake.return_wire %x21#0 : !quake.wire
+  quake.return_wire %x32#0 : !quake.wire
+  quake.return_wire %x43#0 : !quake.wire
+  quake.return_wire %x54#0 : !quake.wire
+  return
+}

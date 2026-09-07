@@ -11,6 +11,7 @@
 // entry block while preserving support for the scoped form.
 
 // RUN: cudaq-opt '--qubit-mapping=device=path(2) placement=identity search=none' %s | FileCheck %s
+// RUN: cudaq-opt --pass-pipeline='builtin.module(qubit-mapping{device=path(2) placement=identity search=none},func.func(verify-qubit-mapping{device=path(2)}))' %s -o /dev/null
 
 module {
   quake.wire_set @wires[2147483647]

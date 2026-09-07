@@ -1,0 +1,74 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --pass-pipeline='builtin.module(func.func(verify-qubit-mapping{device=file(%S/mapping_directional_line.txt)}))' %s -split-input-file -verify-diagnostics
+
+quake.wire_set @mapped_wireset[6]
+
+func.func @valid_mapping() {
+  %q0 = quake.borrow_wire @mapped_wireset[0] : !quake.wire
+  %q1 = quake.borrow_wire @mapped_wireset[1] : !quake.wire
+  %x:2 = quake.x [%q0] %q1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %evince = quake.evince %x#0 : (!quake.wire) -> !quake.wire {compilerGenerated}
+  quake.return_wire %evince : !quake.wire
+  quake.return_wire %x#1 : !quake.wire
+  return
+}
+
+// -----
+
+quake.wire_set @mapped_wireset[6]
+
+func.func @unsupported_direction() {
+  %q0 = quake.borrow_wire @mapped_wireset[0] : !quake.wire
+  %q1 = quake.borrow_wire @mapped_wireset[1] : !quake.wire
+  // expected-error @+1 {{'quake.x' op uses unsupported physical control-target direction 1 -> 0}}
+  %x:2 = quake.x [%q1] %q0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  quake.return_wire %x#0 : !quake.wire
+  quake.return_wire %x#1 : !quake.wire
+  return
+}
+
+// -----
+
+quake.wire_set @mapped_wireset[6]
+
+func.func @nonadjacent_qubits() {
+  %q0 = quake.borrow_wire @mapped_wireset[0] : !quake.wire
+  %q2 = quake.borrow_wire @mapped_wireset[2] : !quake.wire
+  // expected-error @+1 {{'quake.x' op uses nonadjacent physical qubits 0 and 2}}
+  %x:2 = quake.x [%q0] %q2 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  quake.return_wire %x#0 : !quake.wire
+  quake.return_wire %x#1 : !quake.wire
+  return
+}
+
+// -----
+
+quake.wire_set @mapped_wireset[7]
+
+func.func @qubit_outside_device() {
+  // expected-error @+1 {{'quake.borrow_wire' op borrows physical qubit 6 outside the device topology}}
+  %q6 = quake.borrow_wire @mapped_wireset[6] : !quake.wire
+  quake.return_wire %q6 : !quake.wire
+  return
+}
+
+// -----
+
+quake.wire_set @mapped_wireset[6]
+
+// An external control has no physical-wire identity, so its direction cannot
+// be verified even though composable mapping may leave it in the IR.
+func.func @external_control(%control : !quake.control) {
+  %q0 = quake.borrow_wire @mapped_wireset[0] : !quake.wire
+  // expected-error @+1 {{'quake.x' op does not use scalar physical wires for every qubit}}
+  %x = quake.x [%control] %q0 : (!quake.control, !quake.wire) -> !quake.wire
+  quake.return_wire %x : !quake.wire
+  return
+}

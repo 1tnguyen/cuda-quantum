@@ -1379,6 +1379,26 @@ def MappingFunc: Pass<"qubit-mapping-func", "mlir::func::FuncOp"> {
   ];
 }
 
+def VerifyMapping: Pass<"verify-qubit-mapping", "mlir::func::FuncOp"> {
+  let summary = "Verify that mapped Quake IR conforms to a device topology";
+  let description = [{
+    Verify that physical wires used by mapped Quake operations belong to the
+    requested device and that every two-qubit operation uses a native coupling.
+    Controlled operations must also use a supported control-to-target direction.
+
+    This pass does not modify the IR. It expects value-semantics Quake IR whose
+    physical wires are borrowed from `@mapped_wireset`, and tracks those wires
+    through the structured `cc.if`, `cc.loop`, and `cc.scope` forms supported by
+    qubit mapping.
+  }];
+
+  let options = [
+    Option<"device", "device", "std::string", /*default=*/"\"-\"",
+      "Device topology: path(N), ring(N), star(N), star(N,c), grid(w,h), "
+      "file(/path/to/file), bypass">
+  ];
+}
+
 def MappingPrep: Pass<"qubit-mapping-prep", "mlir::ModuleOp"> {
   let summary = "Prepare module for qubit mapping.";
   let description = [{

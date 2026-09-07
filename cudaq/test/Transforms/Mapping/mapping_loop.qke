@@ -7,6 +7,7 @@
 // ========================================================================== //
 
 // RUN: cudaq-opt --qubit-mapping=device=path\(3\) %s | FileCheck %s
+// RUN: cudaq-opt --pass-pipeline='builtin.module(qubit-mapping{device=path(3)},func.func(verify-qubit-mapping{device=path(3)}))' %s -o /dev/null
 
 quake.wire_set @wires[2147483647]
 

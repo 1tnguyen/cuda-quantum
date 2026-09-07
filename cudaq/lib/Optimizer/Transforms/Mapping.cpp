@@ -29,6 +29,7 @@
 namespace cudaq::opt {
 #define GEN_PASS_DEF_MAPPINGFUNC
 #define GEN_PASS_DEF_MAPPINGPREP
+#define GEN_PASS_DEF_VERIFYMAPPING
 #include "cudaq/Optimizer/Transforms/Passes.h.inc"
 } // namespace cudaq::opt
 
@@ -2325,6 +2326,283 @@ LogicalResult initializeDevice(llvm::StringRef deviceString, bool nonComposable,
   }
   return success(deviceInstance || deviceBypass || !nonComposable);
 }
+
+//===----------------------------------------------------------------------===//
+// Mapped circuit verification
+//===----------------------------------------------------------------------===//
+
+struct VerifyMapping
+    : public cudaq::opt::impl::VerifyMappingBase<VerifyMapping> {
+  using VerifyMappingBase::VerifyMappingBase;
+
+  std::optional<cudaq::Device> deviceInstance;
+  bool deviceBypass = false;
+
+  LogicalResult initialize(MLIRContext *context) override {
+    return initializeDevice(device, /*nonComposable=*/true, context,
+                            deviceBypass, deviceInstance);
+  }
+
+  void runOnOperation() override {
+    if (deviceBypass)
+      return;
+
+    assert(deviceInstance && "verification requires a device topology");
+    const cudaq::Device &device = *deviceInstance;
+    DenseMap<Value, cudaq::Device::Qubit> wireToPhysical;
+
+    auto reportFailure = [&](Operation *op, const Twine &message) {
+      op->emitOpError(message);
+      signalPassFailure();
+      return failure();
+    };
+    auto emitFailure = [&](Operation *op, const Twine &message) {
+      (void)reportFailure(op, message);
+      return WalkResult::interrupt();
+    };
+    auto assignPhysical = [&](Operation *op, Value wire,
+                              cudaq::Device::Qubit physical,
+                              StringRef boundary) {
+      auto [iter, inserted] = wireToPhysical.try_emplace(wire, physical);
+      if (!inserted && iter->second != physical)
+        return reportFailure(op, Twine(boundary) + " assigns physical qubit " +
+                                     Twine(physical.index) +
+                                     ", but the wire was already "
+                                     "assigned physical qubit " +
+                                     Twine(iter->second.index));
+      return success();
+    };
+    auto propagatePhysical = [&](Operation *op, Value input, Value result,
+                                 StringRef boundary) {
+      auto iter = wireToPhysical.find(input);
+      if (iter == wireToPhysical.end())
+        return reportFailure(
+            op, Twine("cannot resolve the physical qubit across ") + boundary);
+      return assignPhysical(op, result, iter->second, boundary);
+    };
+
+    WalkResult result = getOperation().walk<WalkOrder::PreOrder>(
+        [&](Operation *op) -> WalkResult {
+          if (auto borrow = dyn_cast<cudaq::quake::BorrowWireOp>(op)) {
+            if (borrow.getSetName() != mappedWireSetName)
+              return emitFailure(
+                  op, "does not borrow a physical wire from @mapped_wireset");
+            const unsigned physical = borrow.getIdentity();
+            if (physical >= device.getNumQubits())
+              return emitFailure(op, Twine("borrows physical qubit ") +
+                                         Twine(physical) +
+                                         " outside the device topology");
+            wireToPhysical.try_emplace(borrow.getResult(),
+                                       cudaq::Device::Qubit(physical));
+            return WalkResult::advance();
+          }
+
+          if (auto ifOp = dyn_cast<cudaq::cc::IfOp>(op)) {
+            for (Region *region : ifOp.getRegions()) {
+              if (region->empty())
+                continue;
+              for (auto [linearArg, regionArg] : llvm::zip_equal(
+                       ifOp.getLinearArgs(), region->front().getArguments())) {
+                if (!isa<cudaq::quake::WireType>(linearArg.getType()))
+                  continue;
+                if (failed(propagatePhysical(op, linearArg, regionArg,
+                                             "cc.if region entry")))
+                  return WalkResult::interrupt();
+              }
+            }
+            return WalkResult::advance();
+          }
+
+          if (auto loop = dyn_cast<cudaq::cc::LoopOp>(op)) {
+            SmallVector<cudaq::Device::Qubit> physicalQubits;
+            for (Value initial : loop.getInitialArgs()) {
+              if (!isa<cudaq::quake::WireType>(initial.getType()))
+                continue;
+              auto iter = wireToPhysical.find(initial);
+              if (iter == wireToPhysical.end())
+                return emitFailure(
+                    op, "cannot resolve the physical qubit of a loop input");
+              physicalQubits.push_back(iter->second);
+            }
+
+            auto assignLoopValues = [&](auto values, StringRef boundary) {
+              unsigned physicalIndex = 0;
+              for (Value value : values) {
+                if (!isa<cudaq::quake::WireType>(value.getType()))
+                  continue;
+                if (physicalIndex == physicalQubits.size())
+                  return reportFailure(
+                      op, Twine(boundary) +
+                              " carries more wires than the loop inputs");
+                if (failed(assignPhysical(
+                        op, value, physicalQubits[physicalIndex++], boundary)))
+                  return failure();
+              }
+              if (physicalIndex != physicalQubits.size())
+                return reportFailure(
+                    op, Twine(boundary) +
+                            " carries fewer wires than the loop inputs");
+              return success();
+            };
+
+            // Mapping restores the entry layout on every backedge, so each
+            // loop-carried position has one physical identity in every region
+            // and at the loop exit. Seed all regions up front because a
+            // post-conditional loop's while region precedes its body in IR.
+            if (failed(assignLoopValues(loop.getWhileArguments(),
+                                        "cc.loop while entry")) ||
+                failed(assignLoopValues(loop.getDoEntryArguments(),
+                                        "cc.loop body entry")) ||
+                (loop.hasStep() &&
+                 failed(assignLoopValues(loop.getStepArguments(),
+                                         "cc.loop step entry"))) ||
+                failed(assignLoopValues(loop->getResults(), "cc.loop exit")))
+              return WalkResult::interrupt();
+            return WalkResult::advance();
+          }
+
+          if (auto condition = dyn_cast<cudaq::cc::ConditionOp>(op)) {
+            auto loop = cast<cudaq::cc::LoopOp>(op->getParentOp());
+            for (auto [forwarded, bodyArg, loopResult] : llvm::zip_equal(
+                     condition.getResults(), loop.getDoEntryArguments(),
+                     loop->getResults())) {
+              if (!isa<cudaq::quake::WireType>(forwarded.getType()))
+                continue;
+              if (failed(propagatePhysical(op, forwarded, bodyArg,
+                                           "cc.loop condition to body")) ||
+                  failed(propagatePhysical(op, forwarded, loopResult,
+                                           "cc.loop condition to exit")))
+                return WalkResult::interrupt();
+            }
+            return WalkResult::advance();
+          }
+
+          if (auto cont = dyn_cast<cudaq::cc::ContinueOp>(op)) {
+            auto propagateContinue = [&](auto destinations,
+                                         StringRef boundary) {
+              for (auto [operand, destination] :
+                   llvm::zip_equal(cont->getOperands(), destinations)) {
+                if (!isa<cudaq::quake::WireType>(operand.getType()))
+                  continue;
+                if (failed(
+                        propagatePhysical(op, operand, destination, boundary)))
+                  return failure();
+              }
+              return success();
+            };
+
+            if (auto ifOp = dyn_cast<cudaq::cc::IfOp>(op->getParentOp())) {
+              if (failed(propagateContinue(ifOp->getResults(),
+                                           "cc.if branch exit")))
+                return WalkResult::interrupt();
+            } else if (auto scope =
+                           dyn_cast<cudaq::cc::ScopeOp>(op->getParentOp())) {
+              if (failed(
+                      propagateContinue(scope->getResults(), "cc.scope exit")))
+                return WalkResult::interrupt();
+            } else if (auto loop =
+                           dyn_cast<cudaq::cc::LoopOp>(op->getParentOp())) {
+              Region *region = op->getParentRegion();
+              if (region == &loop.getBodyRegion()) {
+                if (loop.hasStep()) {
+                  if (failed(propagateContinue(loop.getStepArguments(),
+                                               "cc.loop body to step")))
+                    return WalkResult::interrupt();
+                } else if (failed(propagateContinue(loop.getWhileArguments(),
+                                                    "cc.loop body backedge"))) {
+                  return WalkResult::interrupt();
+                }
+              } else if (region == &loop.getStepRegion() &&
+                         failed(propagateContinue(loop.getWhileArguments(),
+                                                  "cc.loop step backedge"))) {
+                return WalkResult::interrupt();
+              }
+            }
+            return WalkResult::advance();
+          }
+
+          // Follow each physical wire through the value-semantics operands and
+          // results of the operation.
+          auto flow = cudaq::quake::detail::getThreadedWireFlow(op);
+          if (!flow) {
+            if (!isa<cudaq::quake::SinkOp, cudaq::quake::ReturnWireOp,
+                     cudaq::quake::EvinceOp>(op))
+              return WalkResult::advance();
+
+            SmallVector<Value> inputWires, resultWires;
+            llvm::copy_if(op->getOperands(), std::back_inserter(inputWires),
+                          [](Value value) {
+                            return isa<cudaq::quake::WireType>(value.getType());
+                          });
+            llvm::copy_if(op->getResults(), std::back_inserter(resultWires),
+                          [](Value value) {
+                            return isa<cudaq::quake::WireType>(value.getType());
+                          });
+            for (Value input : inputWires)
+              if (!wireToPhysical.contains(input))
+                return emitFailure(op,
+                                   "cannot resolve a terminal physical wire");
+            if (!resultWires.empty()) {
+              if (resultWires.size() != inputWires.size())
+                return emitFailure(
+                    op, "does not have one result for every physical wire");
+              for (auto [input, result] :
+                   llvm::zip_equal(inputWires, resultWires))
+                if (failed(propagatePhysical(op, input, result,
+                                             "terminal wire flow")))
+                  return WalkResult::interrupt();
+            }
+            return WalkResult::advance();
+          }
+
+          SmallVector<cudaq::Device::Qubit> physicalQubits;
+          physicalQubits.reserve(flow->inputs.size());
+          for (Value input : flow->inputs) {
+            auto iter = wireToPhysical.find(input);
+            if (iter == wireToPhysical.end())
+              return emitFailure(
+                  op, "cannot resolve the physical qubit of a mapped wire");
+            physicalQubits.push_back(iter->second);
+          }
+
+          if (auto gate = dyn_cast<cudaq::quake::OperatorInterface>(op)) {
+            const std::size_t gateQubits =
+                gate.getControls().size() + gate.getTargets().size();
+            if (gateQubits != physicalQubits.size())
+              return emitFailure(
+                  op, "does not use scalar physical wires for every qubit");
+            if (gateQubits > 2)
+              return emitFailure(
+                  op, "acts on more than two physical qubits, but the device "
+                      "topology describes only two-qubit couplings");
+
+            if (physicalQubits.size() == 2 &&
+                !device.areConnected(physicalQubits[0], physicalQubits[1]))
+              return emitFailure(op,
+                                 Twine("uses nonadjacent physical qubits ") +
+                                     Twine(physicalQubits[0].index) + " and " +
+                                     Twine(physicalQubits[1].index));
+
+            if (gate.getControls().size() == 1 &&
+                gate.getTargets().size() == 1 &&
+                !device.supportsDirection(physicalQubits[0], physicalQubits[1]))
+              return emitFailure(
+                  op, Twine("uses unsupported physical control-target "
+                            "direction ") +
+                          Twine(physicalQubits[0].index) + " -> " +
+                          Twine(physicalQubits[1].index));
+          }
+
+          for (auto [wire, physical] :
+               llvm::zip_equal(flow->results, physicalQubits))
+            wireToPhysical.try_emplace(wire, physical);
+          return WalkResult::advance();
+        });
+
+    if (result.wasInterrupted())
+      return;
+  }
+};
 
 //===----------------------------------------------------------------------===//
 // Pass implementation

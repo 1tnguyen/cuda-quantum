@@ -21,6 +21,7 @@
 // RUN: cudaq-opt --qubit-mapping=device=grid\(1,5\) %s | FileCheck %s
 // RUN: cudaq-opt --qubit-mapping=device=grid\(5,1\) %s | FileCheck %s
 // RUN: cudaq-opt --qubit-mapping=device=path\(5\) --qubit-mapping=device=path\(5\) %s | FileCheck --check-prefix=IDEMPOTENT %s
+// RUN: cudaq-opt --pass-pipeline='builtin.module(qubit-mapping{device=path(5)},func.func(verify-qubit-mapping{device=path(5)}))' %s -o /dev/null
 
 quake.wire_set @wires[2147483647]
 
