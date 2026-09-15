@@ -81,7 +81,7 @@ void crank_nicolson::integrate(double targetTime) {
     }
 
     m_state = rho_iter;
-    m_t += step_size;
+    m_t = cudmIntHelp::advanceTime(m_t, targetTime, step_size);
   }
 }
 

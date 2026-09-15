@@ -39,8 +39,10 @@ NB_MODULE(nvqir_dynamics_bindings, m) {
   public:
     PyCuDensityMatTimeStepper(cudensitymatHandle_t handle,
                               cudensitymatOperator_t liouvillian,
-                              cudaq::schedule schedule)
-        : cudaq::CuDensityMatTimeStepper(handle, liouvillian),
+                              cudaq::schedule schedule,
+                              bool requiresHermitianCompletion = false)
+        : cudaq::CuDensityMatTimeStepper(handle, liouvillian,
+                                         requiresHermitianCompletion),
           m_schedule(schedule) {}
     cudaq::schedule m_schedule;
   };
@@ -57,15 +59,16 @@ NB_MODULE(nvqir_dynamics_bindings, m) {
              for (const auto &param : schedule.get_parameters()) {
                params[param] = schedule.get_value_function()(param, 0.0);
              }
+             bool requiresHermitianCompletion = false;
              auto liouvillian =
                  cudaq::dynamics::Context::getCurrentContext()
                      ->getOpConverter()
-                     .constructLiouvillian({hamiltonian}, {collapse_ops},
-                                           modeExtents, params,
-                                           is_master_equation);
+                     .constructLiouvillian(
+                         {hamiltonian}, {collapse_ops}, modeExtents, params,
+                         is_master_equation, &requiresHermitianCompletion);
              new (self) PyCuDensityMatTimeStepper(
                  cudaq::dynamics::Context::getCurrentContext()->getHandle(),
-                 liouvillian, schedule);
+                 liouvillian, schedule, requiresHermitianCompletion);
            })
       .def("__init__",
            [](PyCuDensityMatTimeStepper *self, cudaq::schedule schedule,
@@ -94,15 +97,16 @@ NB_MODULE(nvqir_dynamics_bindings, m) {
              for (const auto &param : schedule.get_parameters()) {
                params[param] = schedule.get_value_function()(param, 0.0);
              }
+             bool requiresHermitianCompletion = false;
              auto liouvillian =
                  cudaq::dynamics::Context::getCurrentContext()
                      ->getOpConverter()
-                     .constructLiouvillian(hamiltonians, list_collapse_ops,
-                                           modeExtents, params,
-                                           is_master_equation);
+                     .constructLiouvillian(
+                         hamiltonians, list_collapse_ops, modeExtents, params,
+                         is_master_equation, &requiresHermitianCompletion);
              new (self) PyCuDensityMatTimeStepper(
                  cudaq::dynamics::Context::getCurrentContext()->getHandle(),
-                 liouvillian, schedule);
+                 liouvillian, schedule, requiresHermitianCompletion);
            })
       .def("__init__",
            [](PyCuDensityMatTimeStepper *self, cudaq::schedule schedule,
@@ -155,6 +159,7 @@ NB_MODULE(nvqir_dynamics_bindings, m) {
              self.computeImpl(castInputSimState->get_impl(),
                               castOutputSimState->get_impl(), t, params,
                               castInputSimState->getBatchSize());
+             self.completeHermitianRhs(*castOutputSimState);
            });
 
   // System dynamics data class

@@ -214,6 +214,9 @@ Any environment variables must be set prior to setting the target or running "`i
   * - ``CUDAQ_DYNAMICS_MAX_DIAGONAL_COUNT_FOR_MULTIDIAGONAL``
     - Non-negative number
     - The maximum number of diagonals for multi-diagonal representation. If the operator matrix has more diagonals than this value, the dense format will be used. Default is 1, i.e., operators with only one diagonal line (center, lower, or upper) will use the multi-diagonal sparse storage. 
+  * - ``CUDAQ_CUDM_LOCAL_LEFT_FUSION_MAX_MODES``
+    - Non-negative number
+    - The maximum number of modes in an automatically fused local left-action operator. The optimization is disabled when the variable is unset or set to 0. For an eligible non-batched, non-distributed master equation, CUDA-Q evaluates one Hermitian half of the Lindblad RHS and completes it with its adjoint. Compatible static terms are grouped up to the specified locality; wider and parameter-dependent terms retain the ordinary exact lowering. The best value is model- and hardware-dependent.
 
 Time-Dependent Dynamics
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -613,5 +616,3 @@ Specifically, it will detect the number of processes (GPUs) and distribute the c
 Examples
 ^^^^^^^^^^^^^
 The :ref:`Dynamics Examples <dynamics_examples>` section of the docs contains a number of excellent dynamics examples demonstrating how to simulate basic physics models, specific qubit modalities, and utilize multi-GPU multi-Node capabilities.
-
-

@@ -9,13 +9,17 @@
 #include "CuDensityMatTimeStepper.h"
 #include "CuDensityMatContext.h"
 #include "CuDensityMatErrorHandling.h"
+#include "CuDensityMatStateKernels.h"
 #include "CuDensityMatUtils.h"
+#include <cmath>
 #include <map>
 
 namespace cudaq {
 CuDensityMatTimeStepper::CuDensityMatTimeStepper(
-    cudensitymatHandle_t handle, cudensitymatOperator_t liouvillian)
-    : m_handle(handle), m_liouvillian(liouvillian) {};
+    cudensitymatHandle_t handle, cudensitymatOperator_t liouvillian,
+    bool requiresHermitianCompletion)
+    : m_handle(handle), m_liouvillian(liouvillian),
+      m_requiresHermitianCompletion(requiresHermitianCompletion) {};
 
 state CuDensityMatTimeStepper::compute(
     const state &inputState, double t,
@@ -32,6 +36,7 @@ state CuDensityMatTimeStepper::compute(
   assert(next_state.getBatchSize() == state.getBatchSize());
   computeImpl(state.get_impl(), next_state.get_impl(), t, parameters,
               state.getBatchSize());
+  completeHermitianRhs(next_state);
   return cudaq::state(
       std::make_unique<CuDensityMatState>(std::move(next_state)).release());
 }
@@ -97,6 +102,23 @@ void CuDensityMatTimeStepper::computeImpl(
   // Cleanup
   cudaq::dynamics::destroyArrayGpu(param_d);
   HANDLE_CUDM_ERROR(cudensitymatDestroyWorkspace(workspace));
+}
+
+void CuDensityMatTimeStepper::completeHermitianRhs(
+    CuDensityMatState &state) const {
+  if (!m_requiresHermitianCompletion)
+    return;
+  if (!state.is_density_matrix() || state.getBatchSize() != 1)
+    throw std::runtime_error(
+        "Hermitian RHS completion requires one density matrix.");
+
+  const auto elementCount = state.get_element_count();
+  const auto dimension =
+      static_cast<std::size_t>(std::llround(std::sqrt(elementCount)));
+  if (dimension * dimension != elementCount)
+    throw std::runtime_error(
+        "Hermitian RHS completion does not support distributed state data.");
+  dynamics::completeHermitianMatrix(state.get_device_pointer(), dimension);
 }
 
 } // namespace cudaq

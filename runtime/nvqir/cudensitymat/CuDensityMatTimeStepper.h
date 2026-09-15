@@ -16,7 +16,8 @@ namespace cudaq {
 class CuDensityMatTimeStepper : public base_time_stepper {
 public:
   explicit CuDensityMatTimeStepper(cudensitymatHandle_t handle,
-                                   cudensitymatOperator_t liouvillian);
+                                   cudensitymatOperator_t liouvillian,
+                                   bool requiresHermitianCompletion = false);
 
   state compute(const state &inputState, double t,
                 const std::unordered_map<std::string, std::complex<double>>
@@ -25,9 +26,11 @@ public:
       cudensitymatState_t inState, cudensitymatState_t outState, double t,
       const std::unordered_map<std::string, std::complex<double>> &parameters,
       int64_t batchSize);
+  void completeHermitianRhs(CuDensityMatState &state) const;
 
 private:
   cudensitymatHandle_t m_handle;
   cudensitymatOperator_t m_liouvillian;
+  bool m_requiresHermitianCompletion;
 };
 } // namespace cudaq

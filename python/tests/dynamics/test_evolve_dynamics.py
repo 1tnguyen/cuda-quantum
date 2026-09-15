@@ -7,7 +7,7 @@
 # ============================================================================ #
 import os, pytest
 import cudaq
-from cudaq import operators, boson
+from cudaq import operators, boson, spin
 
 if cudaq.num_available_gpus() == 0:
     pytest.skip("Skipping GPU tests", allow_module_level=True)
@@ -82,6 +82,80 @@ def test_euler_integrator():
         expt.append(exp_vals[0].expectation())
     expected_answer = (N - 1) * np.exp(-decay_rate * steps)
     np.testing.assert_allclose(expected_answer, expt, 1e-3)
+
+
+def test_local_left_fusion_matches_default_rhs(monkeypatch):
+    from cudaq.dynamics import nvqir_dynamics_bindings as bindings
+    from cudaq.dynamics.helpers import InitialState
+    from cudaq.dynamics.integrators.builtin_integrators import (
+        cuDensityMatTimeStepper,)
+    from cudaq.mlir._mlir_libs._quakeDialects.cudaq_runtime import MatrixOperator
+
+    fusion_env = "CUDAQ_CUDM_LOCAL_LEFT_FUSION_MAX_MODES"
+    num_spins = 4
+    dimensions = {i: 2 for i in range(num_spins)}
+    mode_extents = [2] * num_spins
+    schedule = bindings.Schedule([0.0, 1.0], ["time"])
+
+    hamiltonian = 1.0 * spin.z(0)
+    for i in range(1, num_spins):
+        hamiltonian += 1.0 * spin.z(i)
+    for i in range(num_spins - 1):
+        hamiltonian += 2.5 * spin.x(i) * spin.x(i + 1)
+        hamiltonian += 1.75 * spin.y(i) * spin.y(i + 1)
+        hamiltonian += 3.25 * spin.z(i) * spin.z(i + 1)
+    collapse_operators = [1.0 * spin.x(i) for i in range(num_spins)]
+
+    def make_stepper():
+        return cuDensityMatTimeStepper(
+            schedule,
+            MatrixOperator(hamiltonian),
+            [MatrixOperator(op) for op in collapse_operators],
+            mode_extents,
+            True,
+        )
+
+    initial_state = bindings.createInitialState(InitialState.UNIFORM,
+                                                dimensions, True)
+    monkeypatch.delenv(fusion_env, raising=False)
+    baseline_stepper = make_stepper()
+    baseline_output = baseline_stepper.compute(initial_state, 0.0)
+
+    monkeypatch.setenv(fusion_env, "3")
+    fused_stepper = make_stepper()
+    fused_output = fused_stepper.compute(initial_state, 0.0)
+
+    baseline_rhs = baseline_output.to_numpy()
+    fused_rhs = fused_output.to_numpy()
+    assert np.linalg.norm(baseline_rhs) > 0.0
+    np.testing.assert_allclose(fused_rhs, baseline_rhs, atol=1e-12, rtol=1e-12)
+
+    evolution_schedule = Schedule(np.linspace(0.0, 0.02, 3), ["time"])
+    monkeypatch.delenv(fusion_env)
+    baseline_evolution = cudaq.evolve(
+        hamiltonian,
+        dimensions,
+        evolution_schedule,
+        InitialState.ZERO,
+        collapse_operators=collapse_operators,
+        integrator=RungeKuttaIntegrator(order=1, max_step_size=0.01),
+    )
+
+    monkeypatch.setenv(fusion_env, "3")
+    fused_evolution = cudaq.evolve(
+        hamiltonian,
+        dimensions,
+        evolution_schedule,
+        InitialState.ZERO,
+        collapse_operators=collapse_operators,
+        integrator=RungeKuttaIntegrator(order=1, max_step_size=0.01),
+    )
+    np.testing.assert_allclose(
+        np.array(fused_evolution.final_state()),
+        np.array(baseline_evolution.final_state()),
+        atol=1e-12,
+        rtol=1e-12,
+    )
 
 
 def test_evolve_async_dynamics_target():

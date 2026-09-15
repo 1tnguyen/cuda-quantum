@@ -247,8 +247,8 @@ evolveSingleImpl(const std::vector<int64_t> &dims, const schedule &schedule,
   std::vector<cudaq::state> intermediateStates;
   for (const auto &step : schedule) {
     integrator.integrate(step.real());
-    auto [t, currentState] = integrator.getState();
     if (storeIntermediateResults != cudaq::IntermediateResultSave::None) {
+      auto [t, currentState] = integrator.getState();
       std::vector<double> expVals;
 
       for (auto &expectation : expectations) {

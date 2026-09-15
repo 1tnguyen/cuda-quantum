@@ -35,6 +35,7 @@ if (${cuDensityMat_VERSION} VERSION_GREATER_EQUAL "0.4")
     CuDensityMatExpectation.cpp
     CuDensityMatEvolution.cpp
     CuDensityMatState.cpp
+    CuDensityMatStateKernels.cu
     CuDensityMatContext.cpp
     CuDensityMatOpConverter.cpp
     CuDensityMatCallbackConverter.cpp

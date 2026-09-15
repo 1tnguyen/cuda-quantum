@@ -43,6 +43,8 @@ public:
   /// @param modeExtents The extents of the modes.
   /// @param parameters The parameters of the operators.
   /// @param isMasterEquation Whether the Liouvillian is a master equation.
+  /// @param requiresHermitianCompletion Optional output flag indicating that
+  /// the returned operator computes half of a Hermitian master-equation RHS.
   /// @return The constructed Liouvillian operator.
   cudensitymatOperator_t constructLiouvillian(
       const std::vector<sum_op<cudaq::matrix_handler>> &hamOperators,
@@ -50,7 +52,7 @@ public:
           &collapseOperators,
       const std::vector<int64_t> &modeExtents,
       const std::unordered_map<std::string, std::complex<double>> &parameters,
-      bool isMasterEquation);
+      bool isMasterEquation, bool *requiresHermitianCompletion = nullptr);
   /// @brief  Construct a Liouvillian operator from a super operator.
   /// @param superOps The super operators.
   /// @param modeExtents The extents of the modes.

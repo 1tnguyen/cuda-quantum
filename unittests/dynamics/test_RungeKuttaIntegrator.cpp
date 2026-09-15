@@ -6,6 +6,7 @@
 //  * the terms of the Apache License 2.0 which accompanies this distribution. *
 //  ******************************************************************************/
 
+#include "CuDensityMatIntegratorBase.h"
 #include "CuDensityMatState.h"
 #include "CuDensityMatTimeStepper.h"
 #include "CuDensityMatUtils.h"
@@ -58,6 +59,27 @@ protected:
 // Test Initialization
 TEST_F(RungeKuttaIntegratorTest, Initialization) {
   ASSERT_NE(integrator_, nullptr);
+}
+
+TEST_F(RungeKuttaIntegratorTest, NominallyEqualStepsReachTargetExactly) {
+  constexpr std::size_t numIntervals = 99;
+  const double maxStepSize = 1.0 / numIntervals;
+  double currentTime = 0.0;
+  std::size_t actualSteps = 0;
+
+  for (std::size_t i = 1; i <= numIntervals; ++i) {
+    const double targetTime = static_cast<double>(i) / numIntervals;
+    while (currentTime < targetTime) {
+      const auto stepSize = CuDensityMatIntegratorHelper::computeStepSize(
+          currentTime, targetTime, maxStepSize);
+      currentTime = CuDensityMatIntegratorHelper::advanceTime(
+          currentTime, targetTime, stepSize);
+      ++actualSteps;
+    }
+  }
+
+  EXPECT_EQ(actualSteps, numIntervals);
+  EXPECT_EQ(currentTime, 1.0);
 }
 
 TEST_F(RungeKuttaIntegratorTest, CheckEvolve) {

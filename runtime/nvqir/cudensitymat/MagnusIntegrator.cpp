@@ -73,7 +73,7 @@ void magnus_expansion::integrate(double targetTime) {
     }
 
     m_state = std::make_shared<cudaq::state>(result.release());
-    m_t += step_size;
+    m_t = cudmIntHelp::advanceTime(m_t, targetTime, step_size);
   }
 }
 

@@ -12,6 +12,10 @@
 #include "CuDensityMatState.h"
 #include "CuDensityMatTimeStepper.h"
 #include "cudaq/algorithms/base_integrator.h"
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <numeric>
 
 namespace cudaq {
 
@@ -50,6 +54,21 @@ struct CuDensityMatIntegratorHelper {
     return std::min(m_dt.value_or(targetTime - m_t), targetTime - m_t);
   }
 
+  /// @brief Advance time while landing exactly on the requested target.
+  ///
+  /// Adding `(targetTime - currentTime)` is not guaranteed to reproduce
+  /// `targetTime` bit-for-bit. Leaving the time infinitesimally below the
+  /// target causes the integration loop to take a redundant near-zero step.
+  static double advanceTime(double currentTime, double targetTime,
+                            double stepSize) {
+    const auto scale =
+        std::max({1.0, std::abs(currentTime), std::abs(targetTime)});
+    const auto tolerance = 8.0 * std::numeric_limits<double>::epsilon() * scale;
+    return targetTime - currentTime - stepSize <= tolerance
+               ? targetTime
+               : currentTime + stepSize;
+  }
+
   /// @brief Lazily construct the time stepper from the system and schedule.
   ///
   /// Must be called at the start of integrate() before the time-stepping loop.
@@ -64,20 +83,27 @@ struct CuDensityMatIntegratorHelper {
     for (const auto &param : m_schedule.get_parameters())
       params[param] = m_schedule.get_value_function()(param, 0.0);
 
-    auto liouvillian =
-        m_system.superOp.has_value()
-            ? cudaq::dynamics::Context::getCurrentContext()
-                  ->getOpConverter()
-                  .constructLiouvillian({m_system.superOp.value()},
-                                        m_system.modeExtents, params)
-            : cudaq::dynamics::Context::getCurrentContext()
-                  ->getOpConverter()
-                  .constructLiouvillian({m_system.hamiltonian},
-                                        {m_system.collapseOps},
-                                        m_system.modeExtents, params,
-                                        castSimState.is_density_matrix());
+    auto &converter =
+        cudaq::dynamics::Context::getCurrentContext()->getOpConverter();
+    bool requiresHermitianCompletion = false;
+    cudensitymatOperator_t liouvillian;
+    if (m_system.superOp.has_value()) {
+      liouvillian = converter.constructLiouvillian(
+          {m_system.superOp.value()}, m_system.modeExtents, params);
+    } else {
+      const auto hilbertDimension = std::accumulate(
+          m_system.modeExtents.begin(), m_system.modeExtents.end(),
+          std::size_t{1}, std::multiplies<std::size_t>());
+      const bool isLocalState = castSimState.getBatchSize() == 1 &&
+                                castSimState.get_element_count() ==
+                                    hilbertDimension * hilbertDimension;
+      liouvillian = converter.constructLiouvillian(
+          {m_system.hamiltonian}, {m_system.collapseOps}, m_system.modeExtents,
+          params, castSimState.is_density_matrix(),
+          isLocalState ? &requiresHermitianCompletion : nullptr);
+    }
     m_stepper = std::make_unique<CuDensityMatTimeStepper>(
-        castSimState.get_handle(), liouvillian);
+        castSimState.get_handle(), liouvillian, requiresHermitianCompletion);
   }
 
   /// @brief Evaluate all schedule parameters at time t.
