@@ -55,6 +55,7 @@ from cudaq.logical.algebra.gf2 import GF2Matrix
 from cudaq.logical.devices.definition import QECRegion
 from cudaq.logical.programs.definition import ProgramDefinition
 from cudaq.logical.qec.objectives import SubsystemFragmentObjective
+from cudaq.logical.qec.decoder_attrs import decoder_attributes
 from cudaq.logical.types.semantic import (
     record,
     resource,
@@ -143,6 +144,7 @@ class GadgetBuilder:
         self._patches: list[PatchValue] = []
         self._resources: list[ResourceValue] = []
         self._record_counters: dict[str, int] = {}
+        self._decoder_rounds: dict[str, int] = {}
         self._produced_record_bases: set[str] = set()
         self._produced_records: set[str] = set()
         self._produced_record_order: list[str] = []
@@ -657,6 +659,13 @@ class GadgetBuilder:
             attrs["record_schema"] = strings(spec.record_schema)
         if spec.outcome_map is not None:
             attrs["outcome_map"] = self._outcome_map_attr(spec.outcome_map)
+        if spec.decoder_results is not None:
+            attrs["decoder_results"] = mlir_ir.ArrayAttr.get(
+                [
+                    mlir_ir.FlatSymbolRefAttr.get(name, context=self.context)
+                    for name in spec.decoder_results
+                ],
+                context=self.context)
         if spec.parameter_map is not None:
             attrs["parameter_map"] = mlir_ir.DictAttr.get(
                 {
@@ -1157,7 +1166,7 @@ class GadgetBuilder:
             "preserve", context=self.context)
 
     def _derive_inferred_outcome_map(self, values) -> None:
-        """Materialize canonical affine result semantics when Python can prove it."""
+        """Infer affine or explicitly decoder-backed Boolean result semantics."""
 
         if (self.definition.spec is not None or
                 self.definition.implements is None):
@@ -1166,6 +1175,28 @@ class GadgetBuilder:
             value for value, boundary in zip(values, self.result_boundaries)
             if boundary[0] == "bool")
         if outcomes:
+            producers = tuple(
+                getattr(value.mlir_value.owner, "operation", None)
+                for value in outcomes)
+            if all(op is not None and op.name == "fabric.decode_bit"
+                   for op in producers):
+                decoders = tuple(
+                    op.attributes["decoder"].value for op in producers)
+                if self._produced_record_order:
+                    self.spec_operation.attributes[
+                        "record_schema"] = mlir_ir.ArrayAttr.get(
+                            [
+                                mlir_ir.StringAttr.get(name,
+                                                       context=self.context)
+                                for name in self._produced_record_order
+                            ],
+                            context=self.context)
+                self.definition._attach_inferred_decoder_results(decoders)
+                self.spec_operation.attributes[
+                    "decoder_results"] = mlir_ir.ArrayAttr.get(
+                        [op.attributes["decoder"] for op in producers],
+                        context=self.context)
+                return
             parities = tuple(value.producer for value in outcomes)
             if any(not isinstance(parity, ProfileParity)
                    for parity in parities):
@@ -2236,6 +2267,59 @@ class GadgetBuilder:
                 f"syndrome schedule for {basis.upper()} check {check_index} "
                 f"must permute canonical support {support}, got {ordered}")
         return ordered
+
+    def submit_syndrome(self, bits, *, decoder, round=None):
+        if (not isinstance(bits,
+                           (MeasurementBits, SyndromeValue, LogicalBool)) or
+                bits.owner is not self):
+            raise TypeError("submit_syndrome expects records from this gadget")
+        self._before_operation("fabric.submit_syndrome")
+        attrs = decoder_attributes(decoder, self.context)
+        symbol = str(attrs["decoder"])
+        if round is None:
+            round = self._decoder_rounds.get(symbol, 0)
+        if isinstance(round, bool) or not isinstance(round, int) or round < 0:
+            raise ValueError("submit_syndrome round must be nonnegative")
+        attrs.update({
+            "round":
+                mlir_ir.IntegerAttr.get(
+                    mlir_ir.IntegerType.get_signless(64, context=self.context),
+                    round),
+            "operandSegmentSizes":
+                mlir_ir.DenseI32ArrayAttr.get((1, 0), self.context),
+        })
+        self._emit("fabric.submit_syndrome",
+                   operands=[bits.mlir_value],
+                   attributes=attrs)
+        self._decoder_rounds[symbol] = max(self._decoder_rounds.get(symbol, 0),
+                                           round + 1)
+
+    def decode_bit(self, bits, *, decoder, parity_indices=None, invert=False):
+        if (not isinstance(bits, (MeasurementBits, LogicalBool)) or
+                bits.owner is not self):
+            raise TypeError("decode_bit expects measurements from this gadget")
+        if not isinstance(invert, bool):
+            raise TypeError("decode_bit invert must be a bool")
+        attrs = decoder_attributes(decoder, self.context)
+        width = (1 if isinstance(bits, LogicalBool) else
+                 mlir_ir.RankedTensorType(bits.mlir_value.type).shape[0])
+        indices = tuple(
+            range(width) if parity_indices is None else parity_indices)
+        if any(
+                isinstance(index, bool) or not isinstance(index, int) or
+                not 0 <= index < width for index in indices):
+            raise ValueError(
+                "decode_bit parity_indices must index the measurements")
+        attrs["parity_indices"] = mlir_ir.DenseI64ArrayAttr.get(
+            indices, self.context)
+        attrs["invert"] = mlir_ir.BoolAttr.get(invert, context=self.context)
+        self._before_operation("fabric.decode_bit")
+        operation = self._emit("fabric.decode_bit",
+                               operands=[bits.mlir_value],
+                               results=[self.i1_type],
+                               attributes=attrs)
+        # Decoder history is not affine provenance in the terminal records.
+        return LogicalBool(operation.result, owner=self)
 
     def extract_syndrome(
         self,

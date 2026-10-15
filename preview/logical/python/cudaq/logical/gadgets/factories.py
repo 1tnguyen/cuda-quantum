@@ -21,6 +21,8 @@ from cudaq.logical.ops._impl import (
     cx,
     cz,
     discard,
+    decode_bit,
+    mz,
     extract_syndrome,
     h,
     reset,
@@ -87,6 +89,7 @@ def _measurement(
     logical: int,
     preserve_block: bool,
     name: str | None,
+    decoder=None,
 ):
     encoding = _encoding(value)
     code = encoding.code
@@ -97,14 +100,38 @@ def _measurement(
     objective = _measure_z_intent if basis == "z" else _measure_x_intent
     pauli = Z if basis == "z" else X
 
+    if decoder is not None:
+        if preserve_block:
+            raise ValueError(
+                "decoder-backed readout destructively measures all data qubits")
+        representative = (code.logical_z_basis.rows[logical] if basis == "z"
+                          else code.logical_x_basis.rows[logical])
+        support = representative[
+            code.n:] if basis == "z" else representative[:code.n]
+        other = representative[:code.
+                               n] if basis == "z" else representative[code.n:]
+        if any(other):
+            raise ValueError(
+                "decoder-backed readout requires a uniform X or Z logical representative"
+            )
+        indices = tuple(index for index, bit in enumerate(support) if bit)
+
     def realization(block):
-        block, outcome = mpp(pauli(block[logical]))
+        if decoder is None:
+            block, outcome = mpp(pauli(block[logical]))
+        else:
+            if basis == "x":
+                block = h(block.data)
+            block, bits = mz(block.data, record="terminal_data")
+            outcome = decode_bit(bits, decoder=decoder, parity_indices=indices)
         if preserve_block:
             return block, outcome
         discard(block)
         return outcome
 
     suffix = "_preserve_block" if preserve_block else ""
+    if decoder is not None:
+        suffix += "_decoded"
     realization.__name__ = (name or
                             f"{code.name}_measure_{basis}{logical}{suffix}")
     realization.__qualname__ = realization.__name__
@@ -121,14 +148,21 @@ def measure_z(
     logical: int = 0,
     preserve_block: bool = False,
     name: str | None = None,
+    decoder=None,
 ):
-    """Return a destructive logical-Z measurement realization."""
+    """Return logical-Z readout, optionally using a terminal decoder.
+
+    With ``decoder``, measure all data qubits in their existing order and
+    return ``decode_bit`` with the selected logical representative's parity.
+    Without it, retain the ideal logical-product measurement realization.
+    """
     return _measurement(
         value,
         basis="z",
         logical=logical,
         preserve_block=preserve_block,
         name=name,
+        decoder=decoder,
     )
 
 
@@ -138,14 +172,20 @@ def measure_x(
     logical: int = 0,
     preserve_block: bool = False,
     name: str | None = None,
+    decoder=None,
 ):
-    """Return a destructive logical-X measurement realization."""
+    """Return logical-X readout, optionally using a terminal decoder.
+
+    Decoder-backed readout rotates all data qubits to X before measurement;
+    ``decoder`` must be configured for this terminal measurement basis.
+    """
     return _measurement(
         value,
         basis="x",
         logical=logical,
         preserve_block=preserve_block,
         name=name,
+        decoder=decoder,
     )
 
 
@@ -156,6 +196,7 @@ def logical_measure(
     logical: int = 0,
     preserve_block: bool = False,
     name: str | None = None,
+    decoder=None,
 ):
     """Return a destructive logical measurement realization for one basis.
 
@@ -174,6 +215,7 @@ def logical_measure(
         logical=logical,
         preserve_block=preserve_block,
         name=name,
+        decoder=decoder,
     )
 
 
@@ -225,6 +267,7 @@ def logical_pauli(
 
 def css_memory_round(value,
                      *,
+                     decoder=None,
                      record: str | None = None,
                      name: str | None = None):
     """Return a code-specific logical memory round.
@@ -234,15 +277,23 @@ def css_memory_round(value,
     syndrome history. It implements the standard ``cudaq.logical.logical.idle``
     objective, so QEC selection binds it to explicit ``cudaq.logical.idle`` memory
     workloads placed on the code.
+
+    With ``decoder=`` the gadget explicitly submits each extracted round in
+    measurement order. Configure the decoder to consume that order during setup.
+    Omitting the decoder retains extraction-only behavior. Decoder reset and
+    correction consumption are separate operations.
     """
     encoding = _encoding(value)
     code = encoding.code
 
     def realization(block):
         if record is None:
-            block, _ = extract_syndrome(block)
+            block, syndrome = extract_syndrome(block)
         else:
-            block, _ = extract_syndrome(block, record=record)
+            block, syndrome = extract_syndrome(block, record=record)
+        if decoder is not None:
+            from cudaq.logical.ops import submit_syndrome
+            submit_syndrome(syndrome, decoder=decoder)
         return block
 
     realization.__name__ = name or f"{code.name}_memory_round"

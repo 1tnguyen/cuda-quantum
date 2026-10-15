@@ -5441,6 +5441,64 @@ class _P2ToP3:
                                               instance_symbol),
                     )
                     continue
+                if name in {"fabric.submit_syndrome", "fabric.decode_bit"}:
+                    records = tuple(
+                        record for operand in operands for record in (
+                            operand if isinstance(operand, tuple) else (
+                                operand,)))
+                    if not records or any(record is None for record in records):
+                        raise ValueError(
+                            f"{name} has no projected physical records")
+                    attrs = {
+                        str(key): value
+                        for key, value in operation.attributes.items()
+                        if str(key) not in {"operandSegmentSizes", "event_id"}
+                    }
+                    attrs["event_id"] = mlir_ir.StringAttr.get(
+                        self._event_id(name.split(".")[1]),
+                        context=self.context)
+                    if name == "fabric.decode_bit":
+                        decoded = self._emit(
+                            "phys.decode_bit",
+                            operands=records,
+                            results=[
+                                mlir_ir.IntegerType.get_signless(
+                                    1, context=self.context)
+                            ],
+                            attributes=attrs)
+                        self._assign(operation, local_values, (decoded.result,))
+                    else:
+                        self._emit("phys.submit_syndrome",
+                                   operands=records,
+                                   attributes=attrs)
+                    continue
+                if name == "fabric.parity":
+                    records = self._flatten_projected(operands)
+                    conditioned = [self._condition(value) for value in records]
+                    i1 = mlir_ir.IntegerType.get_signless(1,
+                                                          context=self.context)
+                    if not conditioned:
+                        result = self._emit(
+                            "arith.constant",
+                            results=[i1],
+                            attributes={
+                                "value": mlir_ir.IntegerAttr.get(i1, 0)
+                            }).result
+                    else:
+                        result = conditioned[0]
+                        for value in conditioned[1:]:
+                            result = self._emit(
+                                "phys.xor",
+                                operands=[result, value],
+                                results=[i1],
+                                attributes={
+                                    "event_id":
+                                        mlir_ir.StringAttr.get(
+                                            self._event_id("xor"),
+                                            context=self.context)
+                                }).result
+                    self._assign(operation, local_values, (result,))
+                    continue
                 if name == "fabric.xor":
                     conditioned = [self._condition(value) for value in operands]
                     parity = self._emit(

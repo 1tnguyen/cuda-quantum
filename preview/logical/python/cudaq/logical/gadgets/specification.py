@@ -232,6 +232,11 @@ class GadgetSpec:
     count, directions, and encodings must match what the realization
     signature infers, and materialization rejects any disagreement with
     :class:`cudaq.logical.errors.InvalidPortBinding`.
+
+    ``decoder_results`` is an alternative to an affine ``outcome_map``: it
+    binds every Boolean result, in order, to a decoder name. Those results
+    must come directly from matching ``decode_bit`` operations. Mixed affine
+    and decoded Boolean returns are not supported by this contract.
     """
 
     implements: Any
@@ -240,8 +245,20 @@ class GadgetSpec:
     outcome_map: OutcomeMap | None = None
     parameter_map: ParameterMap | None = None
     metadata: Mapping[str, Any] | None = None
+    decoder_results: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.decoder_results is not None:
+            decoders = tuple(self.decoder_results)
+            if not decoders or any(
+                    not isinstance(name, str) or not name for name in decoders):
+                raise ValueError(
+                    "GadgetSpec decoder_results requires nonempty decoder names"
+                )
+            if self.outcome_map is not None:
+                raise ValueError(
+                    "decoder_results and outcome_map are mutually exclusive")
+            object.__setattr__(self, "decoder_results", decoders)
         if self.implements is None:
             raise ValueError("GadgetSpec requires an implements= objective")
         ports = tuple(self.ports)
@@ -508,11 +525,13 @@ def _verify_explicit_spec(definition: "GadgetDefinition") -> None:
     else:
         objective_outcomes = 0
 
-    mapped_outcomes = (spec.outcome_map.outcome_count
-                       if spec.outcome_map is not None else 0)
+    mapped_outcomes = (
+        len(spec.decoder_results) if spec.decoder_results is not None else
+        spec.outcome_map.outcome_count if spec.outcome_map is not None else 0)
     if mapped_outcomes != objective_outcomes:
+        contract = "decoder_results" if spec.decoder_results is not None else "OutcomeMap"
         raise ObjectiveMismatch(
-            f"gadget {definition.name!r} explicit OutcomeMap has "
+            f"gadget {definition.name!r} explicit {contract} has "
             f"{mapped_outcomes} row(s), but objective "
             f"{getattr(objective, 'name', objective)!r} exposes "
             f"{objective_outcomes} classical Boolean outcome(s)")

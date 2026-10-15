@@ -415,6 +415,15 @@ def Fabric_ObjectiveOp : Fabric_Op<"objective", [Symbol]> {
 
 def Fabric_GadgetSpecOp : Fabric_Op<"gadget_spec", [Symbol]> {
   let summary = "objective and typed QEC boundary, separate from realization";
+  let description = [{
+    Boolean results have either an affine `outcome_map` or a runtime
+    `decoder_results` contract. The latter lists one decoder symbol per Boolean
+    result, in result order; each result must be returned directly from a
+    matching `fabric.decode_bit`. Decoder results depend on accumulated runtime
+    state and must not be interpreted as affine measurement-record parities.
+    These contracts are mutually exclusive; mixed affine and decoded Boolean
+    results are not currently supported within one gadget specification.
+  }];
   let arguments = (ins
     SymbolNameAttr:$sym_name,
     FlatSymbolRefAttr:$objective,
@@ -429,6 +438,7 @@ def Fabric_GadgetSpecOp : Fabric_Op<"gadget_spec", [Symbol]> {
     OptionalAttr<FlatSymbolRefAttr>:$transform,
     OptionalAttr<ArrayAttr>:$record_schema,
     OptionalAttr<DictionaryAttr>:$outcome_map,
+    OptionalAttr<ArrayAttr>:$decoder_results,
     OptionalAttr<DictionaryAttr>:$parameter_map,
     OptionalAttr<DictionaryAttr>:$metadata
   );

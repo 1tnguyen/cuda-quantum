@@ -104,6 +104,7 @@ _API_NAMES = (
 )
 _COMPAT_EXPORTS = {name: f"cudaq.logical.qec.api:{name}" for name in _API_NAMES}
 _EXPORTS = {
+    "DecoderSpec": "cudaq.logical.qec.decoder_spec:DecoderSpec",
     **{
         name: f"cudaq.logical.qec.lowering:{name}" for name in (
             "ActionSiteHandle",

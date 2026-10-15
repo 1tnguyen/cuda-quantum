@@ -2464,6 +2464,22 @@ LogicalResult GadgetSpecOp::verify() {
     return success();
   };
 
+  if (auto decoders = getDecoderResults()) {
+    if (getOutcomeMap())
+      return emitOpError(
+          "decoder_results and outcome_map are mutually exclusive");
+    if (decoders->empty() ||
+        static_cast<int64_t>(decoders->size()) != realizationOutcomes ||
+        (objectiveOutcomes &&
+         static_cast<int64_t>(decoders->size()) != *objectiveOutcomes))
+      return emitOpError("decoder_results must exactly cover objective and "
+                         "realization Boolean results");
+    for (Attribute decoder : *decoders)
+      if (!isa<FlatSymbolRefAttr>(decoder))
+        return emitOpError(
+            "decoder_results must contain decoder symbol references");
+  }
+
   if (auto outcome = getOutcomeMap()) {
     if (failed(verifyMapKeys(
             *outcome,
@@ -2604,7 +2620,7 @@ LogicalResult GadgetSpecOp::verify() {
         }
       }
     }
-  } else if (!isEntrypoint &&
+  } else if (!isEntrypoint && !getDecoderResults() &&
              (realizationOutcomes != 0 ||
               (objectiveOutcomes && *objectiveOutcomes != 0))) {
     return emitOpError("Boolean objective and realization results require a "
@@ -3309,6 +3325,25 @@ resolveTypedRecordExpression(Value value) {
 static LogicalResult verifyOutcomeReturnProvenance(Operation *owner,
                                                    ReturnOp returnOp,
                                                    GadgetSpecOp spec) {
+  if (auto decoders = spec.getDecoderResults()) {
+    unsigned index = 0;
+    for (Value value : returnOp.getOperands()) {
+      if (!value.getType().isInteger(1))
+        continue;
+      auto decode = value.getDefiningOp<DecodeBitOp>();
+      if (!decode || index >= decoders->size() ||
+          decode.getDecoderAttr() != (*decoders)[index])
+        return owner->emitOpError("Boolean gadget return ")
+               << index
+               << " must come directly from fabric.decode_bit with "
+                  "the decoder declared in decoder_results";
+      ++index;
+    }
+    if (index != decoders->size())
+      return owner->emitOpError(
+          "decoder_results must cover every Boolean return");
+    return success();
+  }
   if (spec.getEntrypoint())
     return success();
   auto outcome = spec.getOutcomeMap();

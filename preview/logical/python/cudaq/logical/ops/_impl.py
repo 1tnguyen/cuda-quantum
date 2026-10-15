@@ -296,6 +296,26 @@ def read_syndrome_ancillas(patch, *, record: str | None = None):
         patch, record=record)
 
 
+def submit_syndrome(bits, *, decoder, round=None):
+    """Submit records in their existing order to the named decoder."""
+    return require_trace("submit_syndrome").submit_syndrome(bits,
+                                                            decoder=decoder,
+                                                            round=round)
+
+
+def decode_bit(bits, *, decoder, parity_indices=None, invert=False):
+    """Submit terminal measurements and return the decoder-corrected parity.
+
+    ``parity_indices`` selects the raw logical parity within the unchanged
+    measurement order; omitting it selects all measurements. The decoder uses
+    its accumulated syndrome history as well as these terminal measurements.
+    """
+    return require_trace("decode_bit").decode_bit(bits,
+                                                  decoder=decoder,
+                                                  parity_indices=parity_indices,
+                                                  invert=invert)
+
+
 def extract_syndrome(
     patch,
     *,

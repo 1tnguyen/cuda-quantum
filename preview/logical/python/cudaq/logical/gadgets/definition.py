@@ -61,6 +61,7 @@ class GadgetDefinition(ImmutableValue):
         "interface",
         "spec",
         "_inferred_outcome_map",
+        "_inferred_decoder_results",
         "device",
         "__dict__",
     )
@@ -116,6 +117,7 @@ class GadgetDefinition(ImmutableValue):
         self.implements = implements
         self.spec = spec
         self._inferred_outcome_map = None
+        self._inferred_decoder_results = None
         if device is not None:
             from cudaq.logical.devices.definition import Device
 
@@ -194,7 +196,8 @@ class GadgetDefinition(ImmutableValue):
 
     def _attach_inferred_outcome_map(self, outcome_map: OutcomeMap) -> None:
         previous = self._inferred_outcome_map
-        if previous is not None and previous != outcome_map:
+        if (self._inferred_decoder_results is not None or
+            (previous is not None and previous != outcome_map)):
             from ..errors import ObjectiveMismatch
 
             raise ObjectiveMismatch(
@@ -208,9 +211,32 @@ class GadgetDefinition(ImmutableValue):
 
         if self.spec is not None:
             return self.spec.outcome_map
-        if self._inferred_outcome_map is None and self.implements is not None:
+        if (self._inferred_outcome_map is None and
+                self._inferred_decoder_results is None and
+                self.implements is not None):
             self.materialize()
         return self._inferred_outcome_map
+
+    def _attach_inferred_decoder_results(self, decoders) -> None:
+        previous = self._inferred_decoder_results
+        if (self._inferred_outcome_map is not None or
+            (previous is not None and previous != decoders)):
+            from ..errors import ObjectiveMismatch
+            raise ObjectiveMismatch(
+                f"gadget {self.name!r} derived context-dependent decoder_results"
+            )
+        object.__setattr__(self, "_inferred_decoder_results", decoders)
+
+    @property
+    def decoder_results(self) -> tuple[str, ...] | None:
+        """Runtime decoder bindings, in Boolean result order; not an OutcomeMap."""
+        if self.spec is not None:
+            return self.spec.decoder_results
+        if (self._inferred_decoder_results is None and
+                self._inferred_outcome_map is None and
+                self.implements is not None):
+            self.materialize()
+        return self._inferred_decoder_results
 
     def _attach_direct_snapshot(self, build) -> None:
         if hasattr(self, "_qlx_direct_snapshot"):
