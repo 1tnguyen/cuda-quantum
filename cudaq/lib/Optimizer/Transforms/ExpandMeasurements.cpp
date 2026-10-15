@@ -287,13 +287,14 @@ public:
   }
 };
 
-/// Convert a `quake.reset` with a `veq` argument into a loop over the elements
-/// of the `veq` and `quake.reset` on each of them.
-class ResetRewrite : public OpRewritePattern<cudaq::quake::ResetOp> {
+/// Expand a single-target operation on a register into a loop over its
+/// elements.
+template <typename Op>
+class TargetRewrite : public OpRewritePattern<Op> {
 public:
-  using OpRewritePattern::OpRewritePattern;
+  using OpRewritePattern<Op>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(cudaq::quake::ResetOp resetOp,
+  LogicalResult matchAndRewrite(Op resetOp,
                                 PatternRewriter &rewriter) const override {
     auto loc = resetOp.getLoc();
     auto veqArg = resetOp.getTargets();
@@ -305,7 +306,7 @@ public:
           Value iv = block.getArgument(0);
           Value qv =
               cudaq::quake::ExtractRefOp::create(builder, loc, veqArg, iv);
-          cudaq::quake::ResetOp::create(builder, loc, TypeRange{}, qv);
+          Op::create(builder, loc, TypeRange{}, qv);
         });
     rewriter.eraseOp(resetOp);
     return success();
@@ -320,8 +321,10 @@ public:
     auto *op = getOperation();
     auto *ctx = &getContext();
     RewritePatternSet patterns(ctx);
-    patterns.insert<MxRewrite, MyRewrite, MzRewrite, ResetRewrite,
-                    ExpandSequenceHandleDiscriminate>(ctx);
+    patterns.insert<
+        MxRewrite, MyRewrite, MzRewrite, TargetRewrite<cudaq::quake::ResetOp>,
+        TargetRewrite<cudaq::quake::IdleOp>, ExpandSequenceHandleDiscriminate>(
+        ctx);
     ConversionTarget target(*ctx);
     target.addLegalDialect<cudaq::quake::QuakeDialect, cudaq::cc::CCDialect,
                            arith::ArithDialect, LLVM::LLVMDialect>();
@@ -334,9 +337,9 @@ public:
     target.addDynamicallyLegalOp<cudaq::quake::MzOp>([](cudaq::quake::MzOp x) {
       return usesIndividualQubit(x.getMeasOut());
     });
-    target.addDynamicallyLegalOp<cudaq::quake::ResetOp>(
-        [](cudaq::quake::ResetOp r) {
-          return !isa<cudaq::quake::VeqType>(r.getTargets().getType());
+    target.addDynamicallyLegalOp<cudaq::quake::ResetOp, cudaq::quake::IdleOp>(
+        [](Operation *r) {
+          return !isa<cudaq::quake::VeqType>(r->getOperand(0).getType());
         });
     target.addDynamicallyLegalOp<cudaq::quake::DiscriminateOp>(
         [](cudaq::quake::DiscriminateOp d) {

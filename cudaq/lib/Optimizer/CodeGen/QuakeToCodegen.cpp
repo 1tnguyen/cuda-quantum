@@ -17,6 +17,14 @@
 
 using namespace mlir;
 
+void cudaq::codegen::eraseIdleOperations(Operation *op) {
+  op->walk([](cudaq::quake::IdleOp idle) {
+    if (!idle.getWires().empty())
+      idle.getWires().front().replaceAllUsesWith(idle.getTargets());
+    idle.erase();
+  });
+}
+
 namespace {
 //===----------------------------------------------------------------------===//
 // Code generation: converts the Quake IR to Codegen IR.

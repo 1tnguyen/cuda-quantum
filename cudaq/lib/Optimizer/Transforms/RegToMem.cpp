@@ -189,10 +189,9 @@ private:
         for (auto [t, r] : llvm::zip(
                  wireTargs, op->getResults().drop_front(wireCtrls.size())))
           insertToEqClass(t, r);
-      } else if (auto reset = dyn_cast<cudaq::quake::ResetOp>(op)) {
-        auto wireTargs =
-            collectLinearValues(ArrayRef<Value>{reset.getTargets()});
-        for (auto [t, r] : llvm::zip(wireTargs, reset.getResults()))
+      } else if (isa<cudaq::quake::ResetOp, cudaq::quake::IdleOp>(op)) {
+        auto wireTargs = collectLinearValues(op->getOperands());
+        for (auto [t, r] : llvm::zip(wireTargs, op->getResults()))
           insertToEqClass(t, r);
       } else if (auto logOut = dyn_cast<cudaq::quake::EvinceOp>(op)) {
         // Wire inputs and outputs are the same qubit; union them so that ops
@@ -326,11 +325,12 @@ public:
                      args, nameAttr);
       op.getResult(0).replaceAllUsesWith(newOp.getResult(0));
       rewriter.eraseOp(op);
-    } else if constexpr (std::is_same_v<OP, cudaq::quake::ResetOp>) {
-      // Reset is a special case.
+    } else if constexpr (std::is_same_v<OP, cudaq::quake::ResetOp> ||
+                         std::is_same_v<OP, cudaq::quake::IdleOp>) {
+      // Single-target operations without the operator interface.
       auto targ = findLookupValue(op.getTargets());
       eraseWrapUsers(op);
-      cudaq::quake::ResetOp::create(rewriter, loc, TypeRange{}, targ);
+      OP::create(rewriter, loc, TypeRange{}, targ);
       Value unwrap =
           cudaq::quake::UnwrapOp::create(rewriter, loc, wireTy, targ);
       rewriter.replaceOp(op, {unwrap});
@@ -610,14 +610,16 @@ public:
     BlockSet fixupBlocks;
     RewritePatternSet patterns(ctx);
     patterns.insert<NOWRAP_QUANTUM_OPS, CollapseWrappers<cudaq::quake::ResetOp>,
+                    CollapseWrappers<cudaq::quake::IdleOp>,
                     CollapseWrappers<cudaq::quake::ReturnWireOp>,
                     CollapseWrappers<cudaq::quake::SinkOp>, EraseWiresIf,
                     CollapseEvinceWires>(ctx, analysis, allocas);
     patterns.insert<EraseWiresBranch, EraseWiresCondBranch>(ctx, fixupBlocks);
     ConversionTarget target(*ctx);
     target.addDynamicallyLegalOp<RAW_QUANTUM_OPS, cudaq::quake::ResetOp,
-                                 cf::BranchOp, cf::CondBranchOp,
-                                 cudaq::cc::IfOp, cudaq::quake::EvinceOp>(
+                                 cudaq::quake::IdleOp, cf::BranchOp,
+                                 cf::CondBranchOp, cudaq::cc::IfOp,
+                                 cudaq::quake::EvinceOp>(
         [&](Operation *op) { return hasNoWires(op); });
     target.addIllegalOp<cudaq::quake::SinkOp, cudaq::quake::ReturnWireOp>();
     target.addLegalOp<cudaq::quake::UnwrapOp, cudaq::quake::DeallocOp>();

@@ -1,0 +1,47 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --canonicalize %s | FileCheck %s --check-prefix=REF
+// RUN: cudaq-opt --expand-measurements --cc-loop-unroll --canonicalize --memtoreg=quantum=true --canonicalize %s | FileCheck %s --check-prefix=WIRE
+// RUN: cudaq-opt --expand-measurements --cc-loop-unroll --canonicalize --memtoreg=quantum=true --regtomem --canonicalize %s | FileCheck %s --check-prefix=REF
+
+func.func @broadcast() {
+  %q = quake.alloca !quake.veq<2>
+  quake.idle %q : (!quake.veq<2>) -> ()
+  quake.idle %q : (!quake.veq<2>) -> ()
+  %m = quake.mz %q : (!quake.veq<2>) -> !cc.sequence<!quake.measure>
+  quake.dealloc %q : !quake.veq<2>
+  return
+}
+
+// REF-LABEL: func.func @broadcast
+// REF-COUNT-2: quake.idle
+// WIRE-LABEL: func.func @broadcast
+// WIRE-COUNT-4: quake.idle {{.*}} : (!quake.wire) -> !quake.wire
+
+// Idle is a logical boundary: inverse gates on its two sides must not cancel.
+func.func @separation() {
+  %q = quake.alloca !quake.ref
+  quake.h %q : (!quake.ref) -> ()
+  quake.idle %q : (!quake.ref) -> ()
+  quake.h %q : (!quake.ref) -> ()
+  %m = quake.mz %q : (!quake.ref) -> !quake.measure
+  quake.dealloc %q : !quake.ref
+  return
+}
+
+// REF-LABEL: func.func @separation
+// REF: quake.h
+// REF: quake.idle
+// REF: quake.h
+// REF: quake.mz
+// WIRE-LABEL: func.func @separation
+// WIRE: quake.h
+// WIRE: quake.idle
+// WIRE: quake.h
+// WIRE: quake.mz

@@ -2775,6 +2775,13 @@ class PyASTBridge(ast.NodeVisitor):
                     for target in targets:
                         opCtor(*args, controls, broadcast(target), **kwargs)
 
+        def processIdle():
+            if node.keywords:
+                self.emitFatalError('idle does not accept keyword arguments',
+                                    node)
+            targets = self.__groupValues(node.args, [(1, -1)])
+            processQuantumOperation('Idle', [], targets, broadcast=lambda q: q)
+
         def processQuakeCtor(opName,
                              pyArgs,
                              isCtrl,
@@ -3315,6 +3322,10 @@ class PyASTBridge(ast.NodeVisitor):
                                  isCtrl=False,
                                  isAdj=False,
                                  numTargets=2)
+                return
+
+            if node.func.id == 'idle':
+                processIdle()
                 return
 
             if node.func.id == 'reset':
@@ -4149,6 +4160,10 @@ class PyASTBridge(ast.NodeVisitor):
                         quake.ApplyNoiseOp(params, [asVeq], key=key)
                         return
 
+                    if node.func.attr == 'idle':
+                        processIdle()
+                        return
+
                     if node.func.attr == 'compute_action':
                         compute, action = self.__groupValues(node.args, [2])
                         quake.ComputeActionOp(compute, action)
@@ -4514,7 +4529,8 @@ class PyASTBridge(ast.NodeVisitor):
                             return None
                         return resTy
                     if self.__isUnitaryGate(
-                            pyval.func.id) or pyval.func.id == 'reset':
+                            pyval.func.id) or pyval.func.id in ('reset',
+                                                                'idle'):
                         process_void_list()
                         return None
                     if self.__isMeasurementGate(pyval.func.id):

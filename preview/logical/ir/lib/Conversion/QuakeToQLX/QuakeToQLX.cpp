@@ -1164,6 +1164,23 @@ private:
             [&](auto gate) -> LogicalResult {
               return convertReferenceAwareGate(gate, builder, state);
             })
+        .Case<cudaq::quake::IdleOp>([&](auto idle) -> LogicalResult {
+          SmallVector<Value> inputs{idle.getTargets()};
+          if (failed(hydrateReferenceWires(idle, inputs, state)))
+            return failure();
+          auto found = state.wireOwners.find(idle.getTargets());
+          if (found == state.wireOwners.end() || idle.getWires().size() != 1)
+            return idle.emitOpError("requires a wire with a live P0 owner");
+          Value input = found->second;
+          state.wireOwners.erase(found);
+          Value one = arith::ConstantIndexOp::create(builder, idle.getLoc(), 1);
+          auto imported = qlx::IdleOp::create(builder, idle.getLoc(),
+                                              TypeRange{input.getType()},
+                                              ValueRange{input}, one);
+          state.wireOwners[idle.getWires().front()] = imported.getResult(0);
+          return commitReferenceWireResults(idle, inputs, idle.getWires(),
+                                            state);
+        })
         .Case<cudaq::quake::SwapOp>([&](auto swap) -> LogicalResult {
           return convertReferenceAwareSwap(swap, builder, state);
         })

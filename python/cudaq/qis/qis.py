@@ -14,6 +14,15 @@ def raise_error():
          Its implementation is populated by the CUDA-Q toolchain.")
 
 
+def idle(*qubits):
+    """Mark one logical idle application on qubits or a quantum register.
+
+    Logical compilation may realize it as QEC memory. Direct physical code
+    generation removes it; it does not request a timed hardware delay.
+    """
+    raise_error()
+
+
 def h(*args):
     """
     This operation is a rotation by π about the X+Z axis, and enables one to create a superposition of computational basis states.

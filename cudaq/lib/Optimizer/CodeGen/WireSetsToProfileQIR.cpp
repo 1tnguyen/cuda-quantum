@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "PassDetails.h"
+#include "QuakeToCodegen.h"
 #include "nlohmann/json.hpp"
 #include "cudaq/Optimizer/Builder/CompilerNames.h"
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
@@ -468,6 +469,7 @@ struct WireSetToProfileQIRPass
   using WireSetToProfileQIRBase::WireSetToProfileQIRBase;
 
   void runOnOperation() override {
+    cudaq::codegen::eraseIdleOperations(getOperation());
     auto op = getOperation();
     auto *context = &getContext();
     OpBuilder builder(op);

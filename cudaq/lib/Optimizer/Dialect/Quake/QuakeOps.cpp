@@ -138,7 +138,7 @@ LogicalResult cudaq::quake::verifyWireArityAndCoarity(Operation *op) {
 }
 
 bool cudaq::quake::isSupportedMappingOperation(Operation *op) {
-  return isa<OperatorInterface, MeasurementInterface, ResetOp, SinkOp,
+  return isa<OperatorInterface, MeasurementInterface, ResetOp, IdleOp, SinkOp,
              ReturnWireOp, EvinceOp>(op);
 }
 
@@ -188,6 +188,9 @@ getWireFlowOperands(Operation *operation) {
   } else if (auto reset = dyn_cast<cudaq::quake::ResetOp>(operation)) {
     flow.inputs.push_back(reset.getTargets());
     llvm::append_range(flow.results, reset.getWires());
+  } else if (auto idle = dyn_cast<cudaq::quake::IdleOp>(operation)) {
+    flow.inputs.push_back(idle.getTargets());
+    llvm::append_range(flow.results, idle.getWires());
   } else {
     return std::nullopt;
   }
@@ -1683,7 +1686,7 @@ void cudaq::quake::getOperatorEffectsImpl(EffectsVectorImpl &effects,
 #define GATE_OPS(MACRO) BUILTIN_GATE_OPS(MACRO) CUSTOM_GATE_OPS(MACRO)
 #define MEASURE_OPS(MACRO) MACRO(MxOp) MACRO(MyOp) MACRO(MzOp)
 #define QUANTUM_OPS(MACRO)                                                     \
-  MACRO(ResetOp) MACRO(PhaseOp) GATE_OPS(MACRO)                                \
+  MACRO(IdleOp) MACRO(ResetOp) MACRO(PhaseOp) GATE_OPS(MACRO)                                \
   MEASURE_OPS(MACRO)
 #define WIRE_OPS(MACRO) MACRO(FromControlOp) MACRO(ResetOp) MACRO(NullCableOp) \
   MACRO(NullWireOp) MACRO(UnwrapOp)
@@ -1723,6 +1726,16 @@ void cudaq::quake::ExpPauliOp::getEffects(
 
 BUILTIN_GATE_OPS(INSTANTIATE_OPERATOR_VERIFY)
 WIRE_OPS(INSTANTIATE_LINEAR_TYPE_VERIFY)
+
+LogicalResult cudaq::quake::IdleOp::verify() {
+  unsigned expected = isa<WireType>(getTargets().getType()) ? 1 : 0;
+  if (getWires().size() != expected)
+    return emitOpError("requires one result for a wire target and none for a "
+                       "reference target");
+  if (expected && getWires().front().getType() != getTargets().getType())
+    return emitOpError("wire result must have the same type as the target");
+  return verifyWireResultsAreLinear(getOperation());
+}
 
 #define INSTANTIATE_OPERATOR_CANONICALIZATION(Op)                              \
   void cudaq::quake::Op::getCanonicalizationPatterns(                          \

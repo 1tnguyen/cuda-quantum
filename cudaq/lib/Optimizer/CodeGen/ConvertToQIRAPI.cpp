@@ -8,6 +8,7 @@
 
 #include "CodeGenOps.h"
 #include "PassDetails.h"
+#include "QuakeToCodegen.h"
 #include "nlohmann/json.hpp"
 #include "cudaq/Optimizer/Builder/Factory.h"
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
@@ -2879,6 +2880,7 @@ struct QuakeToQIRAPIPass
 
   void runOnOperation() override {
     LLVM_DEBUG(llvm::dbgs() << "Begin converting to QIR\n");
+    cudaq::codegen::eraseIdleOperations(getOperation());
     QIRAPITypeConverter typeConverter(opaquePtr);
     SmallVector<StringRef> apiField;
     splitTransportTriple(apiField, api);

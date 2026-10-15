@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "PassDetails.h"
+#include "QuakeToCodegen.h"
 #include "cudaq/Optimizer/Builder/Intrinsics.h"
 #include "cudaq/Optimizer/CodeGen/CudaqFunctionNames.h"
 #include "cudaq/Optimizer/CodeGen/Passes.h"
@@ -55,6 +56,7 @@ struct QuakeToCCPass : public cudaq::opt::impl::QuakeToCCBase<QuakeToCCPass> {
   using QuakeToCCBase::QuakeToCCBase;
 
   void runOnOperation() override {
+    cudaq::codegen::eraseIdleOperations(getOperation());
     auto op = getOperation();
     auto *context = &getContext();
     RewritePatternSet patterns(context);

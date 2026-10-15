@@ -528,6 +528,7 @@ def __clearKernelRegistries():
 # `_DEFERRED_STAR_MODULES` so new exports are picked up automatically.
 
 _LAZY_ATTRS = {
+    'idle': '.qis',
     'DEMResult': '.runtime.dem',
     'Schedule': '.dynamics.schedule',
     'evolve': '.dynamics.evolution',

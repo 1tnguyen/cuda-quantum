@@ -193,6 +193,11 @@ static LogicalResult emitOperation(nlohmann::json &json,
           [&](auto op) { return emitOperation(json, emitter, op); })
       .Case<cudaq::quake::MzOp>(
           [&](auto op) { return emitOperation(json, emitter, op); })
+      .Case<cudaq::quake::IdleOp>([&](auto idle) {
+        if (!idle.getWires().empty())
+          emitter.mapValuesName(idle.getTargets(), idle.getWires().front());
+        return success();
+      })
       // Ignore
       .Case<cudaq::quake::DiscriminateOp>([](auto) { return success(); })
       .Case<cudaq::quake::DeallocOp>([](auto) { return success(); })

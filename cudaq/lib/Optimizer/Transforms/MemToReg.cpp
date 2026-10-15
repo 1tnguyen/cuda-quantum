@@ -1134,21 +1134,20 @@ private:
 } // namespace
 
 namespace {
-/// The reset operation is a bit of an oddball and doesn't support the
-/// QuakeOperator interface. Handle it special for now.
-class ResetOpPattern : public OpRewritePattern<cudaq::quake::ResetOp> {
+/// Thread a scalar wire through operations without the QuakeOperator interface.
+template <typename Op>
+class TargetOpPattern : public OpRewritePattern<Op> {
 public:
-  using OpRewritePattern::OpRewritePattern;
+  using OpRewritePattern<Op>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(cudaq::quake::ResetOp op,
+  LogicalResult matchAndRewrite(Op op,
                                 PatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     auto wireTy = cudaq::quake::WireType::get(rewriter.getContext());
     auto opnd = op.getTargets();
     assert(opnd.getType() == cudaq::quake::RefType::get(rewriter.getContext()));
     Value target = cudaq::quake::UnwrapOp::create(rewriter, loc, wireTy, opnd);
-    auto newOp =
-        cudaq::quake::ResetOp::create(rewriter, loc, TypeRange{wireTy}, target);
+    auto newOp = Op::create(rewriter, loc, TypeRange{wireTy}, target);
     rewriter.replaceOpWithNewOp<cudaq::quake::WrapOp>(op, newOp.getResult(0),
                                                       opnd);
     return success();
@@ -1972,15 +1971,14 @@ public:
     auto func = getOperation();
     auto *ctx = &getContext();
     RewritePatternSet patterns(ctx);
-    patterns.insert<WRAPPER_QUANTUM_OPS, ResetOpPattern, DeallocOpPattern,
+    patterns.insert<WRAPPER_QUANTUM_OPS, TargetOpPattern<cudaq::quake::ResetOp>,
+                    TargetOpPattern<cudaq::quake::IdleOp>, DeallocOpPattern,
                     EvinceOpPattern>(ctx);
     ConversionTarget target(*ctx);
-    target
-        .addDynamicallyLegalOp<RAW_QUANTUM_OPS, cudaq::quake::ResetOp,
-                               cudaq::quake::DeallocOp, cudaq::quake::EvinceOp>(
-            [](Operation *op) {
-              return !cudaq::quake::hasNonVectorReference(op);
-            });
+    target.addDynamicallyLegalOp<RAW_QUANTUM_OPS, cudaq::quake::ResetOp,
+                                 cudaq::quake::IdleOp, cudaq::quake::DeallocOp,
+                                 cudaq::quake::EvinceOp>(
+        [](Operation *op) { return !cudaq::quake::hasNonVectorReference(op); });
     target.addLegalOp<cudaq::quake::UnwrapOp, cudaq::quake::WrapOp,
                       cudaq::quake::NullWireOp, cudaq::quake::SinkOp>();
     if (failed(applyPartialConversion(func, target, std::move(patterns)))) {

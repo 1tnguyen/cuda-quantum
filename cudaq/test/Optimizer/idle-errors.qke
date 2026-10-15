@@ -1,0 +1,32 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --split-input-file --verify-diagnostics %s
+
+func.func @missing_successor(%q: !quake.wire) {
+  // expected-error @+1 {{requires one result for a wire target and none for a reference target}}
+  quake.idle %q : (!quake.wire) -> ()
+  return
+}
+
+// -----
+
+func.func @unexpected_successor(%q: !quake.ref) {
+  // expected-error @+1 {{requires one result for a wire target and none for a reference target}}
+  %w = quake.idle %q : (!quake.ref) -> !quake.wire
+  quake.sink %w : !quake.wire
+  return
+}
+
+// -----
+
+func.func @wrong_successor_type(%q: !quake.wire) {
+  // expected-error @+1 {{wire result must have the same type as the target}}
+  %w = quake.idle %q : (!quake.wire) -> !quake.cable<1>
+  return
+}

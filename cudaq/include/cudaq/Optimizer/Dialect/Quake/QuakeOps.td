@@ -1160,8 +1160,41 @@ def quake_FromControlOp : QuakeOp<"from_ctrl", [Pure]> {
 }
 
 //===----------------------------------------------------------------------===//
-// Reset
+// Idle and reset
 //===----------------------------------------------------------------------===//
+
+def quake_IdleOp : QuakeOp<"idle", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Explicit idle for logical QEC lowering.";
+  let description = [{
+    One idle application on a qubit, or on each qubit in a register. Logical
+    lowering may realize this as a QEC memory round. Ordinary physical code
+    generation erases it; it does not specify a physical delay or duration.
+    Repetition is expressed using control flow, not an operation parameter.
+
+    Reference operands have no results. A wire operand returns its successor
+    wire. Preserve this operation until logical or physical lowering is chosen.
+  }];
+
+  let arguments = (ins
+    AnyQTargetType:$targets
+  );
+  let results = (outs
+    Variadic<AnyQLinearType>:$wires
+  );
+  let hasVerifier = 1;
+
+  let assemblyFormat = [{
+     $targets `:` functional-type(operands, results) attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    void getEffectsImpl(mlir::SmallVectorImpl<mlir::SideEffects::
+        EffectInstance<mlir::MemoryEffects::Effect>> &effects) {
+      cudaq::quake::getResetEffectsImpl(effects, getTargetsMutable());
+    }
+  }];
+}
 
 def quake_ResetOp : QuakeOp<"reset", [QuantumGate,
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {

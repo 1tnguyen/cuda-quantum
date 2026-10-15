@@ -1,0 +1,26 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --wireset-to-profile-qir-prep --wireset-to-profile-qir %s | FileCheck %s --implicit-check-not=idle
+// RUN: cudaq-opt --wireset-to-profile-qir-prep --wireset-to-profile-qir=convert-to=qir-adaptive %s | FileCheck %s --implicit-check-not=idle
+
+// RUN: cudaq-opt --qubit-mapping='device=path(3)' --wireset-to-profile-qir-prep --wireset-to-profile-qir %s | FileCheck %s --implicit-check-not=idle
+
+quake.wire_set @phys[1]
+func.func @__nvqpp__mlirgen__memory() attributes {"cudaq-entrypoint", "cudaq-kernel"} {
+  %q = quake.borrow_wire @phys[0] : !quake.wire
+  %i = quake.idle %q : (!quake.wire) -> !quake.wire
+  %x = quake.x %i : (!quake.wire) -> !quake.wire
+  %j = quake.idle %x : (!quake.wire) -> !quake.wire
+  %m, %w = quake.mz %j : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.return_wire %w : !quake.wire
+  return
+}
+
+// CHECK: call @__quantum__qis__x
+// CHECK: call @__quantum__qis__mz

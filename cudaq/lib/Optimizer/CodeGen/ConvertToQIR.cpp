@@ -149,6 +149,7 @@ public:
   /// codegen ops. This step makes converting a DAG of nodes in the conversion
   /// step simpler.
   void runOnOperation() override final {
+    cudaq::codegen::eraseIdleOperations(getOperation());
     auto *context = &getContext();
     if (failed(fuseSubgraphPatterns(context, getOperation()))) {
       signalPassFailure();

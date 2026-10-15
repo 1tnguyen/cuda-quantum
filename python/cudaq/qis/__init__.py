@@ -6,6 +6,6 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-from .qis import (h, x, y, z, s, t, rx, ry, rz, r1, mx, my, mz, ch, cx, cy, cz,
-                  cs, ct, crx, cry, crz, cr1, sdg, tdg, swap, exp_pauli,
+from .qis import (idle, h, x, y, z, s, t, rx, ry, rz, r1, mx, my, mz, ch, cx,
+                  cy, cz, cs, ct, crx, cry, crz, cr1, sdg, tdg, swap, exp_pauli,
                   adjoint, control, compute_action)

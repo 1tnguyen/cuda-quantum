@@ -377,6 +377,11 @@ static LogicalResult emitOperation(cudaq::Emitter &emitter, Operation &op) {
           [&](auto op) { return emitOperation(emitter, op); })
       .Case<cudaq::quake::ResetOp>(
           [&](auto op) { return emitOperation(emitter, op); })
+      .Case<cudaq::quake::IdleOp>([&](auto idle) {
+        if (!idle.getWires().empty())
+          emitter.mapValuesName(idle.getTargets(), idle.getWires().front());
+        return success();
+      })
       // Ignore
       .Case<cudaq::quake::DeallocOp>([&](auto op) { return success(); })
       .Case<func::ReturnOp>([&](auto op) { return success(); })

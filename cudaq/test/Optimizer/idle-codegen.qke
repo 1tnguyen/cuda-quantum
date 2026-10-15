@@ -1,0 +1,34 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --convert-to-qir-api %s | FileCheck %s --check-prefix=QIR --implicit-check-not=idle
+// RUN: cudaq-opt --quake-to-qir %s | FileCheck %s --check-prefix=QIR --implicit-check-not=idle
+// RUN: cudaq-opt --lower-quake %s | FileCheck %s --check-prefix=EM --implicit-check-not=idle
+// RUN: cudaq-translate --convert-to=openqasm2 %s | FileCheck %s --check-prefix=QASM --implicit-check-not=idle
+// RUN: cudaq-opt --iqm-gate-set-mapping %s | cudaq-translate --convert-to=iqm | FileCheck %s --check-prefix=IQM --implicit-check-not=idle
+
+func.func @__nvqpp__mlirgen__memory() attributes {"cudaq-entrypoint", "cudaq-kernel"} {
+  %qs = quake.alloca !quake.veq<2>
+  quake.idle %qs : (!quake.veq<2>) -> ()
+  %q = quake.extract_ref %qs[0] : (!quake.veq<2>) -> !quake.ref
+  quake.x %q : (!quake.ref) -> ()
+  quake.idle %q : (!quake.ref) -> ()
+  %m = quake.mz %q : (!quake.ref) -> !quake.measure
+  quake.dealloc %qs : !quake.veq<2>
+  return
+}
+
+// QIR: call @__quantum__qis__x
+// QIR: call @__quantum__qis__mz
+// EM: call @__nvqpp__cudaq_em_apply
+// EM: call @__nvqpp__cudaq_em_measure
+// QASM: x [[Q:[^;]+]];
+// QASM: measure [[Q]]
+
+// IQM: "name": "prx"
+// IQM: "name": "measure"

@@ -1,0 +1,24 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --convert-to-qir-api %s | FileCheck %s --implicit-check-not=idle
+// RUN: cudaq-opt --convert-to-qir-api='api=base-profile' %s | FileCheck %s --implicit-check-not=idle
+// RUN: cudaq-opt --convert-to-qir-api='api=adaptive-profile' %s | FileCheck %s --implicit-check-not=idle
+
+func.func @__nvqpp__mlirgen__memory() attributes {"cudaq-entrypoint", "cudaq-kernel"} {
+  %q = quake.null_wire
+  %i = quake.idle %q : (!quake.wire) -> !quake.wire
+  %x = quake.x %i : (!quake.wire) -> !quake.wire
+  %j = quake.idle %x : (!quake.wire) -> !quake.wire
+  %m, %w = quake.mz %j : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %w : !quake.wire
+  return
+}
+
+// CHECK: call @__quantum__qis__x
+// CHECK: call @__quantum__qis__mz
