@@ -1075,13 +1075,15 @@ private:
               qlx::fabric::TransformBeginOp, qlx::fabric::TransformEndOp,
               qlx::fabric::MzOp, qlx::fabric::ParityOp, qlx::fabric::AllZeroOp,
               qlx::fabric::XorOp, qlx::fabric::AllFalseOp,
+              qlx::fabric::SubmitSyndromeOp, qlx::fabric::DecodeBitOp,
               qlx::event::SelectionOp, qlx::fabric::ProduceResourceOp,
               qlx::fabric::ResourceRequestOp, qlx::event::AwaitOp,
               qlx::fabric::UnpackResourceOp, qlx::fabric::PackResourceOp,
               qlx::fabric::DiscardResourceOp, qlx::fabric::MeasureProductOp,
               qlx::fabric::RotateProductOp,
               qlx::fabric::ResourceRotateProductOp, qlx::fabric::RetryOp,
-              qlx::fabric::SuccessOp>(operation))
+              qlx::fabric::SuccessOp, qlx::fabric::DetectorOp,
+              qlx::fabric::ObservableOp>(operation))
         continue;
       if (unaryActions.contains(operation.getName().getStringRef()))
         continue;
@@ -3938,8 +3940,21 @@ private:
       return failure();
     SmallVector<Operation *> declarations;
     for (Operation &declaration : profile.getBody().front())
-      if (isa<qlx::fabric::SuccessOp>(declaration))
+      if (isa<qlx::fabric::SuccessOp, qlx::fabric::DetectorOp,
+              qlx::fabric::ObservableOp>(declaration))
         declarations.push_back(&declaration);
+    SmallVector<Operation *> observables;
+    for (Operation *declaration : declarations)
+      if (isa<qlx::fabric::ObservableOp>(declaration))
+        observables.push_back(declaration);
+    llvm::sort(observables, [](Operation *left, Operation *right) {
+      return left->getAttrOfType<IntegerAttr>("idx").getInt() <
+             right->getAttrOfType<IntegerAttr>("idx").getInt();
+    });
+    auto observable = observables.begin();
+    for (Operation *&declaration : declarations)
+      if (isa<qlx::fabric::ObservableOp>(declaration))
+        declaration = *observable++;
     auto [inserted, didInsert] = profileSidecarDeclarationCache.try_emplace(
         profileRef, std::move(declarations));
     assert(didInsert && "profile sidecar cache changed during insertion");
@@ -3960,6 +3975,10 @@ private:
       StringRef kind;
       if (operationName == "fabric.success")
         kind = "selection";
+      else if (operationName == "fabric.detector")
+        kind = "detector";
+      else if (operationName == "fabric.observable")
+        kind = "observable";
       else
         continue;
 
@@ -3973,7 +3992,7 @@ private:
                 "profile row has a malformed stable record");
           sources.push_back(source.getValue().str());
         }
-      if (sources.empty())
+      if (sources.empty() && kind == "selection")
         return declaration.emitOpError(
             "profile selection requires stable records");
 
@@ -4671,7 +4690,9 @@ private:
       if (declaration) {
         for (StringRef name :
              {StringRef("input_syndromes"), StringRef("constant"),
-              StringRef("label"), StringRef("expected"), StringRef("scope")})
+              StringRef("label"), StringRef("expected"), StringRef("scope"),
+              StringRef("idx"), StringRef("basis"), StringRef("logical"),
+              StringRef("coords")})
           if (Attribute attribute = declaration->getAttr(name))
             attrs.push_back(builder.getNamedAttr(name, attribute));
       }
@@ -4900,9 +4921,57 @@ private:
             PhysicalGroup{physical->getResult(0)};
         continue;
       }
-      if (isa<qlx::fabric::SuccessOp>(operation)) {
+      if (auto submit = dyn_cast<qlx::fabric::SubmitSyndromeOp>(operation)) {
+        PhysicalGroup records;
+        for (Value operand : operation.getOperands()) {
+          auto found = projected.find(operand);
+          if (found == projected.end() || found->second.empty())
+            return submit.emitOpError(
+                "has no physical record projection for a decoder input");
+          llvm::append_range(records, found->second.values());
+        }
+        SmallVector<NamedAttribute> attrs;
+        for (NamedAttribute attribute : operation.getAttrs()) {
+          StringRef name = attribute.getName().strref();
+          if (name != "operandSegmentSizes" && name != "event_id")
+            attrs.push_back(attribute);
+        }
+        attrs.push_back(
+            builder.getNamedAttr("event_id", nextEvent("submit_syndrome")));
+        createGeneric(builder, submit.getLoc(), "phys.submit_syndrome",
+                      records.values(), {}, attrs);
         continue;
       }
+      if (auto decode = dyn_cast<qlx::fabric::DecodeBitOp>(operation)) {
+        PhysicalGroup records;
+        for (Value operand : operation.getOperands()) {
+          auto found = projected.find(operand);
+          if (found == projected.end() || found->second.empty())
+            return decode.emitOpError(
+                "has no physical record projection for a decoder input");
+          llvm::append_range(records, found->second.values());
+        }
+        SmallVector<NamedAttribute> attrs;
+        for (NamedAttribute attribute : operation.getAttrs())
+          if (attribute.getName().strref() != "event_id")
+            attrs.push_back(attribute);
+        attrs.push_back(
+            builder.getNamedAttr("event_id", nextEvent("decode_bit")));
+        Operation *physical =
+            createGeneric(builder, decode.getLoc(), "phys.decode_bit",
+                          records.values(), builder.getI1Type(), attrs);
+        projected[operation.getResult(0)] =
+            PhysicalGroup{physical->getResult(0)};
+        continue;
+      }
+      if (isa<qlx::fabric::DetectorOp, qlx::fabric::ObservableOp>(operation)) {
+        if (!currentProfile)
+          return operation.emitOpError(
+              "native detector projection requires a detached gadget profile");
+        continue;
+      }
+      if (isa<qlx::fabric::SuccessOp>(operation))
+        continue;
       if (auto produced = dyn_cast<qlx::fabric::ProduceResourceOp>(operation)) {
         auto resultType =
             physicalScalarType(produced.getResourceState().getType());
@@ -5574,7 +5643,8 @@ private:
             return repeat.emitOpError(
                 "selected profile is unresolved while projecting records");
           for (Operation &declaration : profile.getBody().front()) {
-            if (!isa<qlx::fabric::SuccessOp>(declaration))
+            if (!isa<qlx::fabric::SuccessOp, qlx::fabric::DetectorOp,
+                     qlx::fabric::ObservableOp>(declaration))
               continue;
             if (auto records = declaration.getAttrOfType<ArrayAttr>("records"))
               for (Attribute raw : records)
@@ -6760,7 +6830,8 @@ private:
       };
       for (Operation *created = graph; created;
            created = created->getNextNode()) {
-        if (isa<qlx::phys::SelectionSidecarOp>(created)) {
+        if (isa<qlx::phys::SelectionSidecarOp, qlx::phys::DetectorSidecarOp,
+                qlx::phys::ObservableSidecarOp>(created)) {
           sidecars.push_back(created);
           continue;
         }

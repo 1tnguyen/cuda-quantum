@@ -2595,9 +2595,10 @@ LogicalResult GadgetSpecOp::verify() {
         for (Attribute rawRole : rowRoles) {
           auto role = dyn_cast<StringAttr>(rawRole);
           if (!role ||
-              (role.getValue() != "result" && role.getValue() != "success"))
-            return emitOpError(
-                "outcome_map roles must be 'result' or 'success'");
+              (role.getValue() != "result" && role.getValue() != "observable" &&
+               role.getValue() != "success"))
+            return emitOpError("outcome_map roles must be 'result', "
+                               "'observable', or 'success'");
           if (!seenRoles.insert(role.getValue()).second)
             return emitOpError("outcome_map row roles must be duplicate-free");
         }
@@ -8630,6 +8631,16 @@ LogicalResult GadgetProfileOp::verify() {
     return emitOpError(
         "selection policy belongs to fabric.retry or event.selection, not "
         "the analysis profile");
+  SmallVector<int64_t> observableIndices;
+  getBody().walk([&](ObservableOp observable) {
+    observableIndices.push_back(observable.getIdxAttr().getInt());
+  });
+  llvm::sort(observableIndices);
+  for (auto [index, value] : llvm::enumerate(observableIndices))
+    if (value != static_cast<int64_t>(index))
+      return emitOpError(
+          "logical observable indices must be unique and contiguous from zero");
+
   auto *target = SymbolTable::lookupNearestSymbolFrom(*this, getGadgetAttr());
   if (!target)
     return success(); // A partial linked module may resolve this at link time.
@@ -8749,7 +8760,8 @@ LogicalResult GadgetProfileOp::verify() {
   StringRef gadgetName = gadget.getSymName();
   SmallVector<std::string> demandedPaths;
   getBody().walk([&](Operation *declaration) {
-    if (!isa<SuccessOp, OutputSyndromeOp>(declaration))
+    if (!isa<DetectorOp, ObservableOp, SuccessOp, OutputSyndromeOp>(
+            declaration))
       return;
     auto records = declaration->getAttrOfType<ArrayAttr>("records");
     if (!records)
@@ -8871,7 +8883,7 @@ LogicalResult GadgetProfileOp::verify() {
   };
 
   WalkResult result = getBody().walk([&](Operation *op) -> WalkResult {
-    if (isa<SuccessOp, OutputSyndromeOp>(op)) {
+    if (isa<DetectorOp, ObservableOp, SuccessOp, OutputSyndromeOp>(op)) {
       if (failed(checkRecords(op)) || failed(checkInputSyndromes(op)))
         return WalkResult::interrupt();
     }
@@ -8883,9 +8895,9 @@ LogicalResult GadgetProfileOp::verify() {
   if (result.wasInterrupted())
     return failure();
 
-  // A canonical role-tagged OutcomeMap is the affine authority for success
-  // rows. If a profile authors them, its complete ordered support, input
-  // terms, and constants must agree with the linked GadgetSpec.
+  // A role-tagged OutcomeMap is the affine authority for observable and
+  // success rows. If a profile authors a family, its complete ordered support,
+  // input terms, and constants must agree with the linked GadgetSpec.
   if (spec && spec.getOutcomeMap()) {
     DictionaryAttr outcome = *spec.getOutcomeMap();
     auto roleRows = outcome.getAs<ArrayAttr>("roles");
@@ -8899,10 +8911,16 @@ LogicalResult GadgetProfileOp::verify() {
       auto shape = rows.getType().getShape();
       auto denseValues = rows.getValues<APInt>();
       SmallVector<APInt> values(denseValues.begin(), denseValues.end());
+      SmallVector<ObservableOp> observables;
       SmallVector<SuccessOp> successes;
       getBody().walk([&](Operation *op) {
+        if (auto observable = dyn_cast<ObservableOp>(op))
+          observables.push_back(observable);
         if (auto success = dyn_cast<SuccessOp>(op))
           successes.push_back(success);
+      });
+      llvm::sort(observables, [](ObservableOp left, ObservableOp right) {
+        return left.getIdx() < right.getIdx();
       });
 
       auto verifyRole = [&](ArrayRef<Operation *> declarations,
@@ -8957,10 +8975,14 @@ LogicalResult GadgetProfileOp::verify() {
         return success();
       };
 
+      SmallVector<Operation *> observableDeclarations;
+      for (ObservableOp observable : observables)
+        observableDeclarations.push_back(observable.getOperation());
       SmallVector<Operation *> successDeclarations;
       for (SuccessOp success : successes)
         successDeclarations.push_back(success.getOperation());
-      if (failed(verifyRole(successDeclarations, "success")))
+      if (failed(verifyRole(observableDeclarations, "observable")) ||
+          failed(verifyRole(successDeclarations, "success")))
         return failure();
     }
   }

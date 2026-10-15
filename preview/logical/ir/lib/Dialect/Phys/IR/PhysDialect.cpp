@@ -1466,7 +1466,8 @@ LogicalResult RecordProjectionOp::verify() {
   if (module) {
     for (Operation &candidate : module.getBody()->getOperations()) {
       StringRef name = candidate.getName().getStringRef();
-      if (name != "phys.selection_sidecar")
+      if (name != "phys.selection_sidecar" && name != "phys.detector_sidecar" &&
+          name != "phys.observable_sidecar")
         continue;
       auto projection =
           candidate.getAttrOfType<FlatSymbolRefAttr>("record_projection");
@@ -10506,10 +10507,22 @@ findProfileRow(Operation *profile, StringRef operationName, int64_t sourceRow) {
       profile->getRegion(0).empty())
     return failure();
 
+  // Observable identity is its dense idx, never its textual position.  Keep
+  // detector and success rows in declaration order, but canonicalize the one
+  // role whose ordering is explicitly semantic before interpreting source_row.
   SmallVector<Operation *> declarations;
   for (Operation &candidate : profile->getRegion(0).front())
     if (candidate.getName().getStringRef() == operationName)
       declarations.push_back(&candidate);
+  if (operationName == "fabric.observable") {
+    for (Operation *declaration : declarations)
+      if (!declaration->getAttrOfType<IntegerAttr>("idx"))
+        return failure();
+    llvm::sort(declarations, [](Operation *left, Operation *right) {
+      return left->getAttrOfType<IntegerAttr>("idx").getInt() <
+             right->getAttrOfType<IntegerAttr>("idx").getInt();
+    });
+  }
 
   int64_t remaining = sourceRow;
   for (Operation *candidate : declarations) {
@@ -10888,9 +10901,11 @@ LogicalResult qlx::phys::verifySidecarBatch(ArrayRef<Operation *> sidecars) {
   }
   for (Operation *sidecar : sidecars) {
     StringRef name = sidecar->getName().getStringRef();
-    if (name != "phys.selection_sidecar")
+    if (name != "phys.selection_sidecar" && name != "phys.detector_sidecar" &&
+        name != "phys.observable_sidecar")
       return sidecar->emitOpError(
-          "batched sidecar verification accepts only selection sidecars");
+          "batched sidecar verification accepts only detector, observable, or "
+          "selection sidecars");
     if (sidecar->getAttrOfType<FlatSymbolRefAttr>("graph") != graphRef)
       return sidecar->emitOpError(
           "batched sidecars must reference one physical graph");
@@ -10910,7 +10925,8 @@ LogicalResult qlx::phys::verifyClosedSidecarLinks(ModuleOp module,
                                                   StringRef graphSymbol) {
   for (Operation &operation : module.getBody()->getOperations()) {
     StringRef kind = operation.getName().getStringRef();
-    if (kind != "phys.selection_sidecar")
+    if (kind != "phys.selection_sidecar" && kind != "phys.detector_sidecar" &&
+        kind != "phys.observable_sidecar")
       continue;
     auto graph = operation.getAttrOfType<FlatSymbolRefAttr>("graph");
     if (!graph || graph.getValue() != graphSymbol)
