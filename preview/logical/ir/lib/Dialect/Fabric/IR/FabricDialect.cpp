@@ -801,6 +801,54 @@ void MultiMeasureOp::print(OpAsmPrinter &printer) {
   printer << " : " << funcType;
 }
 
+ParseResult SubmitSyndromeOp::parse(OpAsmParser &parser,
+                                    OperationState &result) {
+  auto &builder = parser.getBuilder();
+  // Streaming form:  scalars(%b0, %b1, ... : i1, i1, ...) attr-dict
+  if (succeeded(parser.parseOptionalKeyword("scalars"))) {
+    SmallVector<OpAsmParser::UnresolvedOperand> scalars;
+    SmallVector<Type> scalarTypes;
+    if (parser.parseLParen() || parser.parseOperandList(scalars) ||
+        parser.parseColonTypeList(scalarTypes) || parser.parseRParen() ||
+        parser.parseOptionalAttrDict(result.attributes))
+      return failure();
+    if (parser.resolveOperands(scalars, scalarTypes,
+                               parser.getCurrentLocation(), result.operands))
+      return failure();
+    result.addAttribute("operandSegmentSizes",
+                        builder.getDenseI32ArrayAttr(
+                            {0, static_cast<int32_t>(scalars.size())}));
+    return success();
+  }
+  // Classic form:  %bits attr-dict : type
+  OpAsmParser::UnresolvedOperand bits;
+  Type bitsType;
+  if (parser.parseOperand(bits) ||
+      parser.parseOptionalAttrDict(result.attributes) ||
+      parser.parseColonType(bitsType) ||
+      parser.resolveOperand(bits, bitsType, result.operands))
+    return failure();
+  result.addAttribute("operandSegmentSizes",
+                      builder.getDenseI32ArrayAttr({1, 0}));
+  return success();
+}
+
+void SubmitSyndromeOp::print(OpAsmPrinter &printer) {
+  SmallVector<StringRef, 1> elided{"operandSegmentSizes"};
+  if (getBits()) {
+    printer << " " << getBits() << " ";
+    printer.printOptionalAttrDict((*this)->getAttrs(), elided);
+    printer << " : " << getBits().getType();
+  } else {
+    printer << " scalars(";
+    printer.printOperands(getScalarBits());
+    printer << " : ";
+    llvm::interleaveComma(getScalarBits().getTypes(), printer.getStream());
+    printer << ") ";
+    printer.printOptionalAttrDict((*this)->getAttrs(), elided);
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Verifiers
 //===----------------------------------------------------------------------===//
@@ -6473,6 +6521,22 @@ LogicalResult PackResourceOp::verify() {
   return verifyRegisteredResourcePack(*this);
 }
 
+LogicalResult DecodeBitOp::verify() {
+  if (!getParityIndicesAttr())
+    return success();
+  int64_t width = -1;
+  if (auto tensor = dyn_cast<RankedTensorType>(getDataBits().getType());
+      tensor && tensor.getRank() == 1 && !tensor.isDynamicDim(0))
+    width = tensor.getDimSize(0);
+  for (int64_t index : getParityIndicesAttr().asArrayRef()) {
+    if (index < 0)
+      return emitOpError("parity_indices must be nonnegative");
+    if (width >= 0 && index >= width)
+      return emitOpError("parity index exceeds the measurement width");
+  }
+  return success();
+}
+
 LogicalResult AllZeroOp::verify() {
   auto tensor = cast<RankedTensorType>(getBits().getType());
   if (tensor.getRank() != 1 || !tensor.getElementType().isInteger(1))
@@ -8409,6 +8473,132 @@ LogicalResult TransportOp::verify() {
       return emitOpError(
           "transport protocol must exactly match the selected route protocol");
   }
+  return success();
+}
+
+LogicalResult DetectorOp::verify() {
+  if ((*this)->hasAttr("select"))
+    return emitOpError(
+        "'select' is not detector semantics; declare a fabric.success row");
+  if ((*this)->getParentOfType<GadgetProfileOp>() &&
+      ((*this)->hasAttr("label") || (*this)->hasAttr("coords")))
+    return emitOpError(
+        "profile presentation belongs in gadget_profile row_annotations");
+  bool hasOperands = !getSyndromes().empty();
+  bool hasRecords = static_cast<bool>(getRecords());
+  bool hasInputSyndromes = static_cast<bool>(getInputSyndromes());
+  bool hasConstant = static_cast<bool>(getConstant());
+  bool hasScalarProfile = hasRecords || hasInputSyndromes || hasConstant;
+  if (static_cast<unsigned>(hasOperands) +
+          static_cast<unsigned>(hasScalarProfile) !=
+      1)
+    return emitOpError(
+        "requires exactly one representation: SSA measurement-record "
+        "operands or one stable scalar profile parity");
+  if (hasScalarProfile && !(*this)->getParentOfType<GadgetProfileOp>())
+    return emitOpError(
+        "stable-record detector declarations must be nested in a "
+        "fabric.gadget_profile");
+  if (hasOperands && (*this)->getParentOfType<GadgetProfileOp>())
+    return emitOpError(
+        "gadget profiles cannot capture realization SSA values; use stable "
+        "record references in 'records'");
+
+  if (auto basis = getBasis()) {
+    if (*basis != "x" && *basis != "z")
+      return emitOpError("basis must be 'x' or 'z', got '") << *basis << "'";
+    if (!hasOperands)
+      return emitOpError("profile detector rows cannot declare a basis");
+  }
+
+  if (hasOperands) {
+    ValueRange operands = getSyndromes();
+    auto isI1 = [](Type type) { return type.isInteger(1); };
+    auto isDataTap = [&](Type type) {
+      if (isI1(type))
+        return true;
+      auto tensor = dyn_cast<RankedTensorType>(type);
+      return tensor && tensor.getRank() == 1 &&
+             tensor.getElementType().isInteger(1);
+    };
+
+    for (Value operand : operands) {
+      Type type = operand.getType();
+      if (!isa<SyndromeType>(type) && !isDataTap(type))
+        return emitOpError(
+                   "record operands must be !fabric.syndrome, i1, or ranked "
+                   "tensors of i1; got ")
+               << type;
+    }
+
+    bool hasSyndrome = llvm::any_of(operands, [&](Value value) {
+      return isa<SyndromeType>(value.getType());
+    });
+    if (!hasSyndrome) {
+      if (getBasis())
+        return emitOpError("measurement-record form does not accept a basis");
+    } else if (operands.size() == 1 &&
+               isa<SyndromeType>(operands[0].getType())) {
+      if (!getBasis())
+        return emitOpError("single-syndrome form requires basis='x' or 'z'");
+    } else {
+      if (operands.size() != 2 || !isa<SyndromeType>(operands[0].getType()))
+        return emitOpError("expects measurement records, one syndrome, two "
+                           "syndromes, or one syndrome followed by a data "
+                           "tap");
+      auto firstType = cast<SyndromeType>(operands[0].getType());
+      if (auto secondType = dyn_cast<SyndromeType>(operands[1].getType())) {
+        if (getBasis())
+          return emitOpError("syndrome-comparison form infers its basis; "
+                             "omit the basis attribute");
+        if (secondType.getCodeType() != firstType.getCodeType())
+          return emitOpError(
+                     "compared syndromes must have the same code type, got ")
+                 << firstType.getCodeType() << " and "
+                 << secondType.getCodeType();
+      } else if (!isDataTap(operands[1].getType())) {
+        return emitOpError("terminal form requires a data-bit tap after the "
+                           "syndrome; got ")
+               << operands[1].getType();
+      }
+    }
+  }
+  if (hasRecords && getRecords()->empty() && !hasInputSyndromes && !hasConstant)
+    return emitOpError("scalar profile parity must contain at least one term");
+  return success();
+}
+
+LogicalResult ObservableOp::verify() {
+  bool hasOperand = static_cast<bool>(getDataBits());
+  bool hasRecords = static_cast<bool>(getRecords());
+  bool hasInputs = static_cast<bool>(getInputSyndromes());
+  bool hasConstant = static_cast<bool>(getConstant());
+  bool hasScalarProfile = hasRecords || hasInputs || hasConstant;
+  if (static_cast<unsigned>(hasOperand) +
+          static_cast<unsigned>(hasScalarProfile) !=
+      1)
+    return emitOpError(
+        "requires exactly one representation: an inline data operand or a "
+        "stable affine profile parity");
+  if (hasScalarProfile && !(*this)->getParentOfType<GadgetProfileOp>())
+    return emitOpError(
+        "stable-record observable declarations must be nested in a "
+        "fabric.gadget_profile");
+  if (hasOperand && (*this)->getParentOfType<GadgetProfileOp>())
+    return emitOpError(
+        "gadget profiles cannot capture realization SSA values; use stable "
+        "record references in 'records'");
+  if (getBasis() && !hasOperand)
+    return emitOpError(
+        "profile observables derive semantics from the OutcomeMap; basis is "
+        "only valid on inline data operands");
+  if ((*this)->getParentOfType<GadgetProfileOp>() &&
+      ((*this)->hasAttr("label") || (*this)->hasAttr("coords")))
+    return emitOpError(
+        "profile presentation belongs in gadget_profile row_annotations");
+  if (hasRecords && getRecords()->empty() && !hasInputs && !hasConstant)
+    return emitOpError(
+        "observable profile parity must contain at least one affine term");
   return success();
 }
 

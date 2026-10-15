@@ -958,4 +958,81 @@ def Phys_ScheduleOp : Phys_Op<"schedule", [Symbol]> {
   let hasVerifier = 1;
 }
 
+def Phys_SubmitSyndromeOp : Phys_Op<"submit_syndrome", []> {
+  let summary = "stream one round of physical records to a decoder";
+  let arguments = (ins
+    Variadic<AnyType>:$records,
+    I64Attr:$round,
+    FlatSymbolRefAttr:$decoder,
+    OptionalAttr<StrAttr>:$decoder_erasure_semantics,
+    OptionalAttr<StrAttr>:$event_id
+  );
+  let assemblyFormat = "$records attr-dict `:` type($records)";
+  let hasVerifier = 1;
+}
+
+def Phys_DecodeBitOp : Phys_Op<"decode_bit", []> {
+  let summary = "request one corrected bit from a decoder over physical records";
+  let arguments = (ins
+    Variadic<AnyType>:$records,
+    FlatSymbolRefAttr:$decoder,
+    OptionalAttr<StrAttr>:$decoder_erasure_semantics,
+    OptionalAttr<DenseI64ArrayAttr>:$parity_indices,
+    DefaultValuedAttr<BoolAttr, "false">:$invert,
+    OptionalAttr<StrAttr>:$event_id
+  );
+  let results = (outs I1:$result);
+  let assemblyFormat = "$records attr-dict `:` type($records) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Phys_DetectorSidecarOp : Phys_Op<"detector_sidecar", [Symbol]> {
+  let summary = "bind one Fabric detector row to concrete physical records";
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    FlatSymbolRefAttr:$graph,
+    OptionalAttr<FlatSymbolRefAttr>:$source_profile,
+    OptionalAttr<StrAttr>:$source_kind,
+    OptionalAttr<I64Attr>:$source_row,
+    OptionalAttr<StrAttr>:$source_instance,
+    OptionalAttr<FlatSymbolRefAttr>:$record_projection,
+    OptionalAttr<DenseI64ArrayAttr>:$projection_indices,
+    ArrayAttr:$records,
+    OptionalAttr<ArrayAttr>:$source_records,
+    OptionalAttr<ArrayAttr>:$input_syndromes,
+    OptionalAttr<BoolAttr>:$constant,
+    OptionalAttr<StrAttr>:$basis,
+    OptionalAttr<DenseF64ArrayAttr>:$coords,
+    OptionalAttr<UnitAttr>:$select,
+    OptionalAttr<StrAttr>:$label
+  );
+  let assemblyFormat = "$sym_name `for` $graph attr-dict";
+  let hasVerifier = 1;
+}
+
+def Phys_ObservableSidecarOp : Phys_Op<"observable_sidecar", [Symbol]> {
+  let summary = "bind one Fabric logical-observable row to physical records";
+  let arguments = (ins
+    SymbolNameAttr:$sym_name,
+    FlatSymbolRefAttr:$graph,
+    OptionalAttr<FlatSymbolRefAttr>:$source_profile,
+    OptionalAttr<StrAttr>:$source_kind,
+    OptionalAttr<I64Attr>:$source_row,
+    OptionalAttr<StrAttr>:$source_instance,
+    OptionalAttr<FlatSymbolRefAttr>:$record_projection,
+    OptionalAttr<DenseI64ArrayAttr>:$projection_indices,
+    I64Attr:$idx,
+    ArrayAttr:$records,
+    OptionalAttr<ArrayAttr>:$source_records,
+    OptionalAttr<ArrayAttr>:$input_syndromes,
+    OptionalAttr<BoolAttr>:$constant,
+    OptionalAttr<StrAttr>:$basis,
+    OptionalAttr<I64Attr>:$logical,
+    OptionalAttr<DenseF64ArrayAttr>:$coords,
+    OptionalAttr<StrAttr>:$label
+  );
+  let assemblyFormat = "$sym_name `for` $graph attr-dict";
+  let hasVerifier = 1;
+}
+
 #endif

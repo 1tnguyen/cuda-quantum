@@ -1714,4 +1714,139 @@ def Fabric_AllFalseOp : Fabric_Op<"all_false", []> {
   let hasVerifier = 1;
 }
 
+def Fabric_SubmitSyndromeOp : Fabric_Op<"submit_syndrome",
+    [AttrSizedOperandSegments]> {
+  let summary = "Stream syndrome bits to a decoder (async)";
+  let description = [{
+    RUNTIME OP. Ships measurement bits for round `round` to the named
+    decoder. Fire-and-forget: does not block. The decoder accumulates
+    submitted syndromes across rounds and uses its configured code model to
+    infer errors.
+
+    Two operand forms (mutually exclusive):
+    * `$bits` — a single measurement bit, or a measure-produced tensor
+      (`fabric.mz` / `fabric.read_syndrome_ancillas`): the classic syndrome round.
+    * `$scalar_bits` — a list of loose `i1` values streamed as one round at
+      consecutive bit positions. This lets a feed-forward gadget route derived
+      classical events to the decoder.
+  }];
+  let arguments = (ins
+    Optional<AnyTypeOf<[I1, Fabric_SyndromeType, AnyRankedTensor]>>:$bits,
+    Variadic<I1>:$scalar_bits,
+    I64Attr:$round,
+    FlatSymbolRefAttr:$decoder,
+    OptionalAttr<StrAttr>:$decoder_erasure_semantics
+  );
+  let hasCustomAssemblyFormat = 1;
+}
+
+def Fabric_DecodeBitOp : Fabric_Op<"decode_bit", []> {
+  let summary = "Decode terminal data measurements into a logical bit";
+  let description = [{
+    RUNTIME OP. Invokes the named decoder with the given measurement
+    bits as the terminal round, and returns the decoded logical bit as
+    an `i1`. The operand may be a terminal data-measurement tensor or a
+    scalar `i1` product-measurement record. The decoder combines accumulated
+    state from prior `submit_syndrome` calls with the new data bits. Use this op
+    whenever the corrected logical bit is needed for classical control or as
+    the program result.
+  }];
+  let arguments = (ins
+    AnyTypeOf<[AnyRankedTensor, I1]>:$data_bits,
+    FlatSymbolRefAttr:$decoder,
+    OptionalAttr<StrAttr>:$decoder_erasure_semantics,
+    OptionalAttr<DenseI64ArrayAttr>:$parity_indices,
+    DefaultValuedAttr<BoolAttr, "false">:$invert
+  );
+  let results = (outs I1:$logical_bit);
+  let assemblyFormat = [{
+    $data_bits attr-dict `:` type($data_bits) `->` type($logical_bit)
+  }];
+  let hasVerifier = 1;
+}
+
+def Fabric_DetectorOp : Fabric_Op<"detector", []> {
+  let summary = "declare a deterministic parity check over measurement records";
+  let description = [{
+    A canonical detector is a declarative row in a `fabric.gadget_profile`.
+    Its `records` attribute names the stable measurement records whose XOR is
+    deterministic in the fault-free accepted execution.  It produces no SSA
+    result and is not an executable instruction.  Detector-model construction,
+    analysis backends, and real-time decoder configuration consume the row.
+
+    ```mlir
+    fabric.gadget_profile @memory_analysis for @memory_round {
+      fabric.detector() {
+        records = ["memory_round.r0.s0", "memory_round.r1.s0"]
+      }
+    }
+    ```
+
+    The operand form is the first-class manual authoring form inside a gadget
+    realization and supplies an optional default analysis. It unifies all
+    inline detector shapes: one syndrome plus `basis` establishes a preparation
+    boundary; two syndromes form a round comparison whose Clifford basis change
+    is derived from patch dataflow; a syndrome followed by a data-readout tensor
+    forms a destructive-readout boundary; and measurement-only operands (`i1`
+    values or `tensor<Nxi1>` bundles) form one direct detector parity. A
+    selected gadget profile replaces the inline form for that invocation.
+    `fabric-extract-profile` may give it stable record identities and move it
+    into a generated gadget profile when detached interchange is required.
+    Exactly one representation is legal per operation: one scalar profile row
+    in `records` or inline SSA operands. Frontends normalize vector expressions
+    to repeated scalar rows before constructing the IR.
+  }];
+  let arguments = (ins
+    Variadic<AnyTypeOf<[Fabric_SyndromeType, I1, AnyRankedTensor]>>:$syndromes,
+    OptionalAttr<ArrayAttr>:$records,
+    OptionalAttr<ArrayAttr>:$input_syndromes,
+    OptionalAttr<BoolAttr>:$constant,
+    OptionalAttr<StrAttr>:$basis
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $syndromes `)` attr-dict (`:` `(` type($syndromes)^ `)`)?
+  }];
+}
+
+def Fabric_ObservableOp : Fabric_Op<"observable", []> {
+  let summary = "declare a logical-observable parity over measurement records";
+  let description = [{
+    A canonical observable is a declarative row in a
+    `fabric.gadget_profile`.  Its `records` attribute names the stable
+    measurement records whose XOR, after frame interpretation, is logical
+    observable `idx`.  Optional `logical` and `basis` attributes identify the
+    encoded logical port and representative convention.  The operation
+    produces no SSA result; executable decoded-bit retrieval is a separate
+    runtime concern.
+
+    ```mlir
+    fabric.observable() {
+      idx = 0 : i64,
+      records = ["memory_round.final.data0"],
+      basis = "z"
+    }
+    ```
+
+    The data-operand form is the first-class manual inline form and supplies an
+    optional default analysis. A selected gadget profile replaces it for that
+    invocation. It may normalize through `fabric-extract-profile` for detached
+    interchange. Exactly one representation is legal per operation: profile
+    `records` or one inline SSA operand.
+  }];
+  let arguments = (ins
+    Optional<AnyTypeOf<[AnyRankedTensor, I1]>>:$data_bits,
+    I64Attr:$idx,
+    OptionalAttr<ArrayAttr>:$records,
+    OptionalAttr<ArrayAttr>:$input_syndromes,
+    OptionalAttr<BoolAttr>:$constant,
+    OptionalAttr<StrAttr>:$basis,
+    OptionalAttr<I64Attr>:$logical
+  );
+  let hasVerifier = 1;
+  let assemblyFormat = [{
+    `(` $data_bits `)` attr-dict (`:` `(` type($data_bits)^ `)`)?
+  }];
+}
+
 #endif // FABRIC_OPS_TD
