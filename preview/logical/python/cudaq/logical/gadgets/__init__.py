@@ -30,6 +30,8 @@ _RECORD_NAMES = (
     "SyndromeBundleRef",
 )
 _SEMANTIC_NAMES = (
+    "Detector",
+    "LogicalObservable",
     "CommitPoint",
     "CommitPointKind",
     "OutcomeRole",

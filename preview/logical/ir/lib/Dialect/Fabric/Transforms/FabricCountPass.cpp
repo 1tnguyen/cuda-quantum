@@ -868,6 +868,10 @@ void Walker::eraseRegionValueMappings(Region &region) {
 }
 
 void Walker::walkOp(Operation *op, int64_t mult) {
+  // Detached detector/model boundaries annotate measurements; they do not
+  // execute gates, occupy resources, or add operations to an estimate.
+  if (isa<DetectorOp, ObservableOp, OutputSyndromeOp>(op))
+    return;
   ++visitedOperations;
   if (isa<RetryOp, ResourceRequestOp, ResourceRotateProductOp,
           ProduceResourceOp, UnpackResourceOp, PackResourceOp,

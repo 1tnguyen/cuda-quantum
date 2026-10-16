@@ -11,6 +11,7 @@ import cudaq.mlir.ir as mlir_ir
 
 from cudaq.logical.programs.definition import DefinitionHandle
 from cudaq.logical.gadgets.profiles import GadgetProfile
+from cudaq.logical.gadgets.semantics import _scalar_profile_parities
 from cudaq.logical.gadgets.records import (
     ProfileParity,
     RecordVectorParity,
@@ -18,7 +19,7 @@ from cudaq.logical.gadgets.records import (
 
 
 class GadgetProfileBuilder:
-    """Lower immutable success and boundary analysis to declarative Fabric IR."""
+    """Lower immutable detector, observable, success, and boundary analysis to declarative Fabric IR."""
 
     def __init__(self, transaction, profile: GadgetProfile) -> None:
         self.transaction = transaction
@@ -149,6 +150,17 @@ class GadgetProfileBuilder:
             self.insertion_point.insert(operation)
 
     def trace(self):
+        for parity in _scalar_profile_parities(self.profile.detectors):
+            attrs = self._parity_attrs(parity)
+            attrs.setdefault("records", self._records(parity))
+            self._emit("fabric.detector", attrs)
+        for observable in self.profile.observables:
+            attrs = self._common(observable)
+            attrs.setdefault("records", self._records(observable.parity))
+            attrs["idx"] = mlir_ir.IntegerAttr.get(
+                mlir_ir.IntegerType.get_signless(64, context=self.context),
+                observable.index)
+            self._emit("fabric.observable", attrs)
         for success in self.profile.success:
             attrs = self._common(success)
             self._emit("fabric.success", attrs)

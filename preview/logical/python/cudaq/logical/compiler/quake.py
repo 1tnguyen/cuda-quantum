@@ -499,6 +499,11 @@ def import_cudaq(
                                    context=module.context)
         inline.run(module.operation)
 
+    # A value-returning CUDA-Q kernel also has a .run entry wrapper. Use
+    # the decorator's exact symbol so the abbreviated Python name cannot
+    # accidentally select both entries.
+    entry_symbol = "__nvqpp__mlirgen__" + kernel.uniqName
+
     source = _stable_cudaq_source(str(module))
     source_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
     argument_commitment = _commitment(arguments)
@@ -515,7 +520,7 @@ def import_cudaq(
 
     cudaq_version = str(getattr(cudaq, "__version__", "unknown"))
     return _build_from_p0(
-        _run_quake_to_p0_pass(module, root=name),
+        _run_quake_to_p0_pass(module, root=entry_symbol),
         root=name,
         origin=f"@cudaq.kernel:{name}",
         source_sha256=source_sha256,

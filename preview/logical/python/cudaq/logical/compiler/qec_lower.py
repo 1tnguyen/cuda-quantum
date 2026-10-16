@@ -518,6 +518,9 @@ class _P1ToP2:
                 "provide a unitary-faithful logical program first")
         linked = discover_linked_definitions(source.source_modules, device)
         definitions = linked.definitions
+        from cudaq.logical.gadgets import GadgetProfile
+        self.analysis_profiles = tuple(
+            value for value in definitions if isinstance(value, GadgetProfile))
         self.ordinary_definition_ids = linked.ordinary_ids
         self.transaction.bind_resource_streams(device)
         self._bind_retained_stream_protocols(definitions)
@@ -2690,7 +2693,7 @@ class _P1ToP2:
             operands=[allocated.result],
             results=results,
             attributes={
-                "callee":
+                **self._profile_attributes(generated, selected.handle.placements), "callee":
                     mlir_ir.FlatSymbolRefAttr.get(handle.symbol,
                                                   context=self.context)
             },
@@ -3101,7 +3104,7 @@ class _P1ToP2:
             self._memory_choices[key] = candidates[0] if candidates else None
         return self._memory_choices[key]
 
-    def _emit_memory_realization(self, value, realization, rounds):
+    def _emit_memory_realization(self, value, realization, rounds, placements):
         """Emit the selected memory realization for one idle workload.
 
         One iteration is one call; several stay folded as ``cflow.repeat``
@@ -3116,7 +3119,7 @@ class _P1ToP2:
                 operands=[operand],
                 results=[self.patch_type],
                 attributes={
-                    "callee":
+                    **self._profile_attributes(realization, placements), "callee":
                         mlir_ir.FlatSymbolRefAttr.get(handle.symbol,
                                                       context=self.context)
                 },
@@ -3528,6 +3531,25 @@ class _P1ToP2:
         self.generated[key] = generated, handle
         return generated, handle
 
+    def _profile_attributes(self, realization, placements):
+        profiles = tuple(profile for profile in self.analysis_profiles
+                         if profile.gadget is realization and
+                         self._architecture_allows(profile, placements))
+        if len(profiles) > 1:
+            raise ValueError(
+                f"multiple linked analysis profiles for gadget {realization.name!r}"
+            )
+        selected = profiles[0] if profiles else getattr(
+            realization, "analysis_profile", None)
+        if selected is None:
+            return {}
+        profile = self.transaction.materialize(selected)
+        return {
+            "profile":
+                mlir_ir.FlatSymbolRefAttr.get(profile.symbol,
+                                              context=self.context)
+        }
+
     def _call(self, operation, selected):
         generated, handle = self._materialize_selected(selected)
         inputs, results, _ = self.transaction.signature_of(generated)
@@ -3601,6 +3623,8 @@ class _P1ToP2:
                 mlir_ir.FlatSymbolRefAttr.get(handle.symbol,
                                               context=self.context)
         }
+        call_attributes.update(
+            self._profile_attributes(generated, selected.handle.placements))
         if self._shares_local_rpp_callable(selected):
             call_attributes["action_site"] = self._materialize_action_site(
                 selected)
@@ -3997,7 +4021,7 @@ class _P1ToP2:
                     result = idle.result
                 else:
                     result = self._emit_memory_realization(
-                        mapped_input, realization, rounds)
+                        mapped_input, realization, rounds, placements)
                 for _old_input, old_result in values:
                     self.value_map[old_result] = result
                 self.block_state[block] = result

@@ -104,7 +104,14 @@ _API_NAMES = (
 )
 _COMPAT_EXPORTS = {name: f"cudaq.logical.qec.api:{name}" for name in _API_NAMES}
 _EXPORTS = {
-    "DecoderSpec": "cudaq.logical.qec.decoder_spec:DecoderSpec",
+    "generate_dem":
+        "cudaq.logical.qec.decoder_config:generate_dem",
+    "generate_decoder_config":
+        "cudaq.logical.qec.decoder_config:generate_decoder_config",
+    "DecoderModel":
+        "cudaq.logical.qec.decoder_config:DecoderModel",
+    "DecoderSpec":
+        "cudaq.logical.qec.decoder_spec:DecoderSpec",
     **{
         name: f"cudaq.logical.qec.lowering:{name}" for name in (
             "ActionSiteHandle",
@@ -119,7 +126,8 @@ _EXPORTS = {
     },
     "SubsystemFragmentObjective":
         "cudaq.logical.qec.objectives:SubsystemFragmentObjective",
-    "subsystem_fragment": "cudaq.logical.qec.objectives:subsystem_fragment",
+    "subsystem_fragment":
+        "cudaq.logical.qec.objectives:subsystem_fragment",
     **{
         name: f"cudaq.logical.qec.{name}" for name in (
             "floquet",

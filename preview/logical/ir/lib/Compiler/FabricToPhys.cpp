@@ -3941,7 +3941,8 @@ private:
     SmallVector<Operation *> declarations;
     for (Operation &declaration : profile.getBody().front())
       if (isa<qlx::fabric::SuccessOp, qlx::fabric::DetectorOp,
-              qlx::fabric::ObservableOp>(declaration))
+              qlx::fabric::ObservableOp, qlx::fabric::OutputSyndromeOp>(
+              declaration))
         declarations.push_back(&declaration);
     SmallVector<Operation *> observables;
     for (Operation *declaration : declarations)
@@ -3979,6 +3980,8 @@ private:
         kind = "detector";
       else if (operationName == "fabric.observable")
         kind = "observable";
+      else if (operationName == "fabric.output_syndrome")
+        kind = "boundary";
       else
         continue;
 
@@ -4027,6 +4030,101 @@ private:
         pendingSidecars.push_back(std::move(pending));
       }
     }
+    return success();
+  }
+
+  LogicalResult attachProfileBoundary(Operation *physical,
+                                      qlx::fabric::CallOp source,
+                                      ArrayRef<PhysicalGroup> arguments,
+                                      const ProjectedValues &projected,
+                                      OpBuilder &builder) {
+    if (!source.getProfileAttr())
+      return success();
+    auto profile = dyn_cast_or_null<qlx::fabric::GadgetProfileOp>(
+        symbols.lookup(source.getProfileAttr().getValue()));
+    if (!profile)
+      return source.emitOpError("has an unresolved analysis profile");
+    auto attachPatches = [&](StringRef side, TypeRange types,
+                             ArrayRef<PhysicalGroup> groups) -> LogicalResult {
+      SmallVector<ArrayAttr> patches;
+      for (auto [type, group] : llvm::zip(types, groups)) {
+        if (!isa<qlx::fabric::PatchType>(type))
+          continue;
+        SmallVector<Attribute> resources;
+        for (Value value : group) {
+          auto state = dyn_cast<qlx::phys::StateType>(value.getType());
+          if (!state)
+            return source.emitOpError(
+                "profile endpoint requires physical states");
+          resources.push_back(state.getResource());
+        }
+        llvm::sort(resources, [](Attribute a, Attribute b) {
+          return cast<FlatSymbolRefAttr>(a).getValue() <
+                 cast<FlatSymbolRefAttr>(b).getValue();
+        });
+        patches.push_back(builder.getArrayAttr(resources));
+      }
+      SmallVector<Attribute> bindings;
+      auto endpoints = profile->getAttrOfType<ArrayAttr>((side + "s").str());
+      // Legacy/manual profiles may omit syndrome boundaries entirely.
+      if (!endpoints)
+        return success();
+      for (Attribute raw : endpoints) {
+        auto endpoint =
+            cast<DictionaryAttr>(raw).getAs<IntegerAttr>("endpoint");
+        if (!endpoint || endpoint.getInt() < 0 ||
+            endpoint.getInt() >= static_cast<int64_t>(patches.size()))
+          return source.emitOpError("profile endpoint has no physical patch");
+        bindings.push_back(patches[endpoint.getInt()]);
+      }
+      physical->setAttr(("profile_" + side + "_patches").str(),
+                        builder.getArrayAttr(bindings));
+      return success();
+    };
+    SmallVector<PhysicalGroup> outputs;
+    SmallVector<int64_t> resultIndices;
+    for (Value result : source.getResults()) {
+      auto found = projected.find(result);
+      if (found == projected.end())
+        return source.emitOpError("profile result was not projected");
+      outputs.push_back(found->second);
+      if (result.getType().isInteger(1)) {
+        if (found->second.size() != 1)
+          return source.emitOpError("profile Boolean result is not scalar");
+        auto value = dyn_cast<OpResult>(found->second.front());
+        // A passthrough classical result may have no new physical result.
+        // It cannot be named by a local observable without an SSA binding.
+        resultIndices.push_back(value && value.getOwner() == physical
+                                    ? value.getResultNumber()
+                                    : -1);
+      }
+    }
+    if (failed(attachPatches("input", source.getOperandTypes(), arguments)) ||
+        failed(attachPatches("output", source.getResultTypes(), outputs)))
+      return failure();
+    auto gadget = dyn_cast_or_null<qlx::fabric::GadgetOp>(
+        symbols.lookup(source.getCallee()));
+    auto spec = gadget && gadget.getSpecAttr()
+                    ? dyn_cast_or_null<qlx::fabric::GadgetSpecOp>(
+                          symbols.lookup(gadget.getSpecAttr().getValue()))
+                    : qlx::fabric::GadgetSpecOp{};
+    if (spec && spec.getOutcomeMap()) {
+      auto roles = spec.getOutcomeMap()->getAs<ArrayAttr>("roles");
+      if (roles) {
+        SmallVector<int64_t> selected;
+        for (auto [index, row] : llvm::enumerate(roles))
+          if (llvm::any_of(cast<ArrayAttr>(row), [](Attribute role) {
+                return cast<StringAttr>(role).getValue() == "result";
+              })) {
+            if (index >= resultIndices.size())
+              return source.emitOpError("outcome role has no Boolean result");
+            selected.push_back(resultIndices[index]);
+          }
+        resultIndices = std::move(selected);
+      }
+    }
+    physical->setAttr("profile_result_indices",
+                      builder.getDenseI64ArrayAttr(resultIndices));
     return success();
   }
 
@@ -4687,6 +4785,10 @@ private:
         attrs.push_back(builder.getNamedAttr("source_records",
                                              builder.getArrayAttr(sources)));
       }
+      // Outgoing syndrome rows need record projections for composition, but
+      // are not detector/observable/selection sidecars themselves.
+      if (pending.kind == "boundary")
+        continue;
       if (declaration) {
         for (StringRef name :
              {StringRef("input_syndromes"), StringRef("constant"),
@@ -5644,7 +5746,8 @@ private:
                 "selected profile is unresolved while projecting records");
           for (Operation &declaration : profile.getBody().front()) {
             if (!isa<qlx::fabric::SuccessOp, qlx::fabric::DetectorOp,
-                     qlx::fabric::ObservableOp>(declaration))
+                     qlx::fabric::ObservableOp, qlx::fabric::OutputSyndromeOp>(
+                    declaration))
               continue;
             if (auto records = declaration.getAttrOfType<ArrayAttr>("records"))
               for (Attribute raw : records)
@@ -5893,8 +5996,8 @@ private:
                   *compatible, call.getCalleeAttr(), callProfile, instance,
                   stateAliases, attrs, builder, call.getLoc())))
             return failure();
-          createGeneric(builder, call.getLoc(), "phys.call_template", {}, {},
-                        attrs);
+          Operation *physicalCall = createGeneric(
+              builder, call.getLoc(), "phys.call_template", {}, {}, attrs);
           ++templateInvocations;
           ++elidedTemplateInvocations;
           if (!stateAliases.empty())
@@ -5904,7 +6007,10 @@ private:
             return failure();
           for (auto [result, group] :
                llvm::zip(call.getResults(), callArguments))
-            projected[result] = std::move(group);
+            projected[result] = group;
+          if (failed(attachProfileBoundary(physicalCall, call, callArguments,
+                                           projected, builder)))
+            return failure();
           if (failed(replayAllocationPlan(*compatible, stateAliases.getValue(),
                                           callEvent.getValue())))
             return call.emitOpError(
@@ -6278,6 +6384,9 @@ private:
           offset += width;
           projected[result] = std::move(group);
         }
+        if (failed(attachProfileBoundary(physicalCall, call, callArguments,
+                                         projected, builder)))
+          return failure();
         if (failed(replayAllocationPlan(*compatible, stateAliases.getValue(),
                                         callEvent.getValue())))
           return call.emitOpError(
@@ -6432,6 +6541,9 @@ private:
         offset += width;
         projected[result] = std::move(group);
       }
+      if (failed(attachProfileBoundary(physicalCall, call, callArguments,
+                                       projected, builder)))
+        return failure();
     }
 
     return success();

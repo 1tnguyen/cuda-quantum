@@ -58,6 +58,33 @@ def _parity(value):
 
 
 @dataclass(frozen=True, slots=True)
+class Detector:
+    """Deterministic parity, possibly a vector of scalar detector rows."""
+
+    parity: object
+
+    def __post_init__(self) -> None:
+        parity = self.parity
+        if not isinstance(parity, (ProfileVectorExpr, RecordVectorParity)):
+            parity = ProfileParity.from_value(parity)
+        object.__setattr__(self, "parity", parity)
+
+
+@dataclass(frozen=True, slots=True)
+class LogicalObservable:
+    """An analysis parity for a gadget-local result-role ordinal."""
+
+    parity: object
+    index: int = 0
+
+    def __post_init__(self) -> None:
+        if type(self.index) is not int or self.index < 0:
+            raise ValueError("observable index must be a nonnegative integer")
+        object.__setattr__(self, "parity",
+                           ProfileParity.from_value(self.parity))
+
+
+@dataclass(frozen=True, slots=True)
 class SuccessPredicate:
     parity: RecordParity | RecordRef | ProfileParity
 

@@ -139,7 +139,44 @@ def _measurement(
         "block": patch[encoding],
         "return": tuple[patch[encoding], bool] if preserve_block else bool,
     }
-    return gadget(realization, implements=objective, name=realization.__name__)
+
+    def analysis_profile(definition):
+        from .profiles import GadgetProfile
+        from .records import StructuredRecord
+        from .semantics import Detector, LogicalObservable
+
+        if decoder is None:
+            # This realization measures one logical product, not all data.
+            return GadgetProfile(definition,
+                                 boundary={
+                                     definition.outputs.only().syndrome:
+                                         definition.inputs.only().syndrome
+                                 } if preserve_block else None,
+                                 observables=(LogicalObservable(
+                                     definition.records.product(0)),))
+        data = StructuredRecord(definition, "terminal_data",
+                                data_count=code.n).data
+        detectors = []
+        for i, row in enumerate(encoding.profile.effective_stabilizers.rows):
+            support, other = (row[code.n:],
+                              row[:code.n]) if basis == "z" else (row[:code.n],
+                                                                  row[code.n:])
+            if not any(other):
+                check = tuple(j for j, bit in enumerate(support) if bit)
+                detectors.append(
+                    Detector(definition.inputs.only().syndrome[i] ^
+                             data.parity(check)))
+        return GadgetProfile(
+            definition,
+            detectors=tuple(detectors),
+            # Local observable zero describes this gadget's sole Boolean result.
+            # The compiler binds each invocation to the experiment's results.
+            observables=(LogicalObservable(data.parity(indices)),))
+
+    return gadget(realization,
+                  implements=objective,
+                  name=realization.__name__,
+                  analysis_profile=analysis_profile)
 
 
 def measure_z(
@@ -302,47 +339,122 @@ def css_memory_round(value,
         "block": patch[encoding],
         "return": patch[encoding],
     }
+
+    def analysis_profile(definition):
+        from .profiles import GadgetProfile
+        from .records import StructuredRecord
+        from .semantics import Detector, OutputSyndromeAssignment
+
+        measured = tuple(
+            tuple(int(i in support)
+                  for i in range(code.n)) + (0,) * code.n
+            for support in code.hx) + tuple(
+                (0,) * code.n + tuple(int(i in support)
+                                      for i in range(code.n))
+                for support in code.hz)
+        checks = StructuredRecord(definition,
+                                  record or "syndrome0",
+                                  check_count=len(measured)).checks
+        rows = encoding.profile.effective_stabilizers.rows
+        if any(row not in measured for row in rows):
+            raise ValueError(
+                "CSS memory default profile requires each effective stabilizer "
+                "to be a measured hx/hz check; supply an explicit profile")
+        ordered = tuple(checks[measured.index(row)] for row in rows)
+        return GadgetProfile(
+            definition,
+            detectors=tuple(
+                Detector(definition.inputs.only().syndrome[i] ^ bit)
+                for i, bit in enumerate(ordered)),
+            output_syndromes=tuple(
+                OutputSyndromeAssignment(definition.outputs.only(), i, bit)
+                for i, bit in enumerate(ordered)))
+
     return gadget(realization,
                   implements=idle_objective,
-                  name=realization.__name__)
+                  name=realization.__name__,
+                  analysis_profile=analysis_profile)
 
 
-def _preparation(value, *, state, objective, name: str | None):
+def _preparation(value, *, state, objective, name, preparation):
     encoding = _encoding(value)
     code = encoding.code
+    if preparation not in (None, "product", "encoded"):
+        raise ValueError("preparation must be 'product' or 'encoded'")
 
-    def realization(block):
-        return prepare(block, state=state)
+    if preparation == "encoded":
+        pauli = Z if state == zero else X
+        realization = _stabilizer_preparation_body(
+            encoding, tuple(pauli(i) for i in range(code.k)))
+    else:
 
-    realization.__name__ = name or f"{code.name}_prepare_{state.name}"
+        def realization(block):
+            if preparation is None:
+                return prepare(block, state=state)
+            block = reset(block.data)
+            return h(block.data) if state == plus else block
+
+    def analysis_profile(definition):
+        from .profiles import GadgetProfile
+        from .semantics import OutputSyndromeAssignment
+
+        return GadgetProfile(
+            definition,
+            output_syndromes=tuple(
+                OutputSyndromeAssignment(definition.outputs.only(), i, False)
+                for i, row in enumerate(
+                    encoding.profile.effective_stabilizers.rows)
+                if preparation == "encoded" or
+                not any(row[:code.n] if state == zero else row[code.n:])))
+
+    suffix = "" if preparation is None else f"_{preparation}"
+    realization.__name__ = name or f"{code.name}_prepare_{state.name}{suffix}"
     realization.__qualname__ = realization.__name__
     realization.__annotations__ = {
         "block": patch[encoding],
         "return": patch[encoding],
     }
-    return gadget(realization, implements=objective, name=realization.__name__)
+    return gadget(
+        realization,
+        implements=objective,
+        name=realization.__name__,
+        analysis_profile=analysis_profile if preparation is not None else None)
 
 
-def prepare_zero(value, *, name: str | None = None):
-    """Return a code-specific encoded ``|0>`` preparation realization."""
+def prepare_zero(value,
+                 *,
+                 preparation: str | None = None,
+                 name: str | None = None):
+    """Return zero preparation with an explicit physical realization.
 
-    return _preparation(
-        value,
-        state=zero,
-        objective=prepare_zero_objective,
-        name=name,
-    )
+    ``preparation="product"`` resets the data carriers to zero; subsequent
+    syndrome rounds establish the remaining stabilizers. ``"encoded"`` uses
+    the existing stabilizer-state synthesis to prepare logical zero directly.
+    Each explicit choice supplies its matching default analysis profile.
+    Omitting the choice preserves legacy context-dependent lowering without
+    supplying a default analysis profile.
+    """
+    return _preparation(value,
+                        state=zero,
+                        objective=prepare_zero_objective,
+                        name=name,
+                        preparation=preparation)
 
 
-def prepare_plus(value, *, name: str | None = None):
-    """Return a code-specific encoded ``|+>`` preparation realization."""
+def prepare_plus(value,
+                 *,
+                 preparation: str | None = None,
+                 name: str | None = None):
+    """Return plus preparation; choices have the same meaning as prepare_zero.
 
-    return _preparation(
-        value,
-        state=plus,
-        objective=prepare_plus_objective,
-        name=name,
-    )
+    Product preparation resets the data and applies H to each carrier. Encoded
+    preparation synthesizes the code stabilizers and all logical X eigenvalues.
+    """
+    return _preparation(value,
+                        state=plus,
+                        objective=prepare_plus_objective,
+                        name=name,
+                        preparation=preparation)
 
 
 def _stim_pauli(element: PauliGroupElement, *, width: int):
@@ -452,29 +564,7 @@ def _stabilizer_preparation_circuit(
     return tableau.to_circuit(method="elimination")
 
 
-def stabilizer_preparation(
-    value,
-    *,
-    logical_stabilizers,
-    name: str | None = None,
-):
-    """Return an explicit encoded stabilizer-state preparation gadget.
-
-    ``logical_stabilizers`` contains exactly ``code.k`` independent, commuting
-    formal Pauli products over the code's protected logical-port indices. For
-    example, ``(cudaq.logical.Y(0),)`` selects encoded ``|+Y>`` for a one-logical-qubit
-    code, while ``(cudaq.logical.X(0) @ cudaq.logical.X(1), cudaq.logical.Z(0) @ cudaq.logical.Z(1))`` selects an
-    encoded Bell state for a two-logical-qubit code.
-
-    The returned ordinary :class:`~cudaq.logical.GadgetDefinition` contains the concrete
-    reset and Clifford operations produced by tableau elimination. It is not a
-    device-side opaque preparation instruction and does not claim a
-    fault-tolerant preparation protocol by itself.
-    """
-
-    encoding = _encoding(value)
-    code = encoding.code
-    logical_stabilizers = tuple(logical_stabilizers)
+def _stabilizer_preparation_body(encoding, logical_stabilizers):
     circuit = _stabilizer_preparation_circuit(
         encoding,
         logical_stabilizers,
@@ -513,6 +603,34 @@ def stabilizer_preparation(
                     block.data[targets[offset + 1]],
                 )
         return block
+
+    return realization
+
+
+def stabilizer_preparation(
+    value,
+    *,
+    logical_stabilizers,
+    name: str | None = None,
+):
+    """Return an explicit encoded stabilizer-state preparation gadget.
+
+    ``logical_stabilizers`` contains exactly ``code.k`` independent, commuting
+    formal Pauli products over the code's protected logical-port indices. For
+    example, ``(cudaq.logical.Y(0),)`` selects encoded ``|+Y>`` for a one-logical-qubit
+    code, while ``(cudaq.logical.X(0) @ cudaq.logical.X(1), cudaq.logical.Z(0) @ cudaq.logical.Z(1))`` selects an
+    encoded Bell state for a two-logical-qubit code.
+
+    The returned ordinary :class:`~cudaq.logical.GadgetDefinition` contains the concrete
+    reset and Clifford operations produced by tableau elimination. It is not a
+    device-side opaque preparation instruction and does not claim a
+    fault-tolerant preparation protocol by itself.
+    """
+
+    encoding = _encoding(value)
+    code = encoding.code
+    logical_stabilizers = tuple(logical_stabilizers)
+    realization = _stabilizer_preparation_body(encoding, logical_stabilizers)
 
     state_key = ";".join(f"{stabilizer.sign}:" +
                          ",".join(f"{factor.pauli}{factor.operand}"

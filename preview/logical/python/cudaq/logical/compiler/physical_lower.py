@@ -645,6 +645,7 @@ class _P2ToP3:
         self._record_projection_repeats = {}
         self._repeat_context = []
         self._provenance_sidecars = []
+        self._analysis_record_claims = set()
         self._resource_indices = {}
         self._communication_reachability = {}
         self._call_instance = 0
@@ -3447,7 +3448,7 @@ class _P2ToP3:
         return ((),)
 
     def _emit_profile_sidecars(self, profile, instance_symbol):
-        """Project selected success rows onto concrete P3 record IDs."""
+        """Project selected analysis rows onto concrete P3 record templates."""
 
         profile_symbol = _symbol(profile)
         gadget_symbol = _text(profile.attributes["gadget"])
@@ -3457,6 +3458,91 @@ class _P2ToP3:
                 for view in block.operations:
                     if view.operation.name == "fabric.success":
                         declarations.append(view.operation)
+
+        analysis_ordinals = {"detector": 0, "observable": 0}
+        # Retain the complete selected boundary contract, including records
+        # used only by outgoing syndrome assignments. Counted calls keep their
+        # record templates; experiment analysis resolves each occurrence.
+        for region in profile.regions:
+            for block in region.blocks:
+                for view in block.operations:
+                    declaration = view.operation
+                    if declaration.name not in {
+                            "fabric.detector", "fabric.observable",
+                            "fabric.output_syndrome"
+                    }:
+                        continue
+                    source_records = self._profile_source_rows(declaration)[0]
+                    for concrete in self._project_source_support(
+                            profile_symbol=profile_symbol,
+                            gadget_symbol=gadget_symbol,
+                            instance_symbol=instance_symbol,
+                            source_records=source_records):
+                        self._analysis_record_claims.update(
+                            (instance_symbol, source, physical)
+                            for source, physical in zip(source_records,
+                                                        concrete))
+                        if declaration.name == "fabric.output_syndrome":
+                            continue
+                        kind = declaration.name.split(".")[-1]
+                        attrs = {
+                            "source_kind":
+                                mlir_ir.StringAttr.get("profile",
+                                                       context=self.context),
+                            "source_row":
+                                _i64(self.context, analysis_ordinals[kind]),
+                            "input_syndromes":
+                                _empty_array_attr(self.context),
+                            "sym_name":
+                                mlir_ir.StringAttr.
+                                get(self.transaction.unique_symbol(
+                                    f"{self.graph_symbol}_{kind}{self._sidecar}"
+                                ),
+                                    context=self.context),
+                            "graph":
+                                mlir_ir.FlatSymbolRefAttr.get(
+                                    self.graph_symbol, context=self.context),
+                            "source_profile":
+                                mlir_ir.FlatSymbolRefAttr.get(
+                                    profile_symbol, context=self.context),
+                            "source_instance":
+                                mlir_ir.StringAttr.get(instance_symbol,
+                                                       context=self.context),
+                            "records":
+                                mlir_ir.ArrayAttr.get([
+                                    mlir_ir.StringAttr.get(record,
+                                                           context=self.context)
+                                    for record in concrete
+                                ],
+                                                      context=self.context),
+                            "source_records":
+                                mlir_ir.ArrayAttr.get([
+                                    mlir_ir.StringAttr.get(record,
+                                                           context=self.context)
+                                    for record in source_records
+                                ],
+                                                      context=self.context),
+                            "record_projection":
+                                mlir_ir.FlatSymbolRefAttr.get(
+                                    self.record_projection_symbol,
+                                    context=self.context),
+                        }
+                        for key in ("idx", "input_syndromes", "constant",
+                                    "basis", "logical"):
+                            if key in declaration.attributes:
+                                attrs[key] = declaration.attributes[key]
+                        with self.location:
+                            sidecar = mlir_ir.Operation.create(
+                                f"phys.{kind}_sidecar",
+                                attributes=attrs,
+                                loc=self.location)
+                            self.module.body.append(sidecar)
+                        self._sidecar += 1
+                        self._provenance_sidecars.append(
+                            (sidecar, instance_symbol,
+                             tuple(zip(source_records, concrete))))
+                    if declaration.name != "fabric.output_syndrome":
+                        analysis_ordinals[declaration.name.split(".")[-1]] += 1
 
         declared_rows = []
         for source_row, declaration in enumerate(declarations):
@@ -4614,6 +4700,38 @@ class _P2ToP3:
         if analysis_profile is not None:
             attrs["profile"] = mlir_ir.FlatSymbolRefAttr.get(
                 _symbol(analysis_profile), context=self.context)
+        if analysis_profile is not None:
+            for side, values in (("input", arguments), ("output", outputs)):
+                patches = tuple(
+                    value for value in values if isinstance(value, _Patch))
+                # The declared profile endpoints exclude uninitialized storage
+                # passed to preparation realizations. Bind only those endpoints.
+                attrs[f"profile_{side}_patches"] = mlir_ir.ArrayAttr.get(
+                    [
+                        mlir_ir.StringAttr.get(patches[int(
+                            endpoint["endpoint"])].patch_id,
+                                               context=self.context)
+                        for endpoint in analysis_profile.attributes[f"{side}s"]
+                    ],
+                    context=self.context)
+            # Profile observable ordinals refer to result-role Boolean outputs,
+            # not global experiment observable IDs. Preserve that SSA binding.
+            boolean_results = []
+            offset = 0
+            for original_type, value in zip(
+                    callee.attributes["function_type"].value.results, outputs):
+                if str(original_type) == "i1":
+                    boolean_results.append(offset)
+                offset += len(self._flatten_projected((value,)))
+            spec = self.symbols.get(_text(callee.attributes["spec"])
+                                   ) if "spec" in callee.attributes else None
+            if spec is not None and "outcome_map" in spec.attributes:
+                result_rows = self._outcome_map_role_rows(analysis_profile,
+                                                          role="result")
+                boolean_results = tuple(
+                    boolean_results[row[0]] for row in result_rows)
+            attrs["profile_result_indices"] = mlir_ir.DenseI64ArrayAttr.get(
+                boolean_results, context=self.context)
         if call_attributes:
             attrs.update(call_attributes)
         with self.location:
@@ -6121,15 +6239,15 @@ class _P2ToP3:
         self._emit_legalization_record()
 
     def _emit_record_projection(self):
-        """Retain exactly the stable-to-physical lanes claimed by sidecars."""
+        """Retain stable-to-physical lanes used by sidecars and boundaries."""
 
         entries = []
         pair_to_index = {}
-        claimed = sorted({
-            (instance, source_record, physical_record)
-            for _sidecar, instance, pairs in self._provenance_sidecars
-            for source_record, physical_record in pairs
-        })
+        claimed = sorted(
+            self._analysis_record_claims |
+            {(instance, source_record, physical_record)
+             for _sidecar, instance, pairs in self._provenance_sidecars
+             for source_record, physical_record in pairs})
         for instance, source_record, physical_record in claimed:
             pair = (instance, source_record, physical_record)
             pair_to_index[pair] = len(entries)

@@ -49,6 +49,8 @@ from .records import (
     SyndromeBundleRef,
 )
 from .semantics import (
+    Detector,
+    LogicalObservable,
     OutputSyndromeAssignment,
     SuccessPredicate,
     _reconcile_profile_role,
@@ -59,7 +61,7 @@ from .specification import _gadget_boundary_profiles
 
 @dataclass(frozen=True, slots=True)
 class GadgetProfile:
-    """Immutable success and boundary analysis for one unchanged gadget."""
+    """Immutable analysis and syndrome-boundary contract for one gadget."""
 
     gadget: "GadgetDefinition"
     code_profile: Any | None = None
@@ -71,6 +73,9 @@ class GadgetProfile:
     boundary_complete: bool = False
     name: str | None = None
     metadata: Mapping[str, Any] | None = None
+
+    detectors: tuple[Detector, ...] = ()
+    observables: tuple[LogicalObservable, ...] = ()
 
     def __post_init__(self) -> None:
         # Local import closes the lifecycle cycle: definitions own profiles,
@@ -195,7 +200,15 @@ class GadgetProfile:
             self, "metadata",
             _freeze_gadget_metadata(dict(self.metadata or {}),
                                     what="GadgetProfile.metadata"))
-        for expression in self.success:
+        for field_name, expected in (("detectors", Detector),
+                                     ("observables", LogicalObservable)):
+            expressions = tuple(getattr(self, field_name))
+            if any(not isinstance(value, expected) for value in expressions):
+                raise TypeError(
+                    f"GadgetProfile {field_name} must contain {expected.__name__} values"
+                )
+            object.__setattr__(self, field_name, expressions)
+        for expression in (*self.success, *self.detectors, *self.observables):
             if isinstance(expression.parity, RecordVectorParity):
                 parities = tuple(
                     ProfileParity(records=row.records)

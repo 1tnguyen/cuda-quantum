@@ -1494,10 +1494,45 @@ LogicalResult RecordProjectionOp::verify() {
       }
     }
   }
+  // A selected output-syndrome declaration is also an analysis consumer.
+  // Authenticate its stable source against the selected call/profile here;
+  // physical producer ownership and repeat multiplicity are checked below.
+  llvm::StringMap<llvm::StringSet<>> boundaryClaims;
+  if (auto target =
+          SymbolTable::lookupNearestSymbolFrom(*this, getGraphAttr())) {
+    if (auto graph = dyn_cast<GraphOp>(target))
+      graph.walk([&](Operation *call) {
+        if (!isa<CallOp, CallTemplateOp>(call))
+          return;
+        auto instance = call->getAttrOfType<StringAttr>("instance");
+        auto profileRef = call->getAttrOfType<FlatSymbolRefAttr>("profile");
+        auto callee = call->getAttrOfType<FlatSymbolRefAttr>("callee");
+        if (!instance || !profileRef || !callee)
+          return;
+        auto profile = dyn_cast_or_null<qlx::fabric::GadgetProfileOp>(
+            SymbolTable::lookupNearestSymbolFrom(call, profileRef));
+        if (!profile || profile.getGadgetAttr() != callee)
+          return;
+        for (auto row :
+             profile.getBody().front().getOps<qlx::fabric::OutputSyndromeOp>())
+          if (auto records = row->getAttrOfType<ArrayAttr>("records"))
+            for (Attribute raw : records)
+              if (auto record = dyn_cast<StringAttr>(raw))
+                boundaryClaims[instance.getValue()].insert(record.getValue());
+      });
+  }
+  for (auto [index, entry] : llvm::enumerate(entries)) {
+    auto found = boundaryClaims.find(entry.instance.getValue());
+    if (found != boundaryClaims.end() &&
+        found->second.contains(entry.source.getValue()))
+      claimed[index] = true;
+  }
   for (auto [index, isClaimed] : llvm::enumerate(claimed))
     if (!isClaimed)
       return emitOpError("entry ")
-             << index << " is not authenticated by any physical sidecar lane";
+             << index
+             << " is not authenticated by any physical sidecar lane or "
+                "selected syndrome boundary";
   if (std::getenv("QLX_PROFILE_P2_TO_P3"))
     llvm::errs() << "phys-verify: record-claims-done\n";
 

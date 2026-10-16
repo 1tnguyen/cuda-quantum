@@ -62,6 +62,8 @@ class GadgetDefinition(ImmutableValue):
         "spec",
         "_inferred_outcome_map",
         "_inferred_decoder_results",
+        "_analysis_profile_factory",
+        "_analysis_profile",
         "device",
         "__dict__",
     )
@@ -73,12 +75,14 @@ class GadgetDefinition(ImmutableValue):
         implements=None,
         spec: GadgetSpec | None = None,
         name: str | None = None,
-        logical_ports: Mapping[ObjectiveOperandRef | str, LogicalPortRef | str]
-        | None = None,
+        logical_ports: Mapping[ObjectiveOperandRef | str,
+                               LogicalPortRef | str] | None = None,
         transform=None,
         device=None,
         metadata: Mapping[str, Any] | None = None,
         type_hints: Mapping[str, Any] | None = None,
+        analysis_profile: Callable[["GadgetDefinition"], GadgetProfile] |
+        None = None,
     ) -> None:
         import sys
 
@@ -118,6 +122,11 @@ class GadgetDefinition(ImmutableValue):
         self.spec = spec
         self._inferred_outcome_map = None
         self._inferred_decoder_results = None
+        if analysis_profile is not None and not callable(analysis_profile):
+            raise TypeError(
+                "analysis_profile must be a factory accepting its gadget")
+        self._analysis_profile_factory = analysis_profile
+        self._analysis_profile = None
         if device is not None:
             from cudaq.logical.devices.definition import Device
 
@@ -170,6 +179,23 @@ class GadgetDefinition(ImmutableValue):
         self.__module__ = provider.__module__
         self.__annotations__ = dict(getattr(provider, "__annotations__", {}))
         self._seal()
+
+    @property
+    def analysis_profile(self) -> GadgetProfile | None:
+        """Default analysis contract; explicitly linked profiles take precedence.
+
+        The factory receives this definition so records and boundaries refer to
+        the exact selected gadget. Analysis remains lazy for execution-only use.
+        """
+        if self._analysis_profile is None and self._analysis_profile_factory is not None:
+            profile = self._analysis_profile_factory(self)
+            if not isinstance(profile,
+                              GadgetProfile) or profile.gadget is not self:
+                raise ValueError(
+                    "analysis_profile must return a GadgetProfile for its gadget"
+                )
+            object.__setattr__(self, "_analysis_profile", profile)
+        return self._analysis_profile
 
     @property
     def kernel(self):
@@ -296,6 +322,7 @@ def gadget(
     transform=None,
     device=None,
     metadata: Mapping[str, Any] | None = None,
+    analysis_profile: Callable[[GadgetDefinition], GadgetProfile] | None = None,
 ):
     from inspect import currentframe
 
@@ -322,6 +349,7 @@ def gadget(
             device=device,
             metadata=metadata,
             type_hints=hints,
+            analysis_profile=analysis_profile,
         )
 
     return decorate(fn) if fn is not None else decorate
