@@ -6,7 +6,26 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-enable_language(CUDA)
+find_path(CUSTABILIZER_INCLUDE_DIR
+  NAMES custabilizer.h
+  HINTS ${CUSTABILIZER_ROOT} ENV CUSTABILIZER_ROOT
+        ENV CUQUANTUM_INSTALL_PREFIX
+        ENV CUSTABILIZER_INCLUDE_DIR
+  PATH_SUFFIXES include)
+find_library(CUSTABILIZER_LIBRARY
+  NAMES custabilizer libcustabilizer.so.0
+  HINTS ${CUSTABILIZER_ROOT} ENV CUSTABILIZER_ROOT
+        ENV CUQUANTUM_INSTALL_PREFIX
+        ENV CUSTABILIZER_LIBRARY
+  PATH_SUFFIXES lib lib64 build/lib)
+if(NOT CUSTABILIZER_INCLUDE_DIR OR NOT CUSTABILIZER_LIBRARY)
+  if(CUSTABILIZER_ROOT OR DEFINED ENV{CUSTABILIZER_ROOT})
+    message(FATAL_ERROR "CUSTABILIZER_ROOT does not contain cuStabilizer headers and library")
+  endif()
+  message(STATUS "cuStabilizer not found; the optional custabilizer target is unavailable")
+  return()
+endif()
+
 find_package(CUDAToolkit REQUIRED)
 
 set(LIBRARY_NAME nvqir-custabilizer)
@@ -18,9 +37,10 @@ set_property(GLOBAL APPEND PROPERTY CUDAQ_RUNTIME_LIBS ${LIBRARY_NAME})
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/nvqir-custabilizer.map "
 {
   global:
-    *;
+    getCircuitSimulator;
+    getCircuitSimulator_custabilizer;
   local:
-    *4stim*;
+    *;
 };
 ")
 
@@ -30,13 +50,14 @@ target_include_directories(${LIBRARY_NAME}
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/runtime>
     $<INSTALL_INTERFACE:include>
   PRIVATE
-    ${CUSTABILIZER_INCLUDE_DIR})
+    ${CUSTABILIZER_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}/tpls/Stim/src)
 
 target_link_libraries(${LIBRARY_NAME}
   PRIVATE
-    nvqir-stim
     libstim
     fmt::fmt-header-only
+    cudaq-logger
     cudaq-common
     ${CUSTABILIZER_LIBRARY}
     CUDA::cudart)
@@ -45,18 +66,14 @@ target_link_options(${LIBRARY_NAME}
   PRIVATE
     "-Wl,--version-script,${CMAKE_CURRENT_BINARY_DIR}/nvqir-custabilizer.map")
 
-get_filename_component(CUSTABILIZER_LIB_DIR ${CUSTABILIZER_LIBRARY} DIRECTORY)
 set_target_properties(${LIBRARY_NAME}
-  PROPERTIES INSTALL_RPATH "${CMAKE_INSTALL_RPATH}:${LLVM_BINARY_DIR}/lib:${CUSTABILIZER_LIB_DIR}")
+  PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
+    BUILD_WITH_INSTALL_RPATH FALSE
+    INSTALL_RPATH_USE_LINK_PATH FALSE
+    INSTALL_RPATH "${CMAKE_INSTALL_RPATH};$ORIGIN/../cuquantum/lib;$ORIGIN/../../cuquantum/lib")
 
-add_custom_command(
-  TARGET ${LIBRARY_NAME}
-  POST_BUILD
-  COMMAND bash ${CMAKE_SOURCE_DIR}/runtime/nvqir/stim/verify_linkage.sh $<TARGET_FILE:${LIBRARY_NAME}>
-  VERBATIM
-  COMMENT "Verifying that no stim namespace symbols are exported in ${LIBRARY_NAME}..."
-)
-
-install(TARGETS ${LIBRARY_NAME} DESTINATION lib)
+install(TARGETS ${LIBRARY_NAME} DESTINATION lib COMPONENT Runtime)
 
 add_target_config(custabilizer)
