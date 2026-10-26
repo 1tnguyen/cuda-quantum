@@ -7,17 +7,17 @@
  ******************************************************************************/
 
 #pragma once
-#include "common/cudaq_fmt.h"
 #include "cuda_runtime.h"
 #include "custabilizer.h"
+#include "cudaq/runtime/logger/cudaq_fmt.h"
 #include <stdexcept>
 
 #define HANDLE_CUDA_ERROR(x)                                                   \
   {                                                                            \
     const auto err = x;                                                        \
     if (err != cudaSuccess) {                                                  \
-      throw std::runtime_error(cudaq_fmt::format("[cuda] %{} in {} (line {})", \
-                                                 cudaq_fmt::underlying(err),   \
+      throw std::runtime_error(cudaq_fmt::format("[cuda] {} in {} (line {})",  \
+                                                 cudaGetErrorString(err),      \
                                                  __FUNCTION__, __LINE__));     \
     }                                                                          \
   }

@@ -7,7 +7,7 @@
  ******************************************************************************/
 
 #include "CUDAQTestUtils.h"
-#include "StimCircuitSimulator.cpp"
+#include "StimSimulatorRegistration.cpp"
 #include "common/AnalysisScope.h"
 #include "common/ExecutionContext.h"
 #include "nvqir/QIRTypes.h"

@@ -7,8 +7,8 @@
 # ============================================================================ #
 
 function(add_backend_test target )
-  set(singleValues BACKEND_NAME)
-  set(multiValues SOURCES)
+  set(singleValues BACKEND_NAME RESOURCE_LOCK)
+  set(multiValues SOURCES LABELS)
   cmake_parse_arguments(ARG "" "${singleValues}" "${multiValues}" ${ARGN})
 
   add_executable(${target} ${ARG_SOURCES})
@@ -22,7 +22,13 @@ function(add_backend_test target )
       cudaq-logger
       fmt::fmt-header-only
       gtest_main)
-  cudaq_gtest_discover_tests(${target} DISCOVERY_TIMEOUT 120)
+  if(ARG_LABELS)
+    cudaq_gtest_discover_tests(${target}
+      PROPERTIES LABELS "${ARG_LABELS}" RESOURCE_LOCK "${ARG_RESOURCE_LOCK}"
+      DISCOVERY_TIMEOUT 120)
+  else()
+    cudaq_gtest_discover_tests(${target} DISCOVERY_TIMEOUT 120)
+  endif()
 endfunction()
 
 
@@ -222,4 +228,21 @@ if (cuStateVec_FOUND AND MPI_CXX_FOUND)
 
   add_custatevec_mgpu_test_suite(custatevec_mgpu_tester "")
   add_custatevec_mgpu_test_suite(custatevec_mgpu_tester_fp32 FP32)
+endif()
+
+
+if(TARGET nvqir-custabilizer)
+  add_backend_test(custabilizer_tester
+    BACKEND_NAME custabilizer
+    LABELS gpu_required
+    RESOURCE_LOCK gpu
+    SOURCES CustabilizerTester.cpp)
+  target_compile_definitions(custabilizer_tester PRIVATE CUDAQ_CUSTABILIZER_NO_REGISTRATION)
+  target_include_directories(custabilizer_tester PRIVATE
+    ${CMAKE_SOURCE_DIR}/runtime/nvqir/custabilizer
+    ${CMAKE_SOURCE_DIR}/runtime/nvqir/stim
+    ${CMAKE_SOURCE_DIR}/tpls/Stim/src
+    ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(custabilizer_tester PRIVATE libstim CUDA::cudart
+    cuStabilizer::cuStabilizer)
 endif()
