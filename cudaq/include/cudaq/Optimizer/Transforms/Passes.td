@@ -1700,6 +1700,321 @@ def ObserveAnsatz : Pass<"observe-ansatz", "mlir::func::FuncOp"> {
   ];
 }
 
+def QuakeVerifyPBC : Pass<"quake-verify-pbc", "mlir::func::FuncOp"> {
+  let summary = "Verify measured Pauli-based Quake normal form";
+  let description = [{
+    Requires a single block, distinct scalar SSA wires, static Pauli words,
+    arbitrary-angle uncontrolled exp_pauli rotations before terminal commuting
+    mpp operations, and explicit sink closure. Scalar wire function
+    inputs and null_wire preparations are supported. Borrowed wire sets are
+    rejected because their final quantum states could escape. Only classical
+    arith operations, discriminate and classical returns may accompany them.
+    No primitive gates, reference semantics, quantum outputs, control flow or
+    feed-forward into quantum operations are accepted. A marker is never proof.
+    Pauli support uses dynamically sized bit vectors; configured work and
+    operation budgets still bound optimization effort.
+  }];
+}
+
+def QuakeToPBC : Pass<"quake-to-pbc", "mlir::func::FuncOp"> {
+  let summary = "Absorb Cliffords into Pauli rotations and terminal observables";
+  let description = [{
+    Converts supported scalar-wire circuits to the quake-verify-pbc contract.
+    Preserves the ordered joint measurement distribution for every input state.
+    Scalar phase and post-measurement quantum states are not observable outputs.
+    Arbitrary angles are retained; no Clifford+T approximation is performed.
+    Unsupported input is rejected before mutation, rather than partly converted.
+  }];
+  let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
+}
+
+def QuakeOptimizePBC : Pass<"quake-optimize-pbc", "mlir::func::FuncOp"> {
+  let summary = "Optimize verified Quake PBC using a bounded Pauli portfolio";
+  let description = [{
+    Verifies the entire function is already in Quake PBC form before searching.
+    Runs checked Pauli strategies, absorbs generated Clifford corrections into
+    subsequent rotations and measurements, and commits only verified PBC output.
+    T count is evaluated after normalization. Mechanical gate costs are search
+    heuristics, not physical costs for joint measurements or magic factories.
+    Dynamically sized supports have no machine-word qubit limit. Search and
+    candidate sizes remain bounded; failure to find an improved representable
+    candidate leaves the input unchanged. No implicit conversion.
+  }];
+  let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
+  /*
+   * Tuning guide for quake-optimize-pbc. These options configure the native
+   * Pauli portfolio; no option disables verification. The final comparison is
+   * made after PBC normalization, including mechanical measurement lowering.
+   * Counts/depth are logical gate estimates, not routed costs, gate durations,
+   * or magic-factory requirements. Arbitrary rotations are not approximately
+   * synthesized here, so their eventual T cost is a downstream concern.
+   *
+   * Start with defaults and record T count, entanglers, depth, total gates,
+   * runtime, and budget exhaustion. Larger budgets/weights do not guarantee
+   * better results. Use fixed work and no timeout for reproducible
+   * comparisons. Candidate failures or exhausted search retain a verified
+   * incumbent; invalid configuration or unsupported PBC input is diagnosed,
+   * not silently accepted.
+   *
+   * T-reduction strategies (tcount::Options):
+   *
+   * - merge: combine eligible exact rotations on equal Pauli axes after
+   *   Clifford transport and intervening-operation checks. Usually a cheap
+   *   source of T cancellation or conversion to Cliffords. Keep true; false
+   *   saves scans but misses these reductions. Does not disable graph's own
+   *   simplification, which has a separate switch below.
+   * - reverse: also search the adjoint circuit and invert candidates back.
+   *   Different boundaries/placements can improve T count or Clifford cost.
+   *   True adds variants and work; false is useful for tight latency budgets.
+   * - decode: search bounded commuting phase blocks for fewer T terms, with
+   *   checked Clifford/scalar corrections. Can beat equal-axis merging, but
+   *   rebuilding parity gadgets may add entanglers/depth. Keep true for
+   *   quality; false selects a cheaper merge-focused T portfolio.
+   * - reuse-cliffords: place decoded terms in favorable frames of the existing
+   *   Clifford network to reduce parity reconstruction. True also tries the
+   *   no-reuse alternative; false searches only that alternative. Extra scans
+   *   can improve entanglers/depth and help T savings meet growth limits, but
+   *   consume work. Has no strategy effect when decode=false.
+   * - rounds: positive round cap INSIDE each T portfolio invocation (default
+   *   4). More rounds may exploit newly exposed reductions but cost time; one
+   *   is a low-latency baseline. Independent of portfolio-rounds below.
+   * - beam-width: positive number of distinct candidates retained INSIDE each
+   *   T invocation (default 2). One is greedy; larger beams preserve
+   *   alternative Clifford structures at extra memory/work cost. Raise with a
+   *   deliberate work budget; a wider beam can otherwise crowd out later
+   *   rounds.
+   * - max-block-rank: independent commuting-generator rank, 1..5 (default 5),
+   *   not qubit count. A rank-r block has 2^r eigenvalue assignments; larger
+   *   rank exposes more identities but increases checking/decoding cost. Rank
+   *   five searches 64 codewords; below four, no nontrivial coset alternatives
+   *   remain, though repeated coefficients can combine. Keep five for quality.
+   * - max-block-gates: positive input-operation cap per decode block (256).
+   *   Includes Clifford/scalar operations. Larger values may expose distant
+   *   relations but require more scans; smaller values split useful blocks.
+   *   Rank, angle, and commutation boundaries still apply. Increase only when
+   *   operation count, rather than rank, is limiting useful blocks.
+   * - merge-window: maximum gate-index distance between merge endpoints. Zero
+   *   has no distance cap, subject to work limits. Small positive values
+   *   reduce long scans but miss distant cancellations; raise for coverage.
+   *   Has no effect on the T merge strategy when merge=false.
+   *
+   * Decoder concept: Amy and Mosca, "T-count optimization and Reed-Muller
+   * codes", https://arxiv.org/abs/1601.07363. The implementation searches a
+   * bounded low-rank phase space; it does not certify global circuit
+   * optimality. Reverse traversal, reuse, and portfolio limits are
+   * implementation controls, not a claim to reproduce a paper's tuning preset.
+   *
+   * Combined portfolio and acceptance (OptimizerOptions):
+   *
+   * - t-count: enable the T strategy family above. False saves its work but
+   *   loses merge/decoder opportunities; graph simplification can still merge.
+   * - graph-synthesis: enable entangler reconstruction and the
+   *   temporary-growth branch. False gives a cheaper T-only search but can
+   *   leave expensive parity networks. Start with both families enabled for
+   *   composition; all families disabled leaves input unchanged. Nested settings
+   *   must still be valid.
+   * - objective: primary metric, one of t-count (default), t-depth,
+   *   entanglers, depth. Selection is lexicographic, not a weighted sum. T
+   *   objectives also forbid a T-count increase; entanglers/depth have no
+   *   separate T guard. total-gates prioritizes total gates without increasing
+   *   baseline T count. Pick the target's primary cost, then constrain
+   *   secondary growth below. Changing
+   *   this option does not automatically retune the synthesis scoring weights.
+   * - portfolio-rounds: positive combined composition-round cap (default 2),
+   *   distinct from rounds inside each T call. More rounds may expose savings
+   *   after reconstruction; convergence or a budget can stop earlier. Start
+   *   with two, increasing only if useful search reaches this cap.
+   * - portfolio-beam-width: retained combined candidates, 1..64 (default 2).
+   *   Larger beams preserve alternatives for subsequent strategies but consume
+   *   more storage/work. One is greedy; tune together with the work budget.
+   * - max-two-qubit-growth: absolute final entangler allowance above the
+   *   input, not a percentage. Zero forbids net growth; larger values may
+   *   admit lower T count/depth with more parity computation. CLI default
+   *   4294967295 is a permissive FINITE allowance; the native API instead
+   *   defaults to zero. Set zero for a conservative comparison, then
+   *   explicitly study trade-offs.
+   * - max-depth-growth: absolute final mechanical-depth allowance (default
+   *   4294967295). Zero forbids growth; larger values admit T/entangler
+   *   savings with longer schedules. Tighten for latency-sensitive targets.
+   *   This does not constrain T depth separately or model physical gate
+   *   durations.
+   * - intermediate-two-qubit-growth: extra temporary entanglers ABOVE the
+   *   final ceiling for T reduction followed by graph reconstruction (default
+   *   256). Zero disables this extra branch. Larger values explore costlier
+   *   temporary forms at more runtime/storage cost; final growth bounds still
+   *   apply. Useful with both families on. Inspect successful rescues before
+   *   raising.
+   *
+   * Search limits and their scope:
+   *
+   * - max-candidates: positive strategy-invocation cap (default 256). Sets
+   *   BOTH the outer cap (each T or graph call) and the separate cap inside
+   *   each T call. It is not a single flat pool of decoded blocks or scored
+   *   gates. Raising permits more exploration; lowering can exclude later
+   *   strategies.
+   * - max-work: positive deterministic search/proof work budget (10000000).
+   *   Sets the shared budget, including final PBC normalization, and each T
+   *   call's local ceiling. Units estimate work, not gates/seconds/bytes.
+   *   Raise for quality when exhausted; lower for compilation cost. Increasing
+   *   other limits cannot bypass this shared bound.
+   * - timeout-ms: shared search deadline in milliseconds; zero disables it.
+   *   Lower values shorten exploration and may change selected results across
+   *   runs. Checked at budget charges, not by preemption; not a hard deadline
+   *   on parsing, all cost computation, or the full compiler pipeline.
+   * - max-gates: positive native gate-vector size bound (default 8192),
+   *   covering input/candidates and clamping graph output. Larger admits
+   *   bigger circuits but increases storage/replay cost; smaller skips
+   *   oversized inputs or rejects candidates. No gates are truncated. Not a
+   *   byte or target-gate cap.
+   *
+   * Graph reconstruction (graph::Options):
+   *
+   * - synthesis-parallelization-credit: finite nonnegative ASAP scheduling
+   *   reward (default 0). Increasing favors actions that overlap existing
+   *   work, potentially reducing depth at extra entanglers/frame cost. Zero
+   *   disables the reward. Raise gradually for depth studies; it does not
+   *   score T depth.
+   * - synthesis-frontier-weight: finite nonnegative extra weight for
+   *   ready-node cost changes (default 1). Higher favors making currently
+   *   executable nodes cheap; lower emphasizes the remaining population.
+   *   Excessive weight may miss sharing with later nodes. Zero removes the
+   *   extra scoring term, not the dependency rule. Start at one and measure
+   *   both count and depth.
+   * - synthesis-frame-weight: finite nonnegative terminal Clifford-frame cost
+   *   weight (default 0.1). Higher discourages leaving expensive
+   *   reconstruction behind but can sacrifice rotation sharing. Zero ignores
+   *   this penalty, never frame semantics. Raise when terminal reconstruction
+   *   dominates.
+   * - synthesis-lookahead: remaining-node population sample cap for scoring;
+   *   zero scores all. Positive caps reduce work but miss distant
+   *   interactions. This is NOT a recursive search horizon; frontier/frame
+   *   terms are separate. Start at zero for quality, cap when large-graph
+   *   scoring dominates runtime.
+   * - synthesis-candidate-nodes: number of minimum-cost ready nodes used to
+   *   generate actions; zero uses all such nodes. Each can generate several
+   *   gate/basis choices, so this is not a candidate-gate count. Small caps
+   *   save work but increase order sensitivity and may miss shared entanglers.
+   * - synthesis-simplify: merge equal axes across commuting nodes before DAG
+   *   construction (default true). Can reduce rotations, entanglers, and T
+   *   contributions; worst-case quadratic scan consumes work. Disable for an
+   *   ablation or if preprocessing dominates, never to bypass proof checking.
+   * - synthesis-asymmetric: carry trailing local basis changes into the graph
+   *   and frame (default true), instead of immediately emitting their
+   *   inverses. Sharing may reduce one-qubit gates/depth but shifts
+   *   reconstruction cost. Compare false if frame overhead dominates; neither
+   *   universally wins.
+   * - max-dependencies: positive DAG edge cap (default 1000000). Larger admits
+   *   denser noncommutation graphs but costs memory/traversal work. Smaller
+   *   rejects dense candidates sooner; dependencies are never dropped. Tune
+   *   using edge statistics; synthesis-lookahead does not bound DAG building.
+   * - synthesis-max-steps: entangling-action step cap, including final frame
+   *   reconstruction (default 1000000). Not an emitted-gate or
+   *   scored-candidate count. Larger permits longer synthesis at extra
+   *   runtime. Zero permits no such steps, NOT unlimited work; reaching the
+   *   cap rejects the candidate.
+   *
+   * Graph concepts: Paykin et al., "PCOAST: A Pauli-based Quantum Circuit
+   * Optimization Framework", Fig. 12 and Sec. V-C,
+   * https://arxiv.org/abs/2305.10966v2. ASAP scoring here is implementation
+   * specific. The portfolio overrides standalone graph acceptance and uses
+   * objective; standalone preferDepth therefore has no effect here. Unitary
+   * hold semantics are required internally; there is no release-mode CLI knob.
+   */
+  let options = [
+    Option<"enableGateCount", "gate-count", "bool", "false", "Enable exact network-preserving total-gate strategies">,
+    Option<"gateCountRounds", "gate-count-rounds", "unsigned", "3", "Maximum total-gate strategy composition rounds">,
+    Option<"gateCommutationWindow", "gate-commutation-window", "unsigned", "128", "Maximum local cancellation distance; 0 is unbounded">,
+    Option<"pauliPropagation", "pauli-propagation", "bool", "true", "Explore forward and reverse signed Pauli propagation">,
+    Option<"phasePlacement", "phase-placement", "bool", "true", "Place phases on first and last existing parity locations">,
+    Option<"cliffordWindows", "clifford-windows", "bool", "true", "Synthesize shortest one- and two-wire Clifford windows">,
+    Option<"telemetry", "telemetry", "std::string", "\"\"", "JSONL telemetry destination: path or - for stderr; off disables; empty uses CUDAQ_PBC_TELEMETRY">,
+    Option<"telemetryMaxEvents", "telemetry-max-events", "unsigned", "4096", "Maximum detailed telemetry events per function; summaries remain available">,
+    Option<"merge", "merge", "bool", "true", "Enable global Pauli merging">,
+    Option<"reverse", "reverse", "bool", "true", "Also search the adjoint circuit">,
+    Option<"decode", "decode", "bool", "true", "Enable exact commuting-block decoding">,
+    Option<"reuseCliffords", "reuse-cliffords", "bool", "true", "Place decoded rotations in the existing Clifford network">,
+    Option<"rounds", "rounds", "unsigned", "4", "Maximum portfolio composition rounds">,
+    Option<"beamWidth", "beam-width", "unsigned", "2", "Number of distinct retained candidates">,
+    Option<"maxBlockRank", "max-block-rank", "unsigned", "5", "Maximum commuting generator rank, 1..5">,
+    Option<"maxBlockGates", "max-block-gates", "unsigned", "256", "Maximum input gates per decoding block">,
+    Option<"mergeWindow", "merge-window", "unsigned", "0", "Maximum merge distance in operations; 0 is unbounded">,
+    Option<"maxCandidates", "max-candidates", "unsigned", "256", "Maximum strategy invocations per island">,
+    Option<"maxWork", "max-work", "uint64_t", "10000000", "Deterministic total search and proof work budget">,
+    Option<"timeoutMs", "timeout-ms", "unsigned", "0", "Optional search deadline in milliseconds; 0 disables">,
+    Option<"maxTwoQubitGrowth", "max-two-qubit-growth", "unsigned", "4294967295", "Maximum extra two-qubit gates in mechanical lowering">,
+    Option<"enableTCount", "t-count", "bool", "true", "Enable exact T-count strategies">,
+    Option<"enableGraphSynthesis", "graph-synthesis", "bool", "true", "Enable checked Pauli graph synthesis">,
+    Option<"objective", "objective", "std::string", "\"t-count\"", "t-count, t-depth, entanglers, depth, or total-gates">,
+    Option<"portfolioRounds", "portfolio-rounds", "unsigned", "2", "Maximum combined strategy rounds">,
+    Option<"portfolioBeamWidth", "portfolio-beam-width", "unsigned", "2", "Retained combined candidates, 1..64">,
+    Option<"maxGates", "max-gates", "unsigned", "8192", "Maximum stored gates per island or candidate">,
+    Option<"maxDepthGrowth", "max-depth-growth", "unsigned", "4294967295", "Maximum extra mechanically lowered depth">,
+    Option<"intermediateGrowth", "intermediate-two-qubit-growth", "unsigned", "256", "Extra temporary entanglers allowed before checked reconstruction">,
+    Option<"parallelizationCredit", "synthesis-parallelization-credit", "double", "0.0", "Pauli graph synthesis ASAP schedule credit">,
+    Option<"frontierWeight", "synthesis-frontier-weight", "double", "1.0", "Pauli graph synthesis ready-node weight">,
+    Option<"frameWeight", "synthesis-frame-weight", "double", "0.1", "Pauli graph synthesis terminal Clifford-frame weight">,
+    Option<"lookahead", "synthesis-lookahead", "unsigned", "0", "Pauli graph synthesis scoring horizon; 0 means all nodes">,
+    Option<"candidateNodes", "synthesis-candidate-nodes", "unsigned", "0", "Pauli graph synthesis cheapest ready-node limit; 0 means all">,
+    Option<"simplify", "synthesis-simplify", "bool", "true", "Simplify commuting rotation words before Pauli graph synthesis">,
+    Option<"asymmetric", "synthesis-asymmetric", "bool", "true", "Carry trailing local Clifford gates">,
+    Option<"maxDependencies", "max-dependencies", "unsigned", "1000000", "Maximum Pauli graph synthesis DAG edges">,
+    Option<"maxSteps", "synthesis-max-steps", "unsigned", "1000000", "Maximum Pauli graph synthesis steps">
+  ];
+}
+
+def QuakeTryPBC : Pass<"quake-try-pbc", "mlir::func::FuncOp"> {
+  let summary = "Try a transactional Quake/PBC optimization round trip";
+  let description = [{
+    An opt-in wrapper for scalar measured circuits, using the same controls as
+    quake-optimize-pbc. Preflights the entire function, optimizes its native
+    representation, and lowers a private candidate to primitive Quake. Commits
+    only a verified, representable improvement under the selected objective.
+    Unsupported operations, attributes, control flow or quantum outputs leave
+    the original function untouched, as do size/work limits and no improvement.
+    No statistics attributes are added on fallback. Invalid IR, invalid options
+    and internal verification failures fail the pass, without committing edits.
+    Exact rational angles must lower exactly; no approximation is enabled.
+    Acceptance preserves joint classical outcomes for arbitrary input states,
+    not post-measurement quantum states (which must not escape).
+  }];
+  let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
+  let options = !listconcat(QuakeOptimizePBC.options, [
+    Option<"preserveCliffordNetwork", "preserve-clifford-network", "bool", "false", "Emit the checked native Clifford/rotation network without PBC renormalization">,
+    Option<"emitRemarks", "emit-remarks", "bool", "false", "Explain clean PBC fallbacks without changing IR">,
+    Option<"maxOperations", "max-operations", "unsigned", "32768", "Maximum total function operations before cloning">
+  ]);
+}
+
+def QuakeLowerPBC : Pass<"quake-lower-pbc", "mlir::func::FuncOp"> {
+  let summary = "Lower Quake PBC rotations and joint measurements to primitives";
+  let description = [{
+    Verifies PBC input, then lowers rotations with parity gadgets and mpp with
+    a shared Clifford readout network followed by terminal Z measurements on
+    the original readout wires. No gates are emitted after measurement. Readout
+    sets requiring classical remapping are rejected without changing the IR.
+    Measurement signs are implemented coherently before readout. Named gates
+    preserve exact Clifford+T angles; arbitrary SSA angles remain rotations.
+    Other exact rational angles require explicit approximation permission.
+  }];
+  let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
+  /*
+   * allow-approximate-angles controls the exact-rational-to-f64 boundary.
+   * False (default) diagnoses non-Clifford+T exact rational angles that cannot
+   * be lowered exactly into the supported named gates. True permits converting
+   * those angles into floating-point rotation operands, losing their exact
+   * rational encoding through rounding. Keep false for exact workflows; enable
+   * only when downstream numerical rotations/approximate synthesis are
+   * intended.
+   * This neither performs Clifford+T synthesis nor sets a tolerance or proves
+   * an end-to-end approximation-error bound. Subsequent synthesis precision
+   * determines the resulting T count, gate count, and depth. Exact Clifford+T
+   * angles still use named gates; existing arbitrary SSA angles remain
+   * rotations.
+   */
+  let options = [Option<"allowApproximateAngles", "allow-approximate-angles", "bool", "false",
+    "Allow non-Clifford+T exact rational angles to become f64 rotation operands">];
+}
+
 def PhaseFolding: Pass<"phase-folding", "mlir::func::FuncOp"> {
   let summary = "Perform phase based rotation merging.";
 

@@ -1,0 +1,121 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief Rejection of functions that do not satisfy the Quake PBC contract.
+///
+/// Exercises complete-function validation, including mixed quantum operations,
+/// wire ownership, terminal measurements, and unsupported output semantics.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --split-input-file --verify-diagnostics --quake-optimize-pbc
+
+func.func @marker_is_not_proof(%q: !quake.wire) -> !quake.measure attributes {quake.pbc} {
+  // expected-error@+1 {{PBC form permits only quake.exp_pauli unitary operations}}
+  %t = quake.t %q : (!quake.wire) -> !quake.wire
+  %m, %end = quake.mpp %t to "Z" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+
+// -----
+
+func.func @late_rotation(%q: !quake.wire, %theta: f64) -> !quake.measure {
+  %m, %w = quake.mpp %q to "Z" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  // expected-error@+1 {{PBC rotations must precede all measurements and sinks}}
+  %r = quake.exp_pauli (%theta) %w to "X" : (f64, !quake.wire) -> !quake.wire
+  quake.sink %r : !quake.wire
+  return %m : !quake.measure
+}
+
+// -----
+
+func.func @noncommuting(%q: !quake.wire) -> (!quake.measure, !quake.measure) {
+  %m0, %w = quake.mpp %q to "X" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  // expected-error@+1 {{PBC terminal observables must pairwise commute}}
+  %m1, %end = quake.mpp %w to "Z" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m0, %m1 : !quake.measure, !quake.measure
+}
+
+// -----
+
+func.func @escape(%q: !quake.wire) -> !quake.wire {
+  // expected-error@+1 {{PBC does not permit escaping quantum outputs}}
+  return %q : !quake.wire
+}
+
+// -----
+
+func.func @word(%q: !quake.wire) -> !quake.measure {
+  // expected-error@+1 {{requires one I/X/Y/Z per scalar wire operand and a nonidentity product}}
+  %m, %end = quake.mpp %q to "I" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+
+// -----
+
+func.func @duplicate(%q: !quake.wire) -> !quake.measure {
+  // expected-error@+1 {{requires distinct wire operands}}
+  %m, %a, %b = quake.mpp %q, %q to "ZZ" : (!quake.wire, !quake.wire) -> (!quake.measure, !quake.wire, !quake.wire)
+  quake.sink %a : !quake.wire
+  quake.sink %b : !quake.wire
+  return %m : !quake.measure
+}
+
+// -----
+
+func.func @wrong_exact_angle(%q: !quake.wire) -> !quake.measure {
+  %angle = arith.constant 0.0 : f64
+  // expected-error@+1 {{pbc_angle disagrees with the constant exponent}}
+  %r = quake.exp_pauli (%angle) %q to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %m, %end = quake.mpp %r to "X" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+
+// -----
+
+func.func @bad_fraction(%q: !quake.wire) -> !quake.measure {
+  %angle = arith.constant 0.0 : f64
+  // expected-error@+1 {{pbc_angle requires two i64 coefficients}}
+  %r = quake.exp_pauli (%angle) %q to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 0>}
+  %m, %end = quake.mpp %r to "X" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+
+// -----
+
+func.func @controlled(%a: !quake.wire, %b: !quake.wire, %theta: f64) -> !quake.measure {
+  // expected-error@+1 {{PBC conversion only supports Clifford CX/CZ controls}}
+  %r:2 = quake.exp_pauli (%theta) [%a] %b to "Z" : (f64, !quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %m, %end = quake.mpp %r#1 to "X" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %r#0 : !quake.wire
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+
+// -----
+
+func.func @return_wire_escape(%q: !quake.wire) {
+  // expected-error@+1 {{PBC cannot expose quantum state through a wire set}}
+  quake.return_wire %q : !quake.wire
+  return
+}
+
+
+// -----
+
+func.func @missing_wire_result(%q: !quake.wire) -> !quake.measure {
+  // expected-error@+1 {{arity does not equal coarity of wires}}
+  %m = quake.mpp %q to "Z" : (!quake.wire) -> !quake.measure
+  return %m : !quake.measure
+}

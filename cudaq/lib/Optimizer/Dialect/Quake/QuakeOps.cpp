@@ -14,6 +14,7 @@
 #include "cudaq/Optimizer/Dialect/CC/CCTypes.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeDialect.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/STLForwardCompat.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -27,6 +28,7 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <unordered_set>
 
 using namespace mlir;
@@ -787,6 +789,20 @@ void cudaq::quake::ExpPauliOp::getCanonicalizationPatterns(
 }
 
 LogicalResult cudaq::quake::ExpPauliOp::verify() {
+  if (auto attr = (*this)->getAttr("quake.pbc_angle")) {
+    auto exact = dyn_cast<DenseI64ArrayAttr>(attr);
+    if (!exact || exact.size() != 2 || exact[1] <= 0 ||
+        getParameters().size() != 1 || !getParameters()[0].getType().isF64())
+      return emitOpError("pbc_angle requires two i64 coefficients, a positive "
+                         "denominator and one f64 parameter");
+    auto constant = getParameters()[0].getDefiningOp<arith::ConstantOp>();
+    auto value =
+        constant ? dyn_cast<FloatAttr>(constant.getValue()) : FloatAttr{};
+    double expected = (double(exact[0]) / double(exact[1])) * std::numbers::pi;
+    if (!value || value.getValueAsDouble() != expected)
+      return emitOpError("pbc_angle disagrees with the constant exponent");
+  }
+
   if (getPauliLiteralAttr()) {
     if (getPauli())
       return emitOpError("cannot have both a literal and a value Pauli word");
@@ -1143,6 +1159,23 @@ LogicalResult verifyMeasurements(MEAS op, TypeRange targetsType,
     if (op.getRegisterName()->empty())
       return op->emitError("quake measurement name cannot be empty.");
   return success();
+}
+
+LogicalResult cudaq::quake::MppOp::verify() {
+  if (getTargets().empty() || getWord().size() != getTargets().size() ||
+      getWord().find_first_not_of("IXYZ") != StringRef::npos ||
+      getWord().find_first_of("XYZ") == StringRef::npos)
+    return emitOpError("requires one I/X/Y/Z per scalar wire operand and a "
+                       "nonidentity product");
+  if (getWires().size() != getTargets().size())
+    return emitOpError("requires one updated wire per operand and one outcome");
+  llvm::SmallDenseSet<Value> seen;
+  for (Value value : getTargets())
+    if (!seen.insert(value).second)
+      return emitOpError("requires distinct wire operands");
+  if (getRegisterName() && getRegisterName()->empty())
+    return emitOpError("measurement name cannot be empty");
+  return verifyWireResultsAreLinear(getOperation());
 }
 
 LogicalResult cudaq::quake::MxOp::verify() {
@@ -1679,7 +1712,7 @@ void cudaq::quake::getOperatorEffectsImpl(EffectsVectorImpl &effects,
 #define CUSTOM_GATE_OPS(MACRO) MACRO(CustomUnitaryCallOp)                      \
   MACRO(CustomUnitaryConstantOp)
 #define GATE_OPS(MACRO) BUILTIN_GATE_OPS(MACRO) CUSTOM_GATE_OPS(MACRO)
-#define MEASURE_OPS(MACRO) MACRO(MxOp) MACRO(MyOp) MACRO(MzOp)
+#define MEASURE_OPS(MACRO) MACRO(MxOp) MACRO(MyOp) MACRO(MzOp) MACRO(MppOp)
 #define QUANTUM_OPS(MACRO)                                                     \
   MACRO(ResetOp) MACRO(PhaseOp) GATE_OPS(MACRO)                                \
   MEASURE_OPS(MACRO)

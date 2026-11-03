@@ -1,0 +1,35 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+// RUN: cudaq-opt %s --apply-op-specialization --verify-each | FileCheck %s
+// RUN: cudaq-opt %s --apply-op-specialization --canonicalize --verify-each | FileCheck %s --check-prefix=FOLD
+
+// Adjoint specialization changes the SSA exponent. It must not retain the old
+// exact-angle annotation; otherwise verification fails or import uses its sign.
+func.func @rotation(%q: !quake.ref) {
+  %angle = arith.constant -0.39269908169872414 : f64
+  quake.exp_pauli (%angle) %q to "Z" : (f64, !quake.ref) -> () {quake.pbc_angle = array<i64: -1, 8>}
+  return
+}
+
+func.func @caller(%q: !quake.ref) {
+  quake.apply<adj> @rotation (%q) : (!quake.ref) -> ()
+  return
+}
+
+// CHECK-LABEL: func.func private @rotation.adj
+// CHECK: %[[ANGLE:.*]] = arith.constant 0.39269908169872414 : f64
+// CHECK: quake.exp_pauli (%[[ANGLE]])
+// CHECK-NOT: quake.pbc_angle
+// CHECK: return
+
+// FOLD-LABEL: func.func private @rotation.adj
+// FOLD: %[[ANGLE:.*]] = arith.constant 0.39269908169872414 : f64
+// FOLD: quake.exp_pauli (%[[ANGLE]])
+// FOLD-NOT: quake.pbc_angle
+// FOLD: return

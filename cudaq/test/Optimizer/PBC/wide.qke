@@ -1,0 +1,90 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief PBC conversion beyond a machine-word qubit width.
+///
+/// Checks that 65 wire identities pass through conversion, verification and
+/// lowering without truncation.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --quake-to-pbc --quake-verify-pbc --quake-lower-pbc | FileCheck %s
+
+func.func @wide(%q0: !quake.wire, %q1: !quake.wire, %q2: !quake.wire, %q3: !quake.wire, %q4: !quake.wire, %q5: !quake.wire, %q6: !quake.wire, %q7: !quake.wire, %q8: !quake.wire, %q9: !quake.wire, %q10: !quake.wire, %q11: !quake.wire, %q12: !quake.wire, %q13: !quake.wire, %q14: !quake.wire, %q15: !quake.wire, %q16: !quake.wire, %q17: !quake.wire, %q18: !quake.wire, %q19: !quake.wire, %q20: !quake.wire, %q21: !quake.wire, %q22: !quake.wire, %q23: !quake.wire, %q24: !quake.wire, %q25: !quake.wire, %q26: !quake.wire, %q27: !quake.wire, %q28: !quake.wire, %q29: !quake.wire, %q30: !quake.wire, %q31: !quake.wire, %q32: !quake.wire, %q33: !quake.wire, %q34: !quake.wire, %q35: !quake.wire, %q36: !quake.wire, %q37: !quake.wire, %q38: !quake.wire, %q39: !quake.wire, %q40: !quake.wire, %q41: !quake.wire, %q42: !quake.wire, %q43: !quake.wire, %q44: !quake.wire, %q45: !quake.wire, %q46: !quake.wire, %q47: !quake.wire, %q48: !quake.wire, %q49: !quake.wire, %q50: !quake.wire, %q51: !quake.wire, %q52: !quake.wire, %q53: !quake.wire, %q54: !quake.wire, %q55: !quake.wire, %q56: !quake.wire, %q57: !quake.wire, %q58: !quake.wire, %q59: !quake.wire, %q60: !quake.wire, %q61: !quake.wire, %q62: !quake.wire, %q63: !quake.wire, %q64: !quake.wire) {
+  quake.sink %q0 : !quake.wire
+  quake.sink %q1 : !quake.wire
+  quake.sink %q2 : !quake.wire
+  quake.sink %q3 : !quake.wire
+  quake.sink %q4 : !quake.wire
+  quake.sink %q5 : !quake.wire
+  quake.sink %q6 : !quake.wire
+  quake.sink %q7 : !quake.wire
+  quake.sink %q8 : !quake.wire
+  quake.sink %q9 : !quake.wire
+  quake.sink %q10 : !quake.wire
+  quake.sink %q11 : !quake.wire
+  quake.sink %q12 : !quake.wire
+  quake.sink %q13 : !quake.wire
+  quake.sink %q14 : !quake.wire
+  quake.sink %q15 : !quake.wire
+  quake.sink %q16 : !quake.wire
+  quake.sink %q17 : !quake.wire
+  quake.sink %q18 : !quake.wire
+  quake.sink %q19 : !quake.wire
+  quake.sink %q20 : !quake.wire
+  quake.sink %q21 : !quake.wire
+  quake.sink %q22 : !quake.wire
+  quake.sink %q23 : !quake.wire
+  quake.sink %q24 : !quake.wire
+  quake.sink %q25 : !quake.wire
+  quake.sink %q26 : !quake.wire
+  quake.sink %q27 : !quake.wire
+  quake.sink %q28 : !quake.wire
+  quake.sink %q29 : !quake.wire
+  quake.sink %q30 : !quake.wire
+  quake.sink %q31 : !quake.wire
+  quake.sink %q32 : !quake.wire
+  quake.sink %q33 : !quake.wire
+  quake.sink %q34 : !quake.wire
+  quake.sink %q35 : !quake.wire
+  quake.sink %q36 : !quake.wire
+  quake.sink %q37 : !quake.wire
+  quake.sink %q38 : !quake.wire
+  quake.sink %q39 : !quake.wire
+  quake.sink %q40 : !quake.wire
+  quake.sink %q41 : !quake.wire
+  quake.sink %q42 : !quake.wire
+  quake.sink %q43 : !quake.wire
+  quake.sink %q44 : !quake.wire
+  quake.sink %q45 : !quake.wire
+  quake.sink %q46 : !quake.wire
+  quake.sink %q47 : !quake.wire
+  quake.sink %q48 : !quake.wire
+  quake.sink %q49 : !quake.wire
+  quake.sink %q50 : !quake.wire
+  quake.sink %q51 : !quake.wire
+  quake.sink %q52 : !quake.wire
+  quake.sink %q53 : !quake.wire
+  quake.sink %q54 : !quake.wire
+  quake.sink %q55 : !quake.wire
+  quake.sink %q56 : !quake.wire
+  quake.sink %q57 : !quake.wire
+  quake.sink %q58 : !quake.wire
+  quake.sink %q59 : !quake.wire
+  quake.sink %q60 : !quake.wire
+  quake.sink %q61 : !quake.wire
+  quake.sink %q62 : !quake.wire
+  quake.sink %q63 : !quake.wire
+  quake.sink %q64 : !quake.wire
+  return
+}
+
+// CHECK-LABEL: func.func @wide
+// CHECK-COUNT-65: quake.sink
+// CHECK: return

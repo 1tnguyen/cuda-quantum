@@ -1,0 +1,46 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+// RUN: cudaq-opt %s --quake-to-pbc --quake-lower-pbc --verify-each | FileCheck %s
+// RUN: cudaq-opt %s --quake-to-pbc --quake-lower-pbc --codegen-for-qir='convert-to=qir-base value-semantics=true' --verify-each | FileCheck %s --check-prefix=QIR
+// RUN: cudaq-opt %s --quake-to-pbc --quake-lower-pbc --add-wireset --assign-wire-indices --qubit-mapping='device=path(2) placement=identity search=none' --verify-each -o /dev/null
+
+// The target's transformed observable is ZZ. Reading its lowest-index support
+// would measure q0 twice, changing implicit sample output as well as placement.
+func.func @readout() attributes {"cudaq-entrypoint", "cudaq-kernel"} {
+  %a = quake.null_wire
+  %b = quake.null_wire
+  %c:2 = quake.x [%a] %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %m, %q1 = quake.mz %c#1 name "right" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %n, %q0 = quake.mz %c#0 name "left" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %q0 : !quake.wire
+  quake.sink %q1 : !quake.wire
+  return
+}
+
+// CHECK-LABEL: func.func @readout
+// CHECK: %[[A:.*]] = quake.null_wire
+// CHECK: %[[B:.*]] = quake.null_wire
+// CHECK: %[[C:.*]]:2 = quake.x [%[[A]]] %[[B]]
+// CHECK: quake.mz %[[C]]#1 name "right"
+// CHECK-NOT: quake.x
+// CHECK-NOT: quake.h
+// CHECK: quake.mz %[[C]]#0 name "left"
+// CHECK-NOT: quake.x
+// CHECK-NOT: quake.h
+// CHECK: return
+
+// QIR-LABEL: llvm.func @readout
+// QIR-SAME: [0,[1,\22right\22]
+// QIR-SAME: [1,[0,\22left\22]
+// QIR: llvm.call @__quantum__qis__cnot__body
+// QIR: llvm.call @__quantum__qis__mz__body
+// QIR-NOT: llvm.call @__quantum__qis__cnot__body
+// QIR: llvm.call @__quantum__qis__mz__body
+// QIR-NOT: llvm.call @__quantum__qis__cnot__body
+// QIR: llvm.return

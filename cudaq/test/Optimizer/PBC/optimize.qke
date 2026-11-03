@@ -1,0 +1,55 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief PBC optimization controls and preservation of verified form.
+///
+/// Checks rotation simplification, objective selection, optional graph
+/// synthesis, and unchanged-input fallbacks when search or candidate-size
+/// limits are reached.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --quake-verify-pbc --quake-optimize-pbc --quake-verify-pbc | FileCheck %s
+// RUN: cudaq-opt %s --quake-optimize-pbc='graph-synthesis=false' | FileCheck %s
+// RUN: cudaq-opt %s --quake-optimize-pbc='max-work=1' | FileCheck %s --check-prefix=BUDGET
+// RUN: cudaq-opt %s --quake-optimize-pbc='max-gates=1' | FileCheck %s --check-prefix=SIZE
+// RUN: not cudaq-opt %s --quake-optimize-pbc='max-work=0' 2>&1 | FileCheck %s --check-prefix=LIMIT
+// RUN: not cudaq-opt %s --quake-optimize-pbc='objective=invalid' 2>&1 | FileCheck %s --check-prefix=OBJECTIVE
+// RUN: cudaq-opt %s --quake-optimize-pbc='objective=t-depth' --quake-verify-pbc > /dev/null
+// RUN: cudaq-opt %s --quake-optimize-pbc='objective=depth' --quake-verify-pbc > /dev/null
+// RUN: cudaq-opt %s --quake-optimize-pbc='objective=entanglers t-count=false' --quake-verify-pbc > /dev/null
+
+func.func @two_t(%a: !quake.wire, %b: !quake.wire) -> !quake.measure {
+  %angle = arith.constant -0.39269908169872414 : f64
+  %r:2 = quake.exp_pauli (%angle) %a, %b to "ZZ" : (f64, !quake.wire, !quake.wire) -> (!quake.wire, !quake.wire) {quake.pbc_angle = array<i64: -1, 8>}
+  %s:2 = quake.exp_pauli (%angle) %r#0, %r#1 to "ZZ" : (f64, !quake.wire, !quake.wire) -> (!quake.wire, !quake.wire) {quake.pbc_angle = array<i64: -1, 8>}
+  %m, %q = quake.mpp %s#1 to "X" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %s#0 : !quake.wire
+  quake.sink %q : !quake.wire
+  return %m : !quake.measure
+}
+// CHECK-LABEL: func.func @two_t
+// CHECK-SAME: pbc.t_after = 0
+// CHECK-SAME: pbc.t_before = 2
+// CHECK-SAME: pbc.two_qubit_after = 1
+// CHECK-SAME: pbc.two_qubit_before = 4
+// CHECK-NOT: quake.exp_pauli
+// CHECK: quake.mpp
+// CHECK-SAME: to "YZ"
+// CHECK-SAME: negative = true
+// BUDGET-LABEL: func.func @two_t
+// BUDGET-NOT: pbc.
+// BUDGET: quake.exp_pauli
+// BUDGET: quake.exp_pauli
+// SIZE-LABEL: func.func @two_t
+// SIZE-NOT: pbc.
+// SIZE: quake.exp_pauli
+// SIZE: quake.exp_pauli
+// LIMIT: Pauli optimization requires positive limits
+// OBJECTIVE: PBC objective must be

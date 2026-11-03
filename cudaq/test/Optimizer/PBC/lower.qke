@@ -1,0 +1,35 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief Lowering of signed Pauli measurements and exact rotations.
+///
+/// Checks basis changes, parity computation, outcome signs, and named-gate
+/// reconstruction in the primitive Quake output.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --quake-verify-pbc --quake-lower-pbc | FileCheck %s
+
+func.func @negative_yz(%a: !quake.wire, %b: !quake.wire) -> !quake.measure {
+  %m, %q0, %q1 = quake.mpp %a, %b to "YZ" : (!quake.wire, !quake.wire) -> (!quake.measure, !quake.wire, !quake.wire) {negative = true}
+  quake.sink %q0 : !quake.wire
+  quake.sink %q1 : !quake.wire
+  return %m : !quake.measure
+}
+// CHECK-LABEL: func.func @negative_yz
+// CHECK: quake.s<adj>
+// CHECK: quake.h
+// CHECK: quake.x [
+// CHECK: quake.x %
+// CHECK: quake.mz
+// CHECK-NOT: quake.x
+// CHECK-NOT: quake.h
+// CHECK-NOT: quake.s {{%}}
+// CHECK-NOT: quake.mpp
+// CHECK: return

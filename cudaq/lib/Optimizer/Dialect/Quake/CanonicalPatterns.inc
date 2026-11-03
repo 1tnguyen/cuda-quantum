@@ -21,7 +21,7 @@ struct AdjustAdjointExpPauliPattern
 
   LogicalResult matchAndRewrite(cudaq::quake::ExpPauliOp pauli,
                                 PatternRewriter &rewriter) const override {
-    if (!pauli.isAdj())
+    if (!pauli.isAdj() || pauli->hasAttr("quake.pbc_angle"))
       return failure();
     SmallVector<Value> negp;
     if (!pauli.getParameters().empty())

@@ -1,0 +1,57 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief PBC telemetry activation, environment precedence and JSONL output.
+///
+/// Reporting works for accepted and skipped functions, supports both optimizing
+/// passes, and remains separate from the emitted IR stream.
+//===----------------------------------------------------------------------===//
+
+// RUN: rm -f %t.env %t.option %t.off %t.strict
+// RUN: env CUDAQ_PBC_TELEMETRY=%t.env cudaq-opt %s --quake-try-pbc > %t.ir
+// RUN: FileCheck %s --check-prefix=REPORT --input-file=%t.env
+// RUN: env CUDAQ_PBC_TELEMETRY=%t.env cudaq-opt %s --quake-try-pbc='telemetry=%t.option' > %t.option.ir
+// RUN: diff %t.ir %t.option.ir
+// RUN: FileCheck %s --check-prefix=REPORT --input-file=%t.option
+// RUN: wc -l < %t.env | FileCheck %s --check-prefix=LINES
+// RUN: env CUDAQ_PBC_TELEMETRY=%t.off cudaq-opt %s --quake-try-pbc='telemetry=off' > %t.off.ir
+// RUN: diff %t.ir %t.off.ir
+// RUN: not test -e %t.off
+// RUN: cudaq-opt %s --quake-try-pbc='telemetry=-' > /dev/null 2> %t.stderr
+// RUN: FileCheck %s --check-prefix=REPORT --input-file=%t.stderr
+// RUN: cudaq-opt %S/optimize.qke --quake-optimize-pbc='telemetry=%t.strict' > /dev/null
+// RUN: FileCheck %s --check-prefix=STRICT --input-file=%t.strict
+
+func.func @improve(%q: !quake.wire) -> !quake.measure {
+  %h = quake.h %q : (!quake.wire) -> !quake.wire
+  %t = quake.t %h : (!quake.wire) -> !quake.wire
+  %u = quake.t %t : (!quake.wire) -> !quake.wire
+  %m, %end = quake.mx %u name "answer" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+func.func @metadata(%q: !quake.wire) -> !quake.measure {
+  %t = quake.t %q : (!quake.wire) -> !quake.wire {audit.contract = "keep"}
+  %u = quake.t %t : (!quake.wire) -> !quake.wire
+  %m, %end = quake.mx %u : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+// REPORT-DAG: "outcome":{{ *}}"committed"
+// REPORT-DAG: "outcome":{{ *}}"skipped"
+// REPORT-DAG: "schema_version":{{ *}}1
+// REPORT-DAG: "method":{{ *}}"merge.forward"
+// REPORT-DAG: "method":{{ *}}"graph-synthesis"
+// REPORT-DAG: "verification_ns":
+// REPORT-DAG: "method_totals":
+// REPORT-DAG: "observed_ir":
+// REPORT-DAG: "unsupported PBC attribute 'audit.contract'"
+// LINES: 2
+// STRICT: "pass":{{ *}}"quake-optimize-pbc"

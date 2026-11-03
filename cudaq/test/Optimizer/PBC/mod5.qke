@@ -1,0 +1,107 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief End-to-end PBC conversion and T reduction for a five-qubit circuit.
+///
+/// Checks that the converted and optimized function remains valid PBC and that
+/// the pass reports the expected reduction from 16 to seven T rotations.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --quake-to-pbc --quake-optimize-pbc --quake-verify-pbc | FileCheck %s
+
+func.func @mod5(%q0: !quake.wire, %q1: !quake.wire, %q2: !quake.wire, %q3: !quake.wire, %q4: !quake.wire) -> (!quake.measure, !quake.measure, !quake.measure, !quake.measure, !quake.measure) {
+  %v0 = quake.x %q0 : (!quake.wire) -> !quake.wire
+  %v1 = quake.h %v0 : (!quake.wire) -> !quake.wire
+  %v2:2 = quake.x [%q1] %v1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v3:2 = quake.x [%q2] %v2#1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle5 = arith.constant -0.39269908169872414 : f64
+  %v4 = quake.exp_pauli (%angle5) %v3#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+  %v5:2 = quake.x [%v2#0] %v4 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle7 = arith.constant 0.39269908169872414 : f64
+  %v6 = quake.exp_pauli (%angle7) %v5#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v7:2 = quake.x [%v3#0] %v6 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v8:2 = quake.x [%v7#0] %v5#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle10 = arith.constant 0.39269908169872414 : f64
+  %v9 = quake.exp_pauli (%angle10) %v8#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v10:2 = quake.x [%v8#0] %v9 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v11:2 = quake.x [%v10#1] %v7#1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v12 = quake.s<adj> %v11#1 : (!quake.wire) -> !quake.wire
+  %v13:2 = quake.x [%q3] %v12 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle15 = arith.constant -0.39269908169872414 : f64
+  %v14 = quake.exp_pauli (%angle15) %v13#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+  %v15:2 = quake.x [%v11#0] %v14 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle17 = arith.constant 0.39269908169872414 : f64
+  %v16 = quake.exp_pauli (%angle17) %v15#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v17:2 = quake.x [%v13#0] %v16 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v18 = quake.s %v17#1 : (!quake.wire) -> !quake.wire
+  %v19:2 = quake.x [%v17#0] %v15#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle21 = arith.constant 0.39269908169872414 : f64
+  %v20 = quake.exp_pauli (%angle21) %v19#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v21:2 = quake.x [%v19#0] %v20 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v22 = quake.s %v21#1 : (!quake.wire) -> !quake.wire
+  %v23 = quake.h %v18 : (!quake.wire) -> !quake.wire
+  %v24:2 = quake.x [%v22] %v23 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v25 = quake.h %v24#1 : (!quake.wire) -> !quake.wire
+  %v26:2 = quake.x [%v21#0] %v25 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle28 = arith.constant 0.39269908169872414 : f64
+  %v27 = quake.exp_pauli (%angle28) %v26#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v28:2 = quake.x [%q4] %v27 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle30 = arith.constant -0.39269908169872414 : f64
+  %v29 = quake.exp_pauli (%angle30) %v28#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+  %v30:2 = quake.x [%v26#0] %v29 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle32 = arith.constant 0.39269908169872414 : f64
+  %v31 = quake.exp_pauli (%angle32) %v30#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v32:2 = quake.x [%v28#0] %v31 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle34 = arith.constant -0.39269908169872414 : f64
+  %v33 = quake.exp_pauli (%angle34) %v32#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+  %v34:2 = quake.x [%v32#0] %v30#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle36 = arith.constant 0.39269908169872414 : f64
+  %v35 = quake.exp_pauli (%angle36) %v34#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v36:2 = quake.x [%v34#0] %v35 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v37 = quake.s %v36#1 : (!quake.wire) -> !quake.wire
+  %v38 = quake.h %v33 : (!quake.wire) -> !quake.wire
+  %v39:2 = quake.x [%v37] %v38 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v40 = quake.h %v39#1 : (!quake.wire) -> !quake.wire
+  %v41:2 = quake.x [%v36#0] %v40 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle43 = arith.constant 0.39269908169872414 : f64
+  %v42 = quake.exp_pauli (%angle43) %v41#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v43:2 = quake.x [%v10#0] %v42 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle45 = arith.constant -0.39269908169872414 : f64
+  %v44 = quake.exp_pauli (%angle45) %v43#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+  %v45:2 = quake.x [%v41#0] %v44 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle47 = arith.constant 0.39269908169872414 : f64
+  %v46 = quake.exp_pauli (%angle47) %v45#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v47:2 = quake.x [%v43#0] %v46 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle49 = arith.constant -0.39269908169872414 : f64
+  %v48 = quake.exp_pauli (%angle49) %v47#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+  %v49:2 = quake.x [%v47#0] %v45#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %angle51 = arith.constant 0.39269908169872414 : f64
+  %v50 = quake.exp_pauli (%angle51) %v49#1 to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 8>}
+  %v51:2 = quake.x [%v49#0] %v50 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v52 = quake.s %v51#1 : (!quake.wire) -> !quake.wire
+  %v53 = quake.s %v51#0 : (!quake.wire) -> !quake.wire
+  %v54 = quake.h %v48 : (!quake.wire) -> !quake.wire
+  %v55:2 = quake.x [%v52] %v54 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %v56:2 = quake.x [%v53] %v55#1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %m0, %end0 = quake.mz %v56#1 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %m1, %end1 = quake.mz %v24#0 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %m2, %end2 = quake.mz %v56#0 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %m3, %end3 = quake.mz %v39#0 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %m4, %end4 = quake.mz %v55#0 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end0 : !quake.wire
+  quake.sink %end1 : !quake.wire
+  quake.sink %end2 : !quake.wire
+  quake.sink %end3 : !quake.wire
+  quake.sink %end4 : !quake.wire
+  return %m0, %m1, %m2, %m3, %m4 : !quake.measure, !quake.measure, !quake.measure, !quake.measure, !quake.measure
+}
+// CHECK-LABEL: func.func @mod5
+// CHECK-SAME: pbc.t_after = 7
+// CHECK-SAME: pbc.t_before = 16

@@ -1,0 +1,47 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief Exact-angle preservation and explicit approximation in PBC lowering.
+///
+/// Checks that optimization retains non-Clifford+T angles and that lowering
+/// requires explicit permission to approximate exact rational angles.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --quake-verify-pbc --quake-optimize-pbc --quake-verify-pbc | FileCheck %s --check-prefix=KEEP
+// RUN: cudaq-opt %s --canonicalize --quake-verify-pbc | FileCheck %s --check-prefix=ADJOINT
+// RUN: not cudaq-opt %s --quake-lower-pbc 2>&1 | FileCheck %s --check-prefix=REJECT
+// RUN: cudaq-opt %s --quake-lower-pbc='allow-approximate-angles=true' | FileCheck %s --check-prefix=LOWER
+
+func.func @exact_pi_7(%a: !quake.wire) -> !quake.measure {
+  %angle = arith.constant 0.44879895051282759 : f64
+  %r = quake.exp_pauli (%angle) %a to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 7>}
+  %m, %q = quake.mpp %r to "X" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %q : !quake.wire
+  return %m : !quake.measure
+}
+// KEEP: quake.exp_pauli
+// KEEP-SAME: quake.pbc_angle = array<i64: 1, 7>
+// REJECT: non-Clifford+T rational angle requires explicit allow-approximate-angles
+// LOWER: quake.rz
+// LOWER: quake.mz
+
+
+func.func @exact_adjoint(%a: !quake.wire) -> !quake.measure {
+  %angle = arith.constant -0.39269908169872414 : f64
+  %r = quake.exp_pauli<adj> (%angle) %a to "Z" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+  %m, %q = quake.mpp %r to "X" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %q : !quake.wire
+  return %m : !quake.measure
+}
+// ADJOINT-LABEL: func.func @exact_adjoint
+// ADJOINT: quake.exp_pauli<adj>
+// ADJOINT-SAME: quake.pbc_angle = array<i64: -1, 8>
+// LOWER-LABEL: func.func @exact_adjoint
+// LOWER: quake.t<adj>

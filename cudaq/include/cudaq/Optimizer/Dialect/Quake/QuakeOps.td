@@ -1237,6 +1237,42 @@ class Measurement<string mnemonic> : QuakeOp<mnemonic, [MeasurementInterface,
   let hasVerifier = 1;
 }
 
+def MppOp : QuakeOp<"mpp", [MeasurementInterface, QuantumMeasure,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Nondestructive joint measurement of a signed Pauli product";
+  let description = [{
+    Measures P = (-1)^negative times the tensor product in word. Character i
+    acts on scalar wire operand i. Returns one measurement result (zero for
+    eigenvalue +1, one for -1) and updated wires in operand order. The quantum
+    instrument has projectors (I+P)/2 and (I-P)/2; it preserves coherence within
+    each eigenspace. It is not a sequence of individual-qubit measurements.
+    The word must be nonempty, contain only I/X/Y/Z, and have nonidentity
+    support. For terminal PBC lowering, the first operand identifies the
+    physical readout wire, including when its Pauli character is I. Preserve
+    that operand identity when rewriting the measured product: sample bitstrings
+    and named measurement registers depend on the readout location.
+    The scalar result retains either !quake.measure or !cc.measure_handle,
+    matching the source measurement and its classical users.
+    This initial form requires distinct scalar SSA wires. Lower with
+    quake-lower-pbc before passes that require primitive measurements.
+  }];
+  let arguments = (ins Variadic<WireType>:$targets, StrAttr:$word,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$negative,
+    OptionalAttr<StrAttr>:$registerName);
+  let results = (outs AnyTypeOf<[MeasureType, cc_MeasureHandleType]>:$measOut,
+    Variadic<WireType>:$wires);
+  let assemblyFormat = [{
+    $targets `to` $word `:` functional-type(operands, results) attr-dict
+  }];
+  let extraClassDeclaration = [{
+    void getEffectsImpl(mlir::SmallVectorImpl<
+        mlir::SideEffects::EffectInstance<mlir::MemoryEffects::Effect>> &effects) {
+      cudaq::quake::getMeasurementEffectsImpl(effects, getTargetsMutable());
+    }
+  }];
+  let hasVerifier = 1;
+}
+
 def MxOp : Measurement<"mx"> {
   let summary = "Measurement along the x-axis";
   let description = [{
@@ -1475,7 +1511,14 @@ def quake_ExpPauliOp : QuakeOperator<"exp_pauli"> {
     This operation affects a general Pauli tensor product rotation on 
     the input qubits. The number of Pauli characters in the input Pauli word 
     string must equal the number of qubits in the veq. Mathematically, this
-    operation applies exp(i theta P) where P is a general Pauli tensor product. 
+    operation applies exp(i theta P) where P is a general Pauli tensor product.
+    The optional `quake.pbc_angle = array<i64: numerator, denominator>` attribute
+    records an exact exponent theta = pi * numerator / denominator. When
+    present, the denominator must be positive and the sole parameter must be
+    an f64 constant equal to its floating-point rendering. The attribute is
+    authoritative for PBC algebra; it is not inferred from a nearby float.
+    Adjoint negates the entire exponent. Use quake-lower-pbc before generic
+    decomposition to preserve exact Clifford+T angles as named gates.
   }];
   
   let arguments = !con(commonArguments, (ins

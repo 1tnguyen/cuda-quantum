@@ -71,6 +71,18 @@ add_cudaq_library(OptTransforms
   NormalizeSingleQubitCliffordT.cpp
   ObserveAnsatz.cpp
   OutlinePartitions.cpp
+  PBCPasses.cpp
+  PBCTelemetry.cpp
+  Pauli/GraphSynthesis.cpp
+  Pauli/Circuit.cpp
+  Pauli/Optimizer.cpp
+  Pauli/GateCount.cpp
+  Pauli/PBC.cpp
+  Pauli/TCountAlgebra.cpp
+  Pauli/TCountDecode.cpp
+  Pauli/TCountMerge.cpp
+  Pauli/TCountOptimizer.cpp
+  Pauli/TCountVerification.cpp
   PhaseFolding.cpp
   Pipelines.cpp
   PruneCtrlRelations.cpp

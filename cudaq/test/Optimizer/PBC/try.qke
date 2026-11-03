@@ -1,0 +1,59 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief Optional PBC round-trip acceptance and atomic fallback.
+///
+/// Exercises the public pass controls, diagnostics and primitive output. The
+/// unit tests also compare operation identities and pipeline continuation.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --quake-try-pbc='graph-synthesis=false' | FileCheck %s
+// RUN: cudaq-opt %s > %t.original
+// RUN: cudaq-opt %s --quake-try-pbc='max-work=1' > %t.budget
+// RUN: diff %t.original %t.budget
+// RUN: cudaq-opt %s --quake-try-pbc='max-operations=1' > %t.size
+// RUN: diff %t.original %t.size
+// RUN: cudaq-opt %s --quake-try-pbc='emit-remarks=true' 2>&1 | FileCheck %s --check-prefix=REMARK
+// RUN: not cudaq-opt %s --quake-try-pbc='max-operations=0' 2>&1 | FileCheck %s --check-prefix=INVALID
+
+func.func @improve(%q: !quake.wire) -> !quake.measure {
+  %h = quake.h %q : (!quake.wire) -> !quake.wire
+  %t = quake.t %h : (!quake.wire) -> !quake.wire
+  %u = quake.t %t : (!quake.wire) -> !quake.wire
+  %m, %end = quake.mx %u name "answer" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+// CHECK-LABEL: func.func @improve
+// CHECK-SAME: pbc.t_after = 0
+// CHECK-SAME: pbc.t_before = 2
+// CHECK-NOT: quake.t
+// CHECK-NOT: quake.exp_pauli
+// CHECK-NOT: quake.mpp
+// CHECK: quake.mz
+// CHECK-SAME: name "answer"
+// CHECK: return
+
+func.func @metadata(%q: !quake.wire) -> !quake.measure {
+  %t = quake.t %q : (!quake.wire) -> !quake.wire {audit.contract = "keep"}
+  %u = quake.t %t : (!quake.wire) -> !quake.wire
+  %m, %end = quake.mx %u : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+// CHECK-LABEL: func.func @metadata
+// CHECK-NOT: pbc.
+// CHECK: quake.t
+// CHECK-SAME: audit.contract = "keep"
+// CHECK: quake.t
+// CHECK: quake.mx
+// CHECK: return
+// REMARK: PBC optimization skipped: unsupported PBC attribute 'audit.contract'
+// INVALID: PBC max-operations must be positive

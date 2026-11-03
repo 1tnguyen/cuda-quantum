@@ -2096,6 +2096,11 @@ public:
       }
 
       [[maybe_unused]] auto *newOp = builder.clone(*op, mapper);
+      // Exact PBC metadata describes the old exponent operand. Parameter
+      // negation invalidates it; retain the new SSA expression as authoritative
+      // rather than copying a stale sign into subsequent PBC imports.
+      if (opWasNegated && isa<cudaq::quake::ExpPauliOp>(newOp))
+        newOp->removeAttr("quake.pbc_angle");
       assert(newOp->getNumResults() == 0);
       op->erase();
     }
