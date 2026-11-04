@@ -45,7 +45,7 @@ struct OptimizerOptions {
   /// below. Start with the metric the target actually charges for. This selects
   /// among candidates; it does not automatically retune graph heuristic
   /// weights.
-  Objective objective = Objective::TCount;
+  Objective objective = Objective::TotalGates;
 
   /// enableTCount runs the merge/commuting-block decoding portfolio. Disable
   /// for a synthesis-only comparison or to save that search/proof cost, at the
@@ -137,10 +137,11 @@ struct OptimizerOptions {
   /// Per-invocation graph controls; see graph::Options for singlet/factor
   /// synthesis, ready-node weighting, and ASAP parallelization credit.
   /// The portfolio clamps maxGates, forces acceptOnlyImprovement=false, and
-  /// selects by objective instead. Consequently preferDepth has no effect
-  /// here; tune parallelizationCredit to bias synthesis toward depth. release
-  /// must remain false: this native optimizer preserves the full unitary.
-  /// Weights influence candidate quality/runtime, never proof requirements.
+  /// selects by objective instead. The nested objective follows this outer
+  /// objective here; tune parallelizationCredit to bias synthesis toward depth.
+  /// release must remain false: this native optimizer preserves the full
+  /// unitary. Weights influence candidate quality/runtime, never proof
+  /// requirements.
   graph::Options graphSynthesis;
 };
 

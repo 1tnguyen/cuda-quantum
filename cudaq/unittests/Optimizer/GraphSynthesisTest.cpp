@@ -317,3 +317,116 @@ TEST(GraphSynthesis, WideWorkEstimateCannotWrapOrAllocateBeforeRejection) {
   EXPECT_EQ(budget.work(), 0u);
   EXPECT_TRUE(synthesize(width, {}, {}));
 }
+
+TEST(GraphSynthesis, NativeReadoutPreservesPhysicalOutcomeOrder) {
+  std::vector<Pauli> words{{0, 2}, {0, 1}};
+  Options options;
+  auto native = synthesizeReadout(2, words, {0, 1}, options);
+  ASSERT_TRUE(native) << native.error;
+  ASSERT_EQ(native.gates.size(), 1u);
+  EXPECT_EQ(native.gates.front().kind, Kind::Swap);
+  EXPECT_EQ(nativeGateCost(native.gates, options), 1);
+  for (bool cx : {false, true}) {
+    options.nativeCX = cx;
+    options.nativeCZ = !cx;
+    options.nativeSwap = false;
+    auto decomposed = synthesizeReadout(2, words, {0, 1}, options);
+    ASSERT_TRUE(decomposed) << decomposed.error;
+    assertUnitary(2, native.gates, decomposed.gates);
+    for (auto g : decomposed.gates) {
+      EXPECT_NE(g.kind, Kind::Swap);
+      EXPECT_NE(g.kind, cx ? Kind::CZ : Kind::CX);
+    }
+    EXPECT_EQ(nativeGateCost(native.gates, options), cx ? 3 : 9);
+  }
+}
+
+TEST(GraphSynthesis, MeasuredSynthesisPreservesAllJointOutcomeEffects) {
+  // Carrying X/Y basis changes and reconstructing a physical permutation must
+  // preserve off-diagonal POVM entries as well as computational-basis inputs.
+  std::vector<Gate> input{{Kind::H, 0},
+                          {Kind::CX, 0, 1},
+                          Gate::rotation({2, 2}, {1, 4}),
+                          {Kind::Sdg, 0},
+                          {Kind::Swap, 0, 1}};
+  std::vector<Pauli> outcomes{{0, 1}, {0, 2}};
+  auto normalized = cudaq::pauli::pbc::normalize(2, input, outcomes);
+  ASSERT_TRUE(normalized) << normalized.error;
+  for (unsigned profile = 0; profile < 3; ++profile) {
+    Options options;
+    options.simplify = false;
+    options.discrepancySteps = 3;
+    options.nativeCX = profile != 2;
+    options.nativeCZ = profile != 1;
+    options.nativeSwap = profile == 0;
+    cudaq::pauli::SearchBudget budget(10000000);
+    auto result =
+        synthesizeMeasured(2, normalized.rotations, normalized.measurements,
+                           {0, 1}, options, &budget);
+    ASSERT_TRUE(result) << result.error;
+    EXPECT_EQ(result.measurements, outcomes);
+    std::vector<State> before, after;
+    for (unsigned col = 0; col < 4; ++col) {
+      State state(4);
+      state[col] = 1;
+      before.push_back(simulate(input, state));
+      after.push_back(simulate(result.rotations, state));
+    }
+    for (unsigned outcome = 0; outcome < 4; ++outcome)
+      for (unsigned i = 0; i < 4; ++i)
+        for (unsigned j = 0; j < 4; ++j)
+          EXPECT_LT(
+              std::abs(std::conj(before[i][outcome]) * before[j][outcome] -
+                       std::conj(after[i][outcome]) * after[j][outcome]),
+              1e-11);
+  }
+}
+
+TEST(GraphSynthesis,
+     MeasuredSynthesisRejectsInvalidProfilesAndInsufficientWork) {
+  Options options;
+  options.nativeCX = options.nativeCZ = false;
+  EXPECT_FALSE(synthesizeMeasured(1, {}, {{0, 1}}, {0}, options));
+  options = {};
+  options.actionWeight = -1;
+  EXPECT_FALSE(synthesizeMeasured(1, {}, {{0, 1}}, {0}, options));
+  options = {};
+  cudaq::pauli::SearchBudget budget(0);
+  EXPECT_FALSE(
+      synthesizeMeasured(1000000000, {}, {{0, 1}}, {0}, options, &budget));
+  EXPECT_TRUE(budget.stopped());
+}
+
+TEST(GraphSynthesis, MeasuredSearchRetainsVerifiedIncumbentAtWorkLimit) {
+  std::vector<Gate> rotations{Gate::rotation({0, 3}, {1, 4})};
+  std::vector<Pauli> measured{{0, 1}, {0, 2}};
+  Options options;
+  options.discrepancySteps = 0;
+  cudaq::pauli::SearchBudget first(10000000);
+  auto greedy =
+      synthesizeMeasured(2, rotations, measured, {0, 1}, options, &first);
+  ASSERT_TRUE(greedy) << greedy.error;
+  options.discrepancySteps = 22;
+  cudaq::pauli::SearchBudget limited(first.work());
+  auto result =
+      synthesizeMeasured(2, rotations, measured, {0, 1}, options, &limited);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_TRUE(limited.stopped());
+  assertUnitary(2, greedy.rotations, result.rotations);
+}
+
+TEST(GraphSynthesis, NativeReadoutUsesDynamicSupportStorage) {
+  using cudaq::pauli::QubitSet;
+  for (unsigned last : {64u, 128u}) {
+    std::vector<Pauli> words{{0, QubitSet::single(last)}, {0, 1}};
+    auto result = synthesizeReadout(last + 1, words, {0, last}, {});
+    ASSERT_TRUE(result) << result.error;
+    ASSERT_EQ(result.gates.size(), 1u);
+    EXPECT_EQ(result.gates.front().kind, Kind::Swap);
+    EXPECT_EQ(result.gates.front().a, last);
+    EXPECT_EQ(result.gates.front().b, 0u);
+    EXPECT_EQ(nativeGateCost(
+                  {Gate::rotation({QubitSet::single(last), 0}, {1, 4})}, {}),
+              3);
+  }
+}

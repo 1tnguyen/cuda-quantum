@@ -275,6 +275,23 @@ OptimizerResult cudaq::pauli::optimize(unsigned width, const Circuit &input,
       observation.event.unresolvedBefore = unsynthesizedRotations(parent.gates);
     }
     auto settings = options.graphSynthesis;
+    switch (options.objective) {
+    case Objective::TotalGates:
+      settings.objective = graph::SynthesisObjective::TotalGates;
+      break;
+    case Objective::TCount:
+      settings.objective = graph::SynthesisObjective::TCount;
+      break;
+    case Objective::TDepth:
+      settings.objective = graph::SynthesisObjective::TDepth;
+      break;
+    case Objective::Entanglers:
+      settings.objective = graph::SynthesisObjective::Entanglers;
+      break;
+    case Objective::Depth:
+      settings.objective = graph::SynthesisObjective::Depth;
+      break;
+    }
     settings.maxGates = std::min(settings.maxGates, options.maxGates);
     // Disable only the standalone cost gate, not equivalence verification.
     // A graph proposal may help the selected portfolio objective even when it

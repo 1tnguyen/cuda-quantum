@@ -32,6 +32,7 @@
 #include <tuple>
 
 namespace cudaq::opt {
+#define GEN_PASS_DEF_QUAKESYNTHESIZEPBC
 #define GEN_PASS_DEF_QUAKETOPBC
 #define GEN_PASS_DEF_QUAKEVERIFYPBC
 #define GEN_PASS_DEF_QUAKEOPTIMIZEPBC
@@ -540,59 +541,14 @@ std::optional<std::vector<cudaq::pauli::Gate>>
 terminalReadout(unsigned width,
                 const std::vector<cudaq::pauli::Pauli> &observables,
                 ArrayRef<Measurement> measurements) {
-  using namespace cudaq::pauli;
-  if (observables.size() != measurements.size())
+  std::vector<unsigned> wires;
+  for (auto measurement : measurements)
+    wires.push_back(measurement.readout);
+  auto result =
+      cudaq::pauli::graph::synthesizeReadout(width, observables, wires, {});
+  if (!result)
     return std::nullopt;
-  auto words = observables;
-  std::vector<Gate> gates;
-  std::vector<bool> fixed(width);
-  auto append = [&](Gate gate) {
-    gates.push_back(gate);
-    for (auto &word : words)
-      word = tcount::detail::conjugate(word, gate);
-  };
-  for (unsigned index = 0; index < words.size(); ++index) {
-    unsigned target = measurements[index].readout;
-    if (target >= width)
-      return std::nullopt;
-    Pauli wanted{0, QubitSet::single(target)};
-    if (fixed[target]) {
-      // Repeated measurement on the same wire is safe only for the same bit.
-      if (words[index] != wanted)
-        return std::nullopt;
-      continue;
-    }
-    auto qs = support(words[index]);
-    auto pivot = llvm::find_if(qs, [&](unsigned q) { return !fixed[q]; });
-    if (pivot == qs.end())
-      return std::nullopt;
-    unsigned q = llvm::is_contained(qs, target) ? target : *pivot;
-    for (unsigned wire : qs) {
-      auto axis = words[index].axis(wire);
-      if (fixed[wire] && axis != 2)
-        return std::nullopt;
-      if (axis == 3)
-        append({Kind::Sdg, wire});
-      if (axis & 1)
-        append({Kind::H, wire});
-    }
-    for (unsigned wire : qs)
-      if (wire != q)
-        append({Kind::CX, wire, q});
-    if (q != target) {
-      // The readout wire can lie outside the observable's support, e.g. after
-      // absorbing a SWAP. Move the parity there without changing its identity.
-      append({Kind::CX, q, target});
-      append({Kind::CX, target, q});
-      append({Kind::CX, q, target});
-    }
-    if (words[index].sign)
-      append({Kind::X, target});
-    if (words[index] != wanted)
-      return std::nullopt;
-    fixed[target] = true;
-  }
-  return gates;
+  return std::move(result.gates);
 }
 
 /// Cost the exact terminal-readout plan emitted below, including one MZ per
@@ -861,6 +817,12 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
     for (auto gate : *readout) {
       using cudaq::pauli::Kind;
       switch (gate.kind) {
+      case Kind::Swap:
+        primitive(b, loc, "swap", {gate.a, gate.b}, wires);
+        break;
+      case Kind::CZ:
+        primitive(b, loc, "z", {gate.a, gate.b}, wires, {}, false, 1);
+        break;
       case Kind::CX:
         primitive(b, loc, "x", {gate.a, gate.b}, wires, {}, false, 1);
         break;
@@ -938,11 +900,32 @@ class QuakeToPBCPass : public cudaq::opt::impl::QuakeToPBCBase<QuakeToPBCPass> {
 public:
   using QuakeToPBCBase::QuakeToPBCBase;
   void runOnOperation() override {
+    OwningOpRef<func::FuncOp> candidate(getOperation().clone());
     Plan plan;
-    if (failed(read(getOperation(), false, plan)))
+    if (failed(read(*candidate, false, plan)))
       return signalPassFailure();
     if (plan.inputs.empty())
       return;
+    if (assumeMeasureAll && plan.measurements.empty()) {
+      // This explicit benchmark contract is opt-in. Insert at each terminal
+      // sink, then reimport so ordinary measurement bookkeeping owns the bits.
+      OpBuilder b(candidate->getContext());
+      auto sinks = plan.sinks;
+      llvm::sort(sinks, [](auto a, auto b) { return a.second < b.second; });
+      b.setInsertionPoint(plan.sinks.front().first);
+      for (auto [sink, index] : sinks) {
+        OperationState state(sink->getLoc(),
+                             cudaq::quake::MzOp::getOperationName());
+        state.addOperands(sink->getOperand(0));
+        state.addTypes({cudaq::quake::MeasureType::get(b.getContext()),
+                        cudaq::quake::WireType::get(b.getContext())});
+        auto *measurement = b.create(state);
+        sink->setOperand(0, measurement->getResult(1));
+      }
+      plan = {};
+      if (failed(read(*candidate, false, plan)))
+        return signalPassFailure();
+    }
     // Push the Clifford frame into rotation axes and terminal observables.
     // This preserves joint outcome probabilities for arbitrary inputs; final
     // quantum states are not outputs of the accepted PBC contract.
@@ -952,7 +935,6 @@ public:
       getOperation().emitError(result.error);
       return signalPassFailure();
     }
-    OwningOpRef<func::FuncOp> candidate(getOperation().clone());
     Plan replacement;
     if (failed(read(*candidate, false, replacement)) ||
         failed(emit(*candidate, replacement, result, false)))
@@ -986,11 +968,116 @@ public:
   }
 };
 
+/// Map the public profile to the single native synthesis implementation.
+template <typename Pass>
+std::string synthesisOptions(const Pass &pass,
+                             cudaq::pauli::graph::Options &o) {
+  using cudaq::pauli::graph::SynthesisObjective;
+  if (pass.objective == "total-gates")
+    o.objective = SynthesisObjective::TotalGates;
+  else if (pass.objective == "t-count")
+    o.objective = SynthesisObjective::TCount;
+  else if (pass.objective == "entanglers")
+    o.objective = SynthesisObjective::Entanglers;
+  else if (pass.objective == "depth")
+    o.objective = SynthesisObjective::Depth;
+  else if (pass.objective == "t-depth")
+    o.objective = SynthesisObjective::TDepth;
+  else
+    return "PBC objective must be t-count, t-depth, entanglers, depth, or "
+           "total-gates";
+  o.actionWeight = pass.actionWeight;
+  o.readoutWeight = pass.readoutWeight;
+  o.nativeCX = o.nativeCZ = o.nativeSwap = false;
+  SmallVector<StringRef> names;
+  StringRef(pass.nativeEntanglers.getValue()).split(names, ',');
+  for (StringRef name : names) {
+    name = name.trim();
+    if (name == "cx")
+      o.nativeCX = true;
+    else if (name == "cz")
+      o.nativeCZ = true;
+    else if (name == "swap")
+      o.nativeSwap = true;
+    else
+      return "synthesis-native-entanglers must contain only cx, cz, swap";
+  }
+  o.singleQubitCost = pass.singleQubitCost;
+  o.tCost = pass.tCost;
+  o.cxCost = pass.cxCost;
+  o.czCost = pass.czCost;
+  o.swapCost = pass.swapCost;
+  o.tieSeed = pass.tieSeed;
+  o.discrepancySteps = pass.discrepancySteps;
+  o.pruneUnobserved = pass.pruneUnobserved;
+  o.parallelizationCredit = pass.parallelizationCredit;
+  o.frontierWeight = pass.frontierWeight;
+  o.frameWeight = pass.frameWeight;
+  o.lookahead = pass.lookahead;
+  o.candidateNodes = pass.candidateNodes;
+  o.simplify = pass.simplify;
+  o.asymmetric = pass.asymmetric;
+  o.maxGates = pass.maxGates;
+  o.maxDependencies = pass.maxDependencies;
+  o.maxSteps = pass.maxSteps;
+  // Empty unitary synthesis validates every numeric control without searching.
+  return cudaq::pauli::graph::synthesize(1, {}, o).error;
+}
+
+/// Isolated, transactional normalized-PBC-to-native synthesis.
+class QuakeSynthesizePBCPass
+    : public cudaq::opt::impl::QuakeSynthesizePBCBase<QuakeSynthesizePBCPass> {
+public:
+  using QuakeSynthesizePBCBase::QuakeSynthesizePBCBase;
+  template <typename Pass>
+  friend std::string synthesisOptions(const Pass &,
+                                      cudaq::pauli::graph::Options &);
+  void runOnOperation() override {
+    cudaq::pauli::graph::Options options;
+    if (auto error = synthesisOptions(*this, options); !error.empty()) {
+      getOperation().emitError(error);
+      return signalPassFailure();
+    }
+    Plan plan;
+    if (failed(read(getOperation(), true, plan)))
+      return signalPassFailure();
+    if (plan.inputs.empty())
+      return;
+    std::vector<unsigned> wires;
+    for (auto m : plan.measurements)
+      wires.push_back(m.readout);
+    cudaq::pauli::SearchBudget budget(maxWork, timeoutMs);
+    auto form = cudaq::pauli::graph::synthesizeMeasured(
+        plan.inputs.size(), plan.gates, plan.observables, wires, options,
+        &budget);
+    if (!form) {
+      getOperation().emitError(form.error);
+      return signalPassFailure();
+    }
+    OwningOpRef<func::FuncOp> candidate(getOperation().clone());
+    Plan replacement;
+    if (failed(read(*candidate, true, replacement)) ||
+        failed(emit(*candidate, replacement, form, true, false, true)) ||
+        failed(mlir::verify(*candidate)))
+      return signalPassFailure();
+    Builder b(getOperation().getContext());
+    (*candidate)
+        ->setAttr("pbc.synthesis_work", b.getI64IntegerAttr(budget.work()));
+    (*candidate)
+        ->setAttr("pbc.synthesis_budget_exhausted",
+                  b.getBoolAttr(budget.stopped()));
+    commit(getOperation(), *candidate);
+  }
+};
+
 /// Shared strict/optional driver. Search uses read-only native data. Only the
 /// final candidate is cloned, emitted, checked and committed. The optional
 /// wrapper includes conversion and lowering in that same transaction.
 template <typename Base, bool Optional>
 class PBCOptimizationPass : public Base {
+  template <typename Pass>
+  friend std::string synthesisOptions(const Pass &,
+                                      cudaq::pauli::graph::Options &);
   cudaq::pauli::OptimizerOptions nativeOptions() const {
     return {
         .enableTCount = this->enableTCount,
@@ -1049,6 +1136,11 @@ public:
     cudaq::opt::PBCTelemetry report(function, this->getArgument(),
                                     this->telemetry, this->telemetryMaxEvents);
     auto options = nativeOptions();
+    if (auto error = synthesisOptions(*this, options.graphSynthesis);
+        !error.empty()) {
+      function.emitError(error);
+      return this->signalPassFailure();
+    }
     if (this->objective == "t-count")
       options.objective = cudaq::pauli::Objective::TCount;
     else if (this->objective == "t-depth")
@@ -1133,9 +1225,18 @@ public:
       report.unresolvedInput = cudaq::pauli::unsynthesizedRotations(plan.gates);
     }
     cudaq::pauli::SearchBudget budget(options.maxWork, options.timeoutMs);
+    bool measuredSynthesis = false;
+    if constexpr (Optional)
+      measuredSynthesis = options.enableGraphSynthesis &&
+                          !this->preserveCliffordNetwork &&
+                          !plan.observables.empty();
+    auto portfolioOptions = options;
+    if (measuredSynthesis)
+      portfolioOptions.enableGraphSynthesis = false;
     auto result = report.time("search", [&] {
-      return cudaq::pauli::optimize(plan.inputs.size(), plan.gates, options,
-                                    &budget, report.collector());
+      return cudaq::pauli::optimize(plan.inputs.size(), plan.gates,
+                                    portfolioOptions, &budget,
+                                    report.collector());
     });
     report.recordStatistics(result.stats);
     if (!result) {
@@ -1153,6 +1254,38 @@ public:
     if constexpr (Optional)
       preserveNetwork = this->preserveCliffordNetwork;
     auto normalized = report.time("normalization", [&] {
+      if (measuredSynthesis) {
+        std::vector<unsigned> wires;
+        for (auto m : plan.measurements)
+          wires.push_back(m.readout);
+        preserveNetwork = true;
+        cudaq::pauli::TelemetryScope observation(
+            report.collector(), "graph-synthesis", report.trace.winner);
+        uint64_t initialWork = budget.work();
+        if (report.enabled()) {
+          observation.event.before =
+              cudaq::pauli::tcount::cost(plan.inputs.size(), result.gates);
+          observation.event.unresolvedBefore =
+              cudaq::pauli::unsynthesizedRotations(result.gates);
+        }
+        auto form = cudaq::pauli::graph::synthesizeMeasured(
+            plan.inputs.size(), result.gates, plan.observables, wires,
+            options.graphSynthesis, &budget);
+        if (report.enabled()) {
+          observation.event.work = budget.work() - initialWork;
+          observation.event.decision = form ? "selected" : "rejected";
+          observation.event.reason =
+              form ? "verified terminal measurement synthesis" : form.error;
+          if (form) {
+            observation.event.after =
+                cudaq::pauli::tcount::cost(plan.inputs.size(), form.rotations);
+            observation.event.unresolvedAfter =
+                cudaq::pauli::unsynthesizedRotations(form.rotations);
+            report.trace.winner = observation.event.id;
+          }
+        }
+        return form;
+      }
       if (preserveNetwork)
         return cudaq::pauli::pbc::Result{result.gates, plan.observables, {}};
       return cudaq::pauli::pbc::normalize(plan.inputs.size(), result.gates,
@@ -1162,6 +1295,16 @@ public:
       if (budget.stopped()) {
         skip(function, "normalization work/deadline limit", report);
         return;
+      }
+      if constexpr (Optional) {
+        if (measuredSynthesis) {
+          // Like graph proposals inside the native portfolio, a failed
+          // measured-synthesis candidate is declined without committing it.
+          // Structural limits need not exhaust the shared work budget.
+          // Input and option validation have already succeeded above.
+          skip(function, normalized.error, report);
+          return;
+        }
       }
       report.reason = normalized.error;
       function.emitError(normalized.error);

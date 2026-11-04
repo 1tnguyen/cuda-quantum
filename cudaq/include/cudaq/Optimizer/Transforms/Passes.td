@@ -1725,7 +1725,26 @@ def QuakeToPBC : Pass<"quake-to-pbc", "mlir::func::FuncOp"> {
     Arbitrary angles are retained; no Clifford+T approximation is performed.
     Unsupported input is rejected before mutation, rather than partly converted.
   }];
+  let options = [Option<"assumeMeasureAll", "assume-measure-all", "bool", "false", "Explicitly add terminal Z measurements when the function has none">];
   let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
+}
+
+// Shared native synthesis profile. One-qubit Clifford+T gates are fixed;
+// entanglers and primitive costs describe the emitted target basis.
+def PBCSynthesisControls {
+  list<Option> options = [
+    Option<"actionWeight", "synthesis-action-weight", "double", "0.5", "Weight of actual emitted action cost">,
+    Option<"readoutWeight", "synthesis-readout-weight", "double", "0.125", "Weight of shared terminal readout cost change">,
+    Option<"nativeEntanglers", "synthesis-native-entanglers", "std::string", "\"cx,cz,swap\"", "Comma-separated native entanglers: cx, cz, swap; CX or CZ required">,
+    Option<"singleQubitCost", "synthesis-clifford-cost", "double", "1.0", "Cost of a primitive one-qubit Clifford">,
+    Option<"tCost", "synthesis-t-cost", "double", "1.0", "Cost of T/Tdg and unresolved-rotation proxy">,
+    Option<"cxCost", "synthesis-cx-cost", "double", "1.0", "Native CX cost">,
+    Option<"czCost", "synthesis-cz-cost", "double", "1.0", "Native CZ cost">,
+    Option<"swapCost", "synthesis-swap-cost", "double", "1.0", "Native SWAP cost; otherwise decomposed in the native basis">,
+    Option<"tieSeed", "synthesis-tie-seed", "uint64_t", "4", "Deterministic tie ordering; zero uses enumeration order">,
+    Option<"discrepancySteps", "synthesis-discrepancy-steps", "unsigned", "22", "Alternative greedy decisions to explore; zero is one rollout">,
+    Option<"pruneUnobserved", "synthesis-prune-unobserved", "bool", "false", "Remove rotations invisible to every terminal outcome">
+  ];
 }
 
 def QuakeOptimizePBC : Pass<"quake-optimize-pbc", "mlir::func::FuncOp"> {
@@ -1917,10 +1936,10 @@ def QuakeOptimizePBC : Pass<"quake-optimize-pbc", "mlir::func::FuncOp"> {
    * Optimization Framework", Fig. 12 and Sec. V-C,
    * https://arxiv.org/abs/2305.10966v2. ASAP scoring here is implementation
    * specific. The portfolio overrides standalone graph acceptance and uses
-   * objective; standalone preferDepth therefore has no effect here. Unitary
+   * objective, including graph candidate ranking. Unitary
    * hold semantics are required internally; there is no release-mode CLI knob.
    */
-  let options = [
+  let options = !listconcat(PBCSynthesisControls.options, [
     Option<"enableGateCount", "gate-count", "bool", "false", "Enable exact network-preserving total-gate strategies">,
     Option<"gateCountRounds", "gate-count-rounds", "unsigned", "3", "Maximum total-gate strategy composition rounds">,
     Option<"gateCommutationWindow", "gate-commutation-window", "unsigned", "128", "Maximum local cancellation distance; 0 is unbounded">,
@@ -1944,7 +1963,7 @@ def QuakeOptimizePBC : Pass<"quake-optimize-pbc", "mlir::func::FuncOp"> {
     Option<"maxTwoQubitGrowth", "max-two-qubit-growth", "unsigned", "4294967295", "Maximum extra two-qubit gates in mechanical lowering">,
     Option<"enableTCount", "t-count", "bool", "true", "Enable exact T-count strategies">,
     Option<"enableGraphSynthesis", "graph-synthesis", "bool", "true", "Enable checked Pauli graph synthesis">,
-    Option<"objective", "objective", "std::string", "\"t-count\"", "t-count, t-depth, entanglers, depth, or total-gates">,
+    Option<"objective", "objective", "std::string", "\"total-gates\"", "t-count, t-depth, entanglers, depth, or total-gates">,
     Option<"portfolioRounds", "portfolio-rounds", "unsigned", "2", "Maximum combined strategy rounds">,
     Option<"portfolioBeamWidth", "portfolio-beam-width", "unsigned", "2", "Retained combined candidates, 1..64">,
     Option<"maxGates", "max-gates", "unsigned", "8192", "Maximum stored gates per island or candidate">,
@@ -1959,7 +1978,7 @@ def QuakeOptimizePBC : Pass<"quake-optimize-pbc", "mlir::func::FuncOp"> {
     Option<"asymmetric", "synthesis-asymmetric", "bool", "true", "Carry trailing local Clifford gates">,
     Option<"maxDependencies", "max-dependencies", "unsigned", "1000000", "Maximum Pauli graph synthesis DAG edges">,
     Option<"maxSteps", "synthesis-max-steps", "unsigned", "1000000", "Maximum Pauli graph synthesis steps">
-  ];
+  ]);
 }
 
 def QuakeTryPBC : Pass<"quake-try-pbc", "mlir::func::FuncOp"> {
@@ -1982,6 +2001,33 @@ def QuakeTryPBC : Pass<"quake-try-pbc", "mlir::func::FuncOp"> {
     Option<"preserveCliffordNetwork", "preserve-clifford-network", "bool", "false", "Emit the checked native Clifford/rotation network without PBC renormalization">,
     Option<"emitRemarks", "emit-remarks", "bool", "false", "Explain clean PBC fallbacks without changing IR">,
     Option<"maxOperations", "max-operations", "unsigned", "32768", "Maximum total function operations before cloning">
+  ]);
+}
+
+def QuakeSynthesizePBC : Pass<"quake-synthesize-pbc", "mlir::func::FuncOp"> {
+  let summary = "Synthesize normalized PBC in a configurable native Clifford+T basis";
+  let description = [{
+    Reconstructs rotations and terminal joint measurements using native-action
+    costs, shared basis changes, and bounded alternative greedy decisions.
+    Preserves ordered measurement probabilities for arbitrary inputs. Does not
+    run the T decoder or network-preserving cleanup families. Every completed
+    candidate is independently replay checked before it can be selected.
+  }];
+  let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
+  let options = !listconcat(PBCSynthesisControls.options, [
+    Option<"objective", "objective", "std::string", "\"total-gates\"", "total-gates, t-count, t-depth, entanglers, or depth; T never increases">,
+    Option<"maxWork", "max-work", "uint64_t", "100000000", "Shared synthesis and proof work allowance">,
+    Option<"timeoutMs", "timeout-ms", "unsigned", "0", "Optional search deadline; zero disables">,
+    Option<"maxGates", "max-gates", "unsigned", "32768", "Maximum input and emitted gates">,
+    Option<"parallelizationCredit", "synthesis-parallelization-credit", "double", "0.0", "ASAP scheduling credit">,
+    Option<"frontierWeight", "synthesis-frontier-weight", "double", "1.0", "Extra ready-node weight">,
+    Option<"frameWeight", "synthesis-frame-weight", "double", "0.1", "Residual Clifford-frame cost weight">,
+    Option<"lookahead", "synthesis-lookahead", "unsigned", "0", "Population sample cap; zero scores all nodes">,
+    Option<"candidateNodes", "synthesis-candidate-nodes", "unsigned", "0", "Cheapest ready-node cap; zero considers all">,
+    Option<"simplify", "synthesis-simplify", "bool", "true", "Merge compatible exact rotations before synthesis">,
+    Option<"asymmetric", "synthesis-asymmetric", "bool", "true", "Include asymmetric native entangling actions">,
+    Option<"maxDependencies", "max-dependencies", "unsigned", "1000000", "Dependency edge limit">,
+    Option<"maxSteps", "synthesis-max-steps", "unsigned", "1000000", "Entangling decision limit">
   ]);
 }
 

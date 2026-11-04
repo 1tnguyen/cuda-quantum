@@ -31,12 +31,17 @@
 //===----------------------------------------------------------------------===//
 
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
+#include "TCountInternal.h"
+#include "cudaq/Optimizer/Pauli/GateCount.h"
+#include "cudaq/Optimizer/Pauli/PBC.h"
+#include "cudaq/Optimizer/Pauli/TCount.h"
 #include "cudaq/Optimizer/Pauli/Telemetry.h"
 #include "llvm/Support/MathExtras.h"
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -430,9 +435,11 @@ std::vector<Gate> basis(unsigned axis, unsigned q) {
 struct Candidate {
   /// Wire pair i/j and local axis codes a/b (1=X, 2=Z, 3=Y), respectively.
   unsigned i, j, a, b;
+  bool native = false;
   /// Stable ordering for deduplication and selection among equal-score actions.
   bool operator<(const Candidate &c) const {
-    return std::tie(i, j, a, b) < std::tie(c.i, c.j, c.a, c.b);
+    return std::tie(i, j, a, b, native) <
+           std::tie(c.i, c.j, c.a, c.b, c.native);
   }
 };
 /// Materialize one candidate as local bases followed by CZ. Symmetric mode
@@ -440,6 +447,35 @@ struct Candidate {
 /// graph/frame so later operations can share the basis changes.
 /// See PCOAST Sec. V-C1, the native-gate search discussion after Eq. (162).
 std::vector<Gate> sequence(Candidate c, bool asymmetric) {
+  if (c.native) {
+    // Add exact native-basis words for the same nine symmetric entanglers.
+    // Existing table synthesis/replay determines the word; no hand-written
+    // Clifford identity or original circuit is used as a synthesis guide.
+    static const auto nativeWords = [] {
+      std::array<std::vector<Gate>, 9> words;
+      for (unsigned a = 1; a <= 3; ++a)
+        for (unsigned b = 1; b <= 3; ++b) {
+          auto raw = sequence({0, 1, a, b, false}, false);
+          gatecount::Options settings;
+          settings.rounds = 1;
+          settings.propagate = settings.phasePlacement = false;
+          SearchBudget work(10000000);
+          words[(a - 1) * 3 + b - 1] =
+              gatecount::optimize(2, raw, settings, work, 1024);
+        }
+      return words;
+    }();
+    auto gates = nativeWords[(c.a - 1) * 3 + c.b - 1];
+    for (Gate &gate : gates) {
+      if (gate.kind == Kind::Phase)
+        continue;
+      gate.a = gate.a ? c.j : c.i;
+      if (gate.kind == Kind::CX || gate.kind == Kind::CZ ||
+          gate.kind == Kind::Swap)
+        gate.b = gate.b ? c.j : c.i;
+    }
+    return gates;
+  }
   auto gates = basis(c.a, c.i), second = basis(c.b, c.j);
   gates.insert(gates.end(), second.begin(), second.end());
   auto pre = gates;
@@ -449,6 +485,36 @@ std::vector<Gate> sequence(Candidate c, bool asymmetric) {
       gates.push_back(inverse(*it));
   return gates;
 }
+/// Translate an action into the configured native entangling basis.
+std::vector<Gate> nativeWord(const std::vector<Gate> &input,
+                             const Options &options) {
+  std::vector<Gate> result;
+  auto cx = [&](unsigned a, unsigned b) {
+    if (options.nativeCX)
+      result.push_back({Kind::CX, a, b});
+    else {
+      result.push_back({Kind::H, b});
+      result.push_back({Kind::CZ, a, b});
+      result.push_back({Kind::H, b});
+    }
+  };
+  for (Gate gate : input) {
+    if (gate.kind == Kind::CX)
+      cx(gate.a, gate.b);
+    else if (gate.kind == Kind::CZ && !options.nativeCZ) {
+      result.push_back({Kind::H, gate.b});
+      cx(gate.a, gate.b);
+      result.push_back({Kind::H, gate.b});
+    } else if (gate.kind == Kind::Swap && !options.nativeSwap) {
+      cx(gate.a, gate.b);
+      cx(gate.b, gate.a);
+      cx(gate.a, gate.b);
+    } else
+      result.push_back(gate);
+  }
+  return result;
+}
+
 /// Conjugate an axis by the complete symmetric candidate using a local table.
 /// Local bases omitted by asymmetric emission do not change support weight or
 /// local anticommutation, so this same transform suffices for candidate costs.
@@ -503,6 +569,10 @@ class Synthesizer {
   Graph graph;
   /// Accumulated output, counters, and sticky failure diagnostic.
   Result result;
+  bool measuredMode = false;
+  unsigned deviationStep = 0;
+  std::vector<Pauli> measurementWords;
+  std::function<double(const std::vector<Pauli> &)> measurementCost;
   /// Emitted Clifford subsequence used to recover the exact scalar phase.
   std::vector<Gate> emittedCliffords;
   /// Current ASAP finish depth on each wire.
@@ -511,6 +581,10 @@ class Synthesizer {
   unsigned depth = 0, steps = 0;
   /// Optional borrowed work/deadline budget shared with search and replay.
   SearchBudget *budget;
+
+  std::vector<Gate> action(Candidate c) const {
+    return nativeWord(sequence(c, options.asymmetric), options);
+  }
 
   /// Charge estimated work and preserve the first failure as a sticky error.
   /// Without a shared budget, structural gate/edge/step limits still apply.
@@ -558,12 +632,21 @@ class Synthesizer {
   /// previously constructed DAG edges remain valid after this update.
   /// PCOAST Eq. (153), ADDGATE; Lemma 18 gives commutation preservation.
   bool carry(Gate g, const std::vector<bool> &active) {
-    if (!charge(graph.nodes.size() + 2 * n) || !emit(g))
-      return false;
-    for (unsigned i = 0; i < graph.nodes.size(); ++i)
-      if (active[i])
-        graph.nodes[i].p = conjugate(graph.nodes[i].p, g);
-    graph.frame.carry(g);
+    for (Gate native : nativeWord({g}, options)) {
+      // Dictionary scalar phases are irrelevant to conjugation. Hold-mode
+      // finalization recovers the required phase from the actual emitted
+      // Clifford skeleton; emitting these as well would count them twice.
+      if (native.kind == Kind::Phase)
+        continue;
+      if (!charge(graph.nodes.size() + 2 * n) || !emit(native))
+        return false;
+      for (unsigned i = 0; i < graph.nodes.size(); ++i)
+        if (active[i])
+          graph.nodes[i].p = conjugate(graph.nodes[i].p, native);
+      graph.frame.carry(native);
+      for (Pauli &observable : measurementWords)
+        observable = conjugate(observable, native);
+    }
     return true;
   }
   /// Choose one entangling action that reduces at least one minimum-cost ready
@@ -604,14 +687,24 @@ class Synthesizer {
                   if (!charge())
                     return std::nullopt;
                   Candidate c{i, j, a, b};
-                  if (transformed(v, c).cost() < minimum)
+                  if (transformed(v, c).cost() < minimum) {
                     candidates.insert(c);
+                    c.native = true;
+                    candidates.insert(c);
+                  }
                 }
     }
     result.stats.candidates += candidates.size();
     double best = std::numeric_limits<double>::infinity();
+    uint64_t bestTie = std::numeric_limits<uint64_t>::max();
+    const uint64_t tieSeed = options.tieSeed;
     std::optional<Candidate> chosen;
+    std::vector<std::pair<double, Candidate>> alternatives;
     auto frameFactors = factors(graph.frame);
+    const double currentReadoutCost =
+        measuredMode && measurementCost && options.readoutWeight
+            ? measurementCost(measurementWords)
+            : 0;
     for (Candidate c : candidates) {
       if (!charge(std::min<size_t>(population.size(), options.lookahead
                                                           ? options.lookahead
@@ -637,7 +730,7 @@ class Synthesizer {
       for (Node v : front)
         include(v, options.frontierWeight * population.size() / front.size());
       score /= std::max(1.0, norm);
-      if (penalizeFrame) {
+      if (penalizeFrame && !measuredMode) {
         // Rotations can shrink while the residual Clifford becomes expensive.
         // Charge the mean frame-factor cost change when this penalty is
         // enabled.
@@ -654,21 +747,72 @@ class Synthesizer {
       // evaluates fine tuning, rather than specifying this fractional credit.
       auto ds = depths;
       unsigned next = depth;
-      for (const Gate &g : sequence(c, options.asymmetric)) {
-        if (g.kind == Kind::CZ)
+      for (const Gate &g : action(c)) {
+        if (g.kind == Kind::Phase)
+          continue;
+        if (g.kind == Kind::CZ || g.kind == Kind::CX || g.kind == Kind::Swap)
           ds[g.a] = ds[g.b] = std::max(ds[g.a], ds[g.b]) + 1;
         else
           ++ds[g.a];
         next = std::max(next, ds[g.a]);
       }
-      unsigned serial = sequence(c, options.asymmetric).size();
+      const auto actionGates = action(c);
+      unsigned serial =
+          std::count_if(actionGates.begin(), actionGates.end(),
+                        [](const Gate &g) { return g.kind != Kind::Phase; });
       score -=
           options.parallelizationCredit * (1.0 - double(next - depth) / serial);
+      // Charge the primitive implementation, including local basis changes.
+      // Support reduction alone does not price the gates that will be emitted.
+      score += options.actionWeight * nativeGateCost(actionGates, options);
+      if (measuredMode && measurementCost && options.readoutWeight) {
+        auto next = measurementWords;
+        for (const Gate &gate : action(c))
+          for (Pauli &observable : next)
+            observable = conjugate(observable, gate);
+        if (!charge(llvm::SaturatingAdd<uint64_t>(
+                llvm::SaturatingMultiply<uint64_t>(uint64_t(n) * n,
+                                                   measurementWords.size()),
+                1)))
+          return std::nullopt;
+        score += options.readoutWeight *
+                 (measurementCost(next) - currentReadoutCost);
+      }
       // Strict comparison keeps the first candidate in deterministic set order
       // on a tie. A lower heuristic score is not a proof of global optimality.
-      if (score < best) {
+      alternatives.emplace_back(score, c);
+      uint64_t tie = 0;
+      if (tieSeed) {
+        tie = tieSeed ^ (uint64_t(steps) << 48) ^ (uint64_t(c.i) << 32) ^
+              (uint64_t(c.j) << 16) ^ (c.a << 8) ^ (c.b << 4) ^ c.native;
+        tie += 0x9e3779b97f4a7c15ULL;
+        tie = (tie ^ (tie >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        tie = (tie ^ (tie >> 27)) * 0x94d049bb133111ebULL;
+        tie ^= tie >> 31;
+      }
+      if ((!tieSeed && score < best) ||
+          (tieSeed && (score < best - 1.0e-12 ||
+                       (std::abs(score - best) <= 1.0e-12 && tie < bestTie)))) {
         best = score;
+        bestTie = tie;
         chosen = c;
+      }
+    }
+    // Bounded discrepancy search: explore one alternative to a greedy
+    // choice, then complete the circuit with the same native scorer. Every
+    // alternative retains the minimum-frontier progress condition.
+    if (deviationStep && chosen && deviationStep == steps) {
+      std::sort(alternatives.begin(), alternatives.end(),
+                [](const auto &a, const auto &b) {
+                  if (a.first != b.first)
+                    return a.first < b.first;
+                  return a.second < b.second;
+                });
+      for (const auto &entry : alternatives) {
+        if (!(entry.second < *chosen) && !(*chosen < entry.second))
+          continue;
+        chosen = entry.second;
+        break;
       }
     }
     return chosen;
@@ -694,7 +838,7 @@ class Synthesizer {
     }
     // The emitted prefix is B then CZ, so the residual is conjugated by
     // CZ B (not its inverse); this carries the omitted trailing B^dagger.
-    for (const Gate &g : sequence(*candidate, options.asymmetric))
+    for (const Gate &g : action(*candidate))
       if (!carry(g, active))
         return false;
     ++result.stats.tqes;
@@ -811,9 +955,17 @@ public:
   /// Import a validated input and start an empty output schedule. The options
   /// and optional shared budget are borrowed for the duration of run().
   Synthesizer(unsigned n, const std::vector<Gate> &input,
-              const Options &options, SearchBudget *budget)
-      : n(n), options(options), graph(import(n, input)), depths(n),
-        budget(budget) {}
+              const Options &options, SearchBudget *budget,
+              const std::vector<Pauli> &observables = {},
+              std::function<double(const std::vector<Pauli> &)> cost = {},
+              unsigned deviation = 0)
+      : n(n), options(options), graph(import(n, input)),
+        measuredMode(!observables.empty()), deviationStep(deviation),
+        measurementCost(std::move(cost)), depths(n), budget(budget) {
+    for (const Pauli &observable : observables)
+      measurementWords.push_back(graph.frame.lookup(observable));
+  }
+  const std::vector<Pauli> &measurements() const { return measurementWords; }
   /// Simplify/import dependencies, consume ready rotations, and finish the
   /// residual frame. This builds a candidate; synthesize() supplies the final
   /// independent equivalence replay and standalone cost-acceptance guard.
@@ -824,15 +976,21 @@ public:
         return result;
       simplify(graph);
     }
-    if (options.release) {
+    if ((!measuredMode && options.release) ||
+        (measuredMode && options.pruneUnobserved)) {
       // Conservative terminal-measurement optimization: remove rotations in
       // the backward cone's complement. Keep the frame and measurement order;
       // no classical remapping is silently introduced.
       std::vector<Node> kept;
       for (auto it = graph.nodes.rbegin(); it != graph.nodes.rend(); ++it) {
         bool affects = false;
-        for (unsigned q = 0; q < n; ++q)
-          affects |= it->p.anti(graph.frame.rows[n + q]);
+        if (measuredMode) {
+          for (const Pauli &observable : measurementWords)
+            affects |= it->p.anti(observable);
+        } else {
+          for (unsigned q = 0; q < n; ++q)
+            affects |= it->p.anti(graph.frame.rows[n + q]);
+        }
         for (Node v : kept)
           affects |= it->p.anti(v.p);
         if (affects)
@@ -886,6 +1044,19 @@ public:
             result.error = "Identity rotation requires a rational angle";
             return result;
           }
+          // Emit only the basis prefix. Carry its action into every remaining
+          // rotation and terminal observable, rather than emitting its inverse
+          // around this rotation during MLIR lowering. The existing independent
+          // measured replay checks this transformed representation.
+          {
+            unsigned q = firstBit(v.p.x | v.p.z);
+            unsigned axis = v.p.axis(q);
+            if (axis == 3 && !carry({Kind::Sdg, q}, active))
+              return result;
+            if ((axis & 1) && !carry({Kind::H, q}, active))
+              return result;
+            v = graph.nodes[i];
+          }
           if (!emit(Gate::rotation({v.p.x, v.p.z, false},
                                    v.p.sign ? v.angle.negated() : v.angle)))
             return result;
@@ -908,7 +1079,7 @@ public:
       if (!step(front, population, !options.release, active))
         return result;
     }
-    if (!finalize(active))
+    if (!measuredMode && !finalize(active))
       return result;
     // Explicit input/identity-rotation phases commute with the entire circuit.
     // Keep them in addition to the Clifford phase correction from finalize().
@@ -965,34 +1136,43 @@ bool validCircuit(unsigned n, const std::vector<Gate> &gates) {
   return true;
 }
 
-/// Standalone acceptance estimate for circuits with single-wire rotations.
-/// Count each rotation/local gate as one operation, CX/CZ as one entangler, and
-/// SWAP as three CNOTs; ignore scalar phases. Return either (depth, entanglers,
-/// gates) or (entanglers, depth, gates). This is not target routing, rotation
-/// synthesis, or the combined portfolio's Clifford+T mechanical cost model.
-std::tuple<unsigned, unsigned, unsigned>
-physicalCost(unsigned n, const std::vector<Gate> &gates, bool preferDepth) {
-  std::vector<unsigned> depths(n);
-  unsigned twoQ = 0, count = 0;
-  for (const Gate &g : gates) {
-    if (g.kind == Kind::Phase)
-      continue;
-    ++count;
-    if (g.kind == Kind::Rotate) {
-      if (g.pauli.weight())
-        ++depths[firstBit(g.pauli.x | g.pauli.z)];
-    } else if (g.kind == Kind::CX || g.kind == Kind::CZ ||
-               g.kind == Kind::Swap) {
-      unsigned cost = g.kind == Kind::Swap ? 3 : 1;
-      twoQ += cost;
-      count += cost - 1;
-      depths[g.a] = depths[g.b] = std::max(depths[g.a], depths[g.b]) + cost;
-    } else
-      ++depths[g.a];
+/// Rank complete circuits in the same primitive basis used by emission.
+std::array<double, 5> circuitScore(unsigned n, const std::vector<Gate> &gates,
+                                   const Options &options) {
+  auto cost = tcount::cost(n, gates);
+  double total = nativeGateCost(gates, options);
+  double t = cost.t, depth = cost.depth, two = cost.twoQubit, td = cost.tDepth;
+  switch (options.objective) {
+  case SynthesisObjective::TCount:
+    return {t, total, depth, two, td};
+  case SynthesisObjective::Entanglers:
+    return {two, total, t, depth, td};
+  case SynthesisObjective::Depth:
+    return {depth, total, t, two, td};
+  case SynthesisObjective::TDepth:
+    return {td, t, total, depth, two};
+  case SynthesisObjective::TotalGates:
+    return {total, t, depth, two, td};
   }
-  unsigned depth = *std::max_element(depths.begin(), depths.end());
-  return preferDepth ? std::tuple{depth, twoQ, count}
-                     : std::tuple{twoQ, depth, count};
+  return {total, t, depth, two, td};
+}
+
+std::string invalidOptions(const Options &options) {
+  if (!options.nativeCX && !options.nativeCZ)
+    return "Pauli synthesis requires CX or CZ in its native gate set";
+  for (double value :
+       {options.parallelizationCredit, options.frontierWeight,
+        options.frameWeight, options.actionWeight, options.readoutWeight,
+        options.singleQubitCost, options.tCost, options.cxCost, options.czCost,
+        options.swapCost})
+    if (!std::isfinite(value) || value < 0)
+      return "Pauli synthesis costs and weights must be finite and nonnegative";
+  if (!options.maxGates || !options.maxDependencies)
+    return "Pauli synthesis size limits must be positive";
+  if (static_cast<unsigned>(options.objective) >
+      static_cast<unsigned>(SynthesisObjective::TDepth))
+    return "Invalid Pauli synthesis objective";
+  return {};
 }
 
 } // namespace
@@ -1071,6 +1251,53 @@ bool cudaq::pauli::graph::equivalent(unsigned n, const std::vector<Gate> &input,
                               0);
 }
 
+double cudaq::pauli::graph::nativeGateCost(const std::vector<Gate> &gates,
+                                           const Options &options) {
+  double result = 0;
+  for (Gate gate : nativeWord(gates, options)) {
+    switch (gate.kind) {
+    case Kind::Phase:
+      break;
+    case Kind::CX:
+      result += options.cxCost;
+      break;
+    case Kind::CZ:
+      result += options.czCost;
+      break;
+    case Kind::Swap:
+      result += options.swapCost;
+      break;
+    case Kind::Rotate: {
+      // Cost exact named Clifford+T lowering, including basis/parity gates.
+      auto k = tcount::detail::quarters(gate.angle);
+      if (k) {
+        unsigned magnitude = std::abs(*k % 8);
+        result += ((magnitude & 1) ? options.tCost : 0) +
+                  ((magnitude & 2) ? options.singleQubitCost : 0) +
+                  ((magnitude & 4) ? options.singleQubitCost : 0);
+      } else
+        result += options.tCost; // configurable unresolved-rotation proxy
+      auto support = gate.pauli.x | gate.pauli.z;
+      for (unsigned q : support.set_bits())
+        result += (gate.pauli.axis(q) == 3   ? 4
+                   : gate.pauli.axis(q) == 1 ? 2
+                                             : 0) *
+                  options.singleQubitCost;
+      if (gate.pauli.weight() > 1)
+        result +=
+            2 * (gate.pauli.weight() - 1) *
+            (options.nativeCX ? options.cxCost
+                              : options.czCost + 2 * options.singleQubitCost);
+      break;
+    }
+    default:
+      result += options.singleQubitCost;
+      break;
+    }
+  }
+  return result;
+}
+
 /// Validate controls, synthesize a bounded candidate, and require exact replay.
 /// Hold mode checks the full input unitary. Release mode first justifies
 /// deleting rotations invisible to terminal joint Z readout, then checks the
@@ -1078,23 +1305,18 @@ bool cudaq::pauli::graph::equivalent(unsigned n, const std::vector<Gate> &input,
 /// eligibility. A nonempty error invalidates any partial output; accepted=false
 /// instead denotes successful replay followed by a cost-guard fallback to the
 /// input.
-Result cudaq::pauli::graph::synthesize(unsigned n,
-                                       const std::vector<Gate> &input,
-                                       const Options &options,
-                                       SearchBudget *budget,
-                                       uint64_t *verificationNs) {
+static Result synthesizeOne(unsigned n, const std::vector<Gate> &input,
+                            const Options &options, SearchBudget *budget,
+                            uint64_t *verificationNs, unsigned deviation) {
   Result result;
   if (!n) {
     result.error = "Pauli graph synthesis islands require a nonzero wire count";
     return result;
   }
-  for (double weight : {options.parallelizationCredit, options.frontierWeight,
-                        options.frameWeight})
-    if (!std::isfinite(weight) || weight < 0) {
-      result.error =
-          "Pauli graph synthesis weights must be finite and nonnegative";
-      return result;
-    }
+  if (auto error = invalidOptions(options); !error.empty()) {
+    result.error = error;
+    return result;
+  }
   if (!validCircuit(n, input)) {
     result.error =
         "Invalid Pauli circuit (angle, support, or Clifford indices)";
@@ -1115,7 +1337,7 @@ Result cudaq::pauli::graph::synthesize(unsigned n,
     result.stats.budgetExhausted = true;
     return result;
   }
-  result = Synthesizer(n, input, options, budget).run();
+  result = Synthesizer(n, input, options, budget, {}, {}, deviation).run();
   if (!result)
     return result;
   std::vector<Gate> target = input;
@@ -1175,10 +1397,262 @@ Result cudaq::pauli::graph::synthesize(unsigned n,
     return g.kind != Kind::Rotate || g.pauli.weight() == 1;
   });
   if (options.acceptOnlyImprovement && gateInput &&
-      physicalCost(n, result.gates, options.preferDepth) >=
-          physicalCost(n, input, options.preferDepth)) {
-    result.gates = input;
+      (tcount::cost(n, result.gates).t > tcount::cost(n, input).t ||
+       circuitScore(n, result.gates, options) >=
+           circuitScore(n, input, options))) {
+    result.gates = nativeWord(input, options);
+    if (result.gates.size() > options.maxGates)
+      result.error = "native input expansion exceeds the gate limit";
     result.stats.accepted = false;
   }
   return result;
+}
+
+Result cudaq::pauli::graph::synthesize(unsigned width,
+                                       const std::vector<Gate> &input,
+                                       const Options &options,
+                                       SearchBudget *budget,
+                                       uint64_t *verificationNs) {
+  auto best = synthesizeOne(width, input, options, budget, verificationNs, 0);
+  if (!best || input.empty())
+    return best;
+  unsigned alternatives = std::min(options.discrepancySteps, best.stats.tqes);
+  for (unsigned step = 1; step <= alternatives; ++step) {
+    auto candidate =
+        synthesizeOne(width, input, options, budget, verificationNs, step);
+    if (!candidate) {
+      if (candidate.stats.budgetExhausted || (budget && budget->stopped())) {
+        best.stats.budgetExhausted = true;
+        break;
+      }
+      return candidate;
+    }
+    if (circuitScore(width, candidate.gates, options) <
+        circuitScore(width, best.gates, options))
+      best = std::move(candidate);
+    if (step == alternatives)
+      break;
+  }
+  return best;
+}
+
+static Result buildReadout(unsigned width,
+                           const std::vector<Pauli> &observables,
+                           const std::vector<unsigned> &readoutWires,
+                           const Options &options, bool validate = true) {
+  Result result;
+  auto fail = [&](std::string error) {
+    result.gates.clear();
+    result.error = std::move(error);
+    return result;
+  };
+  if (validate) {
+    if (auto error = invalidOptions(options); !error.empty())
+      return fail(error);
+    if (!width || observables.size() != readoutWires.size())
+      return fail("invalid measured readout dimensions");
+    pbc::CommutingObservables basis;
+    for (const Pauli &word : observables)
+      if (!word.weight() || !(word.x | word.z).fits(width) ||
+          !basis.insert(word))
+        return fail(
+            "readout requires commuting nonidentity in-range observables");
+  }
+  auto words = observables;
+  std::vector<bool> fixed(width);
+  auto append = [&](Gate gate) {
+    for (Gate native : nativeWord({gate}, options)) {
+      result.gates.push_back(native);
+      for (Pauli &word : words)
+        word = conjugate(word, native);
+    }
+  };
+  for (unsigned index = 0; index < words.size(); ++index) {
+    unsigned target = readoutWires[index];
+    if (target >= width)
+      return fail("readout wire is out of range");
+    Pauli wanted = single(2, target);
+    if (fixed[target]) {
+      if (words[index] != wanted)
+        return fail("conflicting repeated readout");
+      continue;
+    }
+    std::vector<unsigned> support;
+    auto wordSupport = words[index].x | words[index].z;
+    for (unsigned wire : wordSupport.set_bits())
+      support.push_back(wire);
+    auto pivot = std::find_if(support.begin(), support.end(),
+                              [&](unsigned q) { return !fixed[q]; });
+    if (pivot == support.end())
+      return fail("readout requires classical outcome remapping");
+    unsigned q =
+        std::find(support.begin(), support.end(), target) != support.end()
+            ? target
+            : *pivot;
+    for (unsigned wire : support) {
+      unsigned axis = words[index].axis(wire);
+      if (fixed[wire] && axis != 2)
+        return fail("readout would modify an already fixed observable");
+      if (axis == 3)
+        append({Kind::Sdg, wire});
+      if (axis & 1)
+        append({Kind::H, wire});
+    }
+    for (unsigned wire : support)
+      if (wire != q)
+        append({Kind::CX, wire, q});
+    if (q != target)
+      append({Kind::Swap, q, target});
+    if (words[index].sign)
+      append({Kind::X, target});
+    if (words[index] != wanted)
+      return fail("terminal observable reconstruction failed");
+    fixed[target] = true;
+    if (result.gates.size() > options.maxGates)
+      return fail("terminal readout gate limit exceeded");
+  }
+  return result;
+}
+
+Result cudaq::pauli::graph::synthesizeReadout(
+    unsigned width, const std::vector<Pauli> &observables,
+    const std::vector<unsigned> &readoutWires, const Options &options) {
+  return buildReadout(width, observables, readoutWires, options);
+}
+
+namespace {
+/// Independent measured replay. Match the partially commuting rotation words,
+/// then compare each requested signed observable through the residual frames.
+bool equivalentMeasured(unsigned width, const std::vector<Gate> &input,
+                        const std::vector<Pauli> &observables,
+                        const std::vector<Gate> &output,
+                        const std::vector<Pauli> &outcomes, bool prune,
+                        SearchBudget *budget) {
+  uint64_t size = llvm::SaturatingAdd<uint64_t>(input.size(), output.size());
+  uint64_t work = llvm::SaturatingMultiply<uint64_t>(
+      size + 1,
+      llvm::SaturatingAdd<uint64_t>(size, uint64_t(width) * width + 1));
+  if (budget && !budget->take(work))
+    return false;
+  auto a = import(width, input), b = import(width, output);
+  simplify(a);
+  simplify(b);
+  if (prune) {
+    std::vector<bool> keep(a.nodes.size(), true);
+    std::vector<Pauli> requested;
+    for (Pauli word : observables)
+      requested.push_back(a.frame.lookup(word));
+    for (size_t i = a.nodes.size(); i-- > 0;) {
+      bool invisible = true;
+      for (const Pauli &word : requested)
+        invisible &= !a.nodes[i].p.anti(word);
+      for (size_t j = i + 1; j < a.nodes.size(); ++j)
+        if (keep[j])
+          invisible &= !a.nodes[i].p.anti(a.nodes[j].p);
+      keep[i] = !invisible;
+    }
+    std::vector<Node> retained;
+    for (size_t i = 0; i < a.nodes.size(); ++i)
+      if (keep[i])
+        retained.push_back(a.nodes[i]);
+    a.nodes = std::move(retained);
+    simplify(a);
+  }
+  if (a.nodes.size() != b.nodes.size() || observables.size() != outcomes.size())
+    return false;
+  for (const Node &node : a.nodes) {
+    bool matched = false;
+    for (auto it = b.nodes.begin(); it != b.nodes.end(); ++it) {
+      if (node.p == it->p && equalAngles(node.angle, it->angle)) {
+        b.nodes.erase(it);
+        matched = true;
+        break;
+      }
+      if (node.p.anti(it->p))
+        break;
+    }
+    if (!matched)
+      return false;
+  }
+  for (unsigned i = 0; i < observables.size(); ++i)
+    if (a.frame.lookup(observables[i]) != b.frame.lookup(outcomes[i]))
+      return false;
+  return true;
+}
+} // namespace
+
+pbc::Result cudaq::pauli::graph::synthesizeMeasured(
+    unsigned width, const std::vector<Gate> &input,
+    const std::vector<Pauli> &observables,
+    const std::vector<unsigned> &readoutWires, const Options &options,
+    SearchBudget *budget) {
+  if (auto error = invalidOptions(options); !error.empty())
+    return {{}, {}, error};
+  if (!validCircuit(width, input) || observables.empty() ||
+      input.size() > options.maxGates)
+    return {{}, {}, "invalid measured synthesis input or gate limit"};
+  if (!width || (budget && !budget->take(llvm::SaturatingMultiply<uint64_t>(
+                               input.size() + observables.size() + 1,
+                               uint64_t(width) * width + 1))))
+    return {{}, {}, "measured synthesis input work limit exceeded"};
+  // Validate the output contract before allocating the synthesis graph.
+  auto initialReadout =
+      synthesizeReadout(width, observables, readoutWires, options);
+  if (!initialReadout)
+    return {{}, {}, initialReadout.error};
+  std::vector<Pauli> outcomes;
+  for (unsigned wire : readoutWires)
+    outcomes.push_back(single(2, wire));
+  auto readoutCost = [&](const std::vector<Pauli> &words) {
+    // Clifford conjugation preserves the already validated commutation,
+    // support range and dimensions. Avoid redoing Gaussian validation for
+    // every heuristic candidate; final emission and replay remain checked.
+    auto readout = buildReadout(width, words, readoutWires, options, false);
+    return readout ? nativeGateCost(readout.gates, options)
+                   : std::numeric_limits<double>::infinity();
+  };
+  std::optional<std::vector<Gate>> best;
+  auto before = tcount::cost(width, input);
+  unsigned alternatives = options.discrepancySteps;
+  for (unsigned deviation = 0;; ++deviation) {
+    if (budget && !budget->take(uint64_t(width) * width + input.size() + 1))
+      break;
+    Synthesizer search(width, input, options, budget, observables, readoutCost,
+                       deviation);
+    auto candidate = search.run();
+    if (!deviation)
+      alternatives = std::min(alternatives, candidate.stats.tqes);
+    if (!candidate) {
+      if (budget && budget->stopped())
+        break;
+      return {{}, {}, candidate.error};
+    }
+    auto readout =
+        synthesizeReadout(width, search.measurements(), readoutWires, options);
+    if (!readout)
+      return {{}, {}, readout.error};
+    if (candidate.gates.size() + readout.gates.size() > options.maxGates)
+      return {{}, {}, "measured synthesis output gate limit exceeded"};
+    candidate.gates.insert(candidate.gates.end(), readout.gates.begin(),
+                           readout.gates.end());
+    if (!equivalentMeasured(width, input, observables, candidate.gates,
+                            outcomes, options.pruneUnobserved, budget)) {
+      if (budget && budget->stopped())
+        break;
+      return {{}, {}, "measured synthesis independent replay failed"};
+    }
+    // The default total-gate objective never purchases a reduction with extra
+    // T.
+    if (tcount::cost(width, candidate.gates).t <= before.t &&
+        (!best || circuitScore(width, candidate.gates, options) <
+                      circuitScore(width, *best, options)))
+      best = std::move(candidate.gates);
+    if (deviation == alternatives)
+      break;
+  }
+  if (!best)
+    return {{},
+            {},
+            "measured synthesis budget exhausted or no T-admissible candidate"};
+  return {std::move(*best), std::move(outcomes), {}};
 }

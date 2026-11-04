@@ -18,6 +18,7 @@
 #pragma once
 
 #include "cudaq/Optimizer/Pauli/Circuit.h"
+#include "cudaq/Optimizer/Pauli/PBC.h"
 #include "cudaq/Optimizer/Pauli/SearchBudget.h"
 #include <cstdint>
 #include <string>
@@ -30,6 +31,8 @@ using ::cudaq::pauli::Angle;
 using ::cudaq::pauli::Gate;
 using ::cudaq::pauli::Kind;
 using ::cudaq::pauli::Pauli;
+
+enum class SynthesisObjective { TotalGates, TCount, Entanglers, Depth, TDepth };
 
 /// Controls for one graph-synthesis invocation, not a global optimum search.
 /// The singlet/factor costs, ready-node frontier, and hold/release distinction
@@ -47,6 +50,21 @@ using ::cudaq::pauli::Pauli;
 /// an exhausted graph search/replay can return an error with a partial
 /// candidate.
 struct Options {
+  SynthesisObjective objective = SynthesisObjective::TotalGates;
+  /// Score the actual emitted Clifford action and terminal measurement network.
+  double actionWeight = 0.5;
+  double readoutWeight = 0.125;
+  /// Native entanglers. H, S/Sdg, T/Tdg and Pauli gates form the fixed
+  /// one-qubit Clifford+T basis. At least one of CX/CZ must be native.
+  bool nativeCX = true, nativeCZ = true, nativeSwap = true;
+  double singleQubitCost = 1, tCost = 1, cxCost = 1, czCost = 1, swapCost = 1;
+  /// Fixed deterministic tie ordering; zero uses candidate enumeration order.
+  uint64_t tieSeed = 4;
+  /// Try one alternative at each of the first N entangling decisions, sharing
+  /// the invocation's work budget. Zero requests one greedy synthesis.
+  unsigned discrepancySteps = 22;
+  /// Optional measurement-only deletion, independently replay checked.
+  bool pruneUnobserved = false;
   /// Reward candidate gates whose ASAP schedule fits below the current depth.
   /// Zero disables this reward. Increasing it favors parallel placement, which
   /// may lower depth at the expense of entangler count or terminal-frame cost.
@@ -110,24 +128,17 @@ struct Options {
   bool asymmetric = true;
 
   /// Standalone acceptance guard: return the original if synthesis does not
-  /// strictly improve the preferDepth cost tuple. Applies only when every input
-  /// rotation is already single-qubit; multi-qubit Pauli input needs a caller's
-  /// lowered-cost comparison. Keep true for standalone gate-circuit
+  /// strictly improve the selected objective tuple. Applies only when every
+  /// input rotation is already single-qubit; multi-qubit Pauli input needs a
+  /// caller's lowered-cost comparison. Keep true for standalone gate-circuit
   /// optimization.
   /// False permits a verified but more expensive candidate, useful for
   /// portfolio
   /// composition. The combined optimizer sets this false and applies its own
-  /// objective/guards. It never turns off semantic replay.
+  /// objective/guards. It never turns off semantic replay. This guard applies
+  /// to synthesize(); synthesizeMeasured() always returns a verified native
+  /// completion because normalized input has no native-network incumbent.
   bool acceptOnlyImprovement = true;
-
-  /// Order the standalone acceptance tuple as (depth, entanglers, gate count)
-  /// instead of (entanglers, depth, gate count). It changes acceptance only,
-  /// not the candidate scoring heuristic; use parallelizationCredit to bias
-  /// search. True permits extra entanglers for a strict depth improvement.
-  /// This cost treats SWAP as three CNOTs and each rotation as one gate; it is
-  /// not the combined optimizer's mechanical-lowering cost. Has no effect when
-  /// acceptOnlyImprovement is false, as in the combined optimizer.
-  bool preferDepth = false;
 
   /// Select terminal joint Z-measurement equivalence instead of full-unitary
   /// preservation. True can remove rotations invisible to all final outcomes,
@@ -194,6 +205,25 @@ struct Result {
 Result synthesize(unsigned width, const std::vector<Gate> &, const Options &,
                   SearchBudget *budget = nullptr,
                   uint64_t *verificationNs = nullptr);
+
+/// Joint terminal readout on the specified physical wires. Empty error means
+/// success; returns no partial network on invalid/dependent readouts.
+Result synthesizeReadout(unsigned width, const std::vector<Pauli> &,
+                         const std::vector<unsigned> &readoutWires,
+                         const Options &);
+
+/// Reconstruct a normalized measured program. The returned gate network
+/// includes terminal readout Cliffords; measurements are Z on readoutWires.
+/// Every candidate is replay checked before selection. No full-unitary or
+/// classical output-permutation equivalence is assumed.
+pbc::Result synthesizeMeasured(unsigned width, const std::vector<Gate> &,
+                               const std::vector<Pauli> &,
+                               const std::vector<unsigned> &readoutWires,
+                               const Options &, SearchBudget * = nullptr);
+
+/// Gate cost in the configured primitive basis; includes exact Clifford+T
+/// lowering of one-wire rotations. Does not approximate arbitrary rotations.
+double nativeGateCost(const std::vector<Gate> &, const Options &);
 
 /// Independent traversal of the emitted circuit: pull Cliffords through its
 /// rotations and compare the partially commuting rotation words and exact

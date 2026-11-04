@@ -446,7 +446,7 @@ a T-only experiment with explicit final entangler/depth growth guards:
 
 ```sh
 cudaq-opt input.qke \
-  --quake-try-pbc='graph-synthesis=false max-two-qubit-growth=0 max-depth-growth=0 telemetry=pbc.jsonl' \
+  --quake-try-pbc='objective=t-count graph-synthesis=false max-two-qubit-growth=0 max-depth-growth=0 telemetry=pbc.jsonl' \
   -o output.qke
 ```
 
@@ -463,7 +463,7 @@ including invalid nested controls for a disabled strategy.
 |---|---|---|
 | `t-count` | `true` | Enable the T-reduction family: merging and commuting-block decoding. Disabling saves its search/proof work; graph preprocessing can still merge rotations. |
 | `graph-synthesis` | `true` | Enable checked graph-synthesis candidates and the temporary-growth/reconstruction branch. Disabling leaves the enabled T and total-gate strategies. This controls an internal candidate strategy, not an alternative final MLIR lowering route. Disabling all three strategy families leaves the function unchanged. |
-| `objective` | `t-count` | Choose `t-count`, `t-depth`, `entanglers`, `depth`, or `total-gates`. Ranking is lexicographic: a later metric cannot compensate for a worse earlier metric. `total-gates` ranks total gates first and forbids a baseline T increase. Changing the objective does not retune graph scoring weights. |
+| `objective` | `total-gates` | Choose `t-count`, `t-depth`, `entanglers`, `depth`, or `total-gates`. Ranking is lexicographic: a later metric cannot compensate for a worse earlier metric. `total-gates` ranks total gates first and forbids a baseline T increase. Changing the objective does not retune graph scoring weights. |
 | `portfolio-rounds` | `2` | Positive maximum number of combined T/graph/total-gate composition rounds. More rounds can expose further opportunities, but consume the shared budget; convergence may stop earlier. Distinct from `rounds` inside each T search. |
 | `portfolio-beam-width` | `2` | Retain this many distinct combined candidates between rounds; valid range 1–64. One is greedy; larger values preserve alternatives at greater memory/work cost and may spend the budget before later rounds. |
 | `max-two-qubit-growth` | `4294967295` | Absolute final mechanical entangler allowance above the original input, not a percentage. Zero forbids net growth. The default is permissive but finite; a T improvement can otherwise come with many additional entanglers. |
@@ -1169,3 +1169,215 @@ skip does not satisfy reproduction. The measured table contains emitted outputs,
 never native candidate estimates.
 
 <!-- END ADDITIONAL FIVE -->
+
+<!-- BEGIN FULL CI LIVE RUN -->
+## Appendix F. CI FTQC Clifford+T benchmark
+
+The selection contains all **216 Clifford+T cases** in cudaq-bench's full CI
+profile: 203 corpus cases and 13 generated cases. The measurements below cover
+the first **84 attempted cases**; **132 remain unstarted**. Execution stopped
+after the in-flight rows finished. CUDA-Q, Qiskit and the compiled PBC pass use
+the same input circuits, with one replication per attempted case. These are
+partial-selection results, not a full-suite aggregate.
+
+### F.1 Configuration
+
+The benchmark source is cudaq-bench commit
+`2f4d84d78b4eae13d4e479e9453f877f164a838b`; CUDA-Q is the local Debug build at
+`b09ae4ad1d21a086417a8875bdf0648f6ad99c96`. The executable SHA-256 is
+`5dc022b783b0068021ac9b5bce1c4c1ed93cb0b50ebbbe6ae73a0b4c0133dcdd`.
+The corpus archive is checked against the snapshot's LFS lock.
+
+The suite builds each Qiskit circuit, saves its QPY, imports it using
+`cudaq.contrib.from_qiskit`, performs the builder's AOT compilation, and writes
+that Quake to disk. CUDA-Q runs `canonicalize`,
+`hw-jit-prep-pipeline{allow-early-exit=false}`, `jit-deploy-pipeline`, the
+snapshot's complete Clifford+T target pipeline, and
+`jit-finalize-pipeline{lower-device-calls=true}`. The target includes one-qubit
+fusion and `normalize-1q-clifford-t`. A deterministic preflight matches the
+native runtime's gate totals and T depth on exact U3, Toffoli and Trotter inputs.
+Stock and PBC share the synthesized prefix through its last `dqe`; PBC inserts
+`quake-try-pbc` before the common
+`func.func(regtomem),symbol-dce` suffix and standard JIT finalization. The PBC
+branch removes compiler-generated output annotations with the existing
+`func.func(erase-implicit-output)` pass before `quake-try-pbc`; stock retains
+those annotations. This pass removes no quantum gate or explicit measurement.
+Equivalence checks retain the fixed physical-qubit and measurement contract.
+The per-case synthesis epsilon defaults to 0.001. CUDA-Q uses the target's seed
+0; sharing the prefix prevents synthesis
+variation between the paired outputs.
+
+PBC uses the 40 options in Appendix B with Appendix E's limits:
+`max-gates=262144`, `max-operations=1048576`, and `max-work=4000000000`.
+The work limit is `1000000000` for `hwb10` and
+`basis_trotter_n4_transpiled`. Graph synthesis remains disabled; total gates are
+the objective and two-qubit growth is prohibited. Qiskit 2.6.0 uses the suite's
+Clifford+T pass manager at optimization level 2 and seed 0. Its output is
+translated to `h,s,sdg,t,tdg,x,y,z,cx,cy,cz,swap` for the comparison; native CI
+metrics and final layout are retained separately.
+
+Four cases contain classical control flow unsupported by CUDA-Q's importer:
+`feynman:inverseqft1`, `feynman:inverseqft2`,
+`qasmbench:qasmbench_small_ipea_n2_ipea_n2`, and
+`qasmbench:qasmbench_small_ipea_n2_ipea_n2_transpiled`.
+An audit of the published CI results confirmed these four skips. This partial
+run reached the two inverse-QFT cases: CUDA-Q skipped them, PBC was unavailable,
+and Qiskit succeeded. Their Qiskit metrics use the suite's worst-case branch
+resource bounds. Both IPEA cases remain unstarted.
+
+### F.2 Measurements
+
+Counts are taken from emitted final circuits, excluding measurements and scalar
+global phase. Triples below are CUDA-Q / Qiskit / PBC. PBC is checked against
+stock with identical physical readout order and register names. Identical final
+gate sequences and physical readouts prove an unchanged circuit; otherwise
+MQT QCEC 3.11.0 checks
+unitary equivalence up to global phase. It uses alternating decision diagrams
+up to 15 qubits and ZX above that, with a 20-second limit; the Appendix E
+lookahead settings give hwb10 and QFT-160 180 seconds. Inconclusive checks are
+reported explicitly and excluded from verified-pair aggregates. A pass limit
+or unsupported-input fallback is distinguished from an optimized result.
+
+<!-- BEGIN FULL SUITE RESULTS -->
+**Coverage: 84/216 cases attempted; 132 unstarted. Verified CUDA-Q/PBC pairs: 73.**
+
+| Compiler | Compilation succeeded | Failed | Skipped / unavailable |
+|---|---:|---:|---:|
+| CUDA-Q | 80 | 2 | 2 |
+| Qiskit 2.6.0 | 84 | 0 | 0 |
+| PBC | 79 | 1 | 4 |
+
+Among the 73 verified pairs, PBC reduces total gates on 64 and ties on 9; their combined gate count is 1,702,673 → 1,621,238 (4.78% reduction). This aggregate excludes unverified or unavailable pairs.
+
+| Case | CUDA-Q total | Qiskit total | PBC total | T count (C/Q/P) | Two-qubit count (C/Q/P) | Depth (C/Q/P) | T depth (C/Q/P) | Outcome / verification |
+|---|---:|---:|---:|---|---|---|---|---|
+| feynman:adder | 122 | 138 | 106 | 32 / 48 / 32 | 57 / 65 / 53 | 103 / 99 / 95 | 32 / 32 / 32 | committed: verified admissible improvement; equivalent |
+| feynman:adder_8 | 727 | 875 | 621 | 215 / 361 / 173 | 347 / 409 / 320 | 228 / 246 / 205 | 74 / 90 / 66 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:barenco_tof_10 | 365 | 427 | 342 | 100 / 192 / 100 | 176 / 192 / 168 | 324 / 322 / 281 | 88 / 128 / 87 | committed: verified admissible improvement; equivalent |
+| feynman:barenco_tof_3 | 50 | 56 | 46 | 16 / 24 / 16 | 22 / 24 / 21 | 44 / 42 / 41 | 16 / 16 / 16 | committed: verified admissible improvement; equivalent |
+| feynman:barenco_tof_4 | 95 | 109 | 88 | 28 / 48 / 28 | 44 / 48 / 42 | 84 / 82 / 77 | 28 / 32 / 27 | committed: verified admissible improvement; equivalent |
+| feynman:barenco_tof_5 | 140 | 162 | 130 | 40 / 72 / 40 | 66 / 72 / 63 | 124 / 122 / 111 | 38 / 48 / 37 | committed: verified admissible improvement; equivalent |
+| feynman:bigadder | 242 | 274 | 209 | 64 / 96 / 64 | 114 / 130 / 106 | 160 / 152 / 144 | 48 / 48 / 48 | committed: verified admissible improvement; equivalent |
+| feynman:csla_mux_3 | 161 | 157 | 156 | 64 / 64 / 62 | 76 / 72 / 72 | 69 / 68 / 68 | 26 / 25 / 26 | committed: verified admissible improvement; equivalent |
+| feynman:csum_mux_9 | 392 | 420 | 308 | 140 / 196 / 84 | 168 / 168 / 168 | 61 / 60 / 54 | 23 / 24 / 16 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:gf2_10_mult | 1088 | 1257 | 1088 | 410 / 600 / 410 | 609 / 609 / 609 | 293 / 307 / 292 | 117 / 134 / 118 | committed: verified admissible improvement; equivalent |
+| feynman:gf2_128_mult | 165019 | 197499 | 165019 | 65664 / 98304 / 65664 | 98685 / 98685 / 98685 | 4073 / 4326 / 4073 | 1652 / 1905 / 1652 | skipped: no admissible improvement; identical gate sequence |
+| feynman:gf2_16_mult | 2703 | 3179 | 2703 | 1040 / 1536 / 1040 | 1581 / 1581 / 1581 | 491 / 520 / 491 | 196 / 225 / 196 | skipped: no admissible improvement; identical gate sequence |
+| feynman:gf2_256_mult | — | 788219 | — | — / 393216 / — | — / 393981 / — | — / 8671 / — | — / 3824 / — | failed; stock-prefix: timeout; not checked |
+| feynman:gf2_32_mult | 10562 | 12538 | 10562 | 4128 / 6144 / 4128 | 6268 / 6268 / 6268 | 1003 / 1064 / 1003 | 404 / 465 / 404 | skipped: no admissible improvement; identical gate sequence |
+| feynman:gf2_4_mult | 194 | 213 | 193 | 68 / 96 / 68 | 99 / 99 / 99 | 102 / 106 / 102 | 40 / 45 / 40 | committed: verified admissible improvement; equivalent |
+| feynman:gf2_5_mult | 304 | 332 | 302 | 115 / 155 / 115 | 154 / 154 / 154 | 132 / 138 / 131 | 53 / 59 / 53 | committed: verified admissible improvement; equivalent |
+| feynman:gf2_64_mult | 41547 | 49595 | 41547 | 16448 / 24576 / 16448 | 24765 / 24765 / 24765 | 2027 / 2152 / 2027 | 820 / 945 / 820 | skipped: no admissible improvement; identical gate sequence |
+| feynman:gf2_6_mult | 414 | 465 | 411 | 150 / 216 / 150 | 221 / 221 / 221 | 166 / 174 / 166 | 66 / 75 / 66 | committed: verified admissible improvement; equivalent |
+| feynman:gf2_7_mult | 553 | 627 | 550 | 217 / 301 / 217 | 300 / 300 / 300 | 198 / 208 / 198 | 80 / 90 / 80 | committed: verified admissible improvement; equivalent |
+| feynman:gf2_8_mult | 709 | 819 | 705 | 264 / 384 / 264 | 405 / 405 / 405 | 235 / 248 / 235 | 92 / 105 / 92 | committed: verified admissible improvement; equivalent |
+| feynman:gf2_9_mult | 889 | 1023 | 887 | 351 / 495 / 351 | 494 / 494 / 494 | 260 / 273 / 258 | 106 / 119 / 104 | committed: verified admissible improvement; equivalent |
+| feynman:grover_5 | 668 | 732 | 500 | 178 / 296 / 166 | 248 / 288 / 228 | 533 / 498 / 429 | 164 / 192 / 160 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:ham15_high | 3659 | 4789 | 3410 | 1021 / 2173 / 1019 | 1817 / 2149 / 1722 | 2993 / 3071 / 2659 | 871 / 1184 / 873 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:ham15_low | 375 | 427 | 364 | 97 / 147 / 97 | 220 / 236 / 216 | 270 / 273 / 256 | 77 / 85 / 76 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:ham15_med | 871 | 1156 | 771 | 242 / 504 / 211 | 428 / 534 / 393 | 692 / 758 / 574 | 195 / 283 / 169 | committed: verified admissible improvement; verification: probably_not_equivalent; probably_not_equivalent |
+| feynman:hwb10 | 60169 | 69664 | 54688 | 16437 / 26915 / 15891 | 31506 / 34828 / 30007 | 38981 / 38548 / 36910 | 11807 / 12863 / 11783 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:hwb11 | 166051 | 194163 | — | 45638 / 75372 / — | 87705 / 97615 / — | 117176 / 115613 / — | 33842 / 39133 / — | failed; pbc: timeout; not checked |
+| feynman:hwb12 | 326567 | 386733 | 326567 | 87493 / 152755 / 87493 | 170007 / 191205 / 170007 | 232046 / 225941 / 232046 | 65173 / 77375 / 65173 | skipped: native gate limit; identical gate sequence |
+| feynman:hwb6 | 229 | 249 | 212 | 75 / 97 / 75 | 108 / 116 / 105 | 166 / 163 / 152 | 57 / 59 / 55 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:hwb8 | 12546 | 14077 | 11583 | 3617 / 5437 / 3517 | 6585 / 7073 / 6305 | 8522 / 8231 / 8055 | 2594 / 2662 / 2607 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:inverseqft1 | — | 419 | — | — / 156 / — | — / 0 / — | — / 416 / — | — / 156 / — | unsupported classical control flow; not checked |
+| feynman:inverseqft2 | — | 116 | — | — / 40 / — | — / 0 / — | — / 108 / — | — / 39 / — | unsupported classical control flow; not checked |
+| feynman:mod5_4 | 57 | 60 | 37 | 16 / 22 / 7 | 28 / 28 / 19 | 50 / 48 / 30 | 14 / 16 / 6 | committed: verified admissible improvement; equivalent |
+| feynman:mod_adder_1024 | 3035 | 3859 | 2780 | 1011 / 1739 / 1011 | 1392 / 1702 / 1306 | 2472 / 2539 / 2115 | 746 / 989 / 758 | committed: verified admissible improvement; equivalent |
+| feynman:mod_mult_55 | 109 | 117 | 92 | 37 / 45 / 35 | 44 / 48 / 40 | 52 / 51 / 46 | 20 / 19 / 18 | committed: verified admissible improvement; equivalent |
+| feynman:mod_red_21 | 231 | 262 | 196 | 73 / 107 / 73 | 93 / 105 / 87 | 176 / 166 / 149 | 55 / 59 / 55 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:qcla_adder_10 | 440 | 481 | 419 | 162 / 212 / 162 | 205 / 215 / 200 | 72 / 75 / 66 | 26 / 29 / 25 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:qcla_com_7 | 335 | 406 | 298 | 95 / 169 / 95 | 152 / 174 / 144 | 77 / 85 / 72 | 26 / 34 / 26 | committed: verified admissible improvement; equivalent |
+| feynman:qcla_mod_7 | 742 | 827 | 678 | 249 / 351 / 237 | 348 / 366 / 324 | 211 / 211 / 194 | 74 / 83 / 73 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:qft | 496 | 1021 | 411 | 199 / 299 / 195 | 12 / 12 / 12 | 330 / 670 / 266 | 131 / 189 / 127 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:qft_4 | 171 | 484 | 157 | 67 / 146 / 67 | 46 / 45 / 46 | 146 / 445 / 130 | 52 / 127 / 52 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| feynman:rc_adder_6 | 191 | 185 | 147 | 63 / 67 / 47 | 91 / 83 / 76 | 111 / 103 / 91 | 40 / 39 / 31 | committed: verified admissible improvement; equivalent |
+| feynman:tof_10 | 215 | 247 | 183 | 71 / 103 / 71 | 86 / 102 / 78 | 180 / 171 / 157 | 62 / 68 / 62 | committed: verified admissible improvement; equivalent |
+| feynman:tof_3 | 40 | 44 | 36 | 15 / 19 / 15 | 16 / 18 / 15 | 33 / 31 / 31 | 13 / 12 / 13 | committed: verified admissible improvement; equivalent |
+| feynman:tof_4 | 65 | 73 | 57 | 23 / 31 / 23 | 26 / 30 / 24 | 54 / 51 / 49 | 20 / 20 / 20 | committed: verified admissible improvement; equivalent |
+| feynman:tof_5 | 90 | 102 | 78 | 31 / 43 / 31 | 36 / 42 / 33 | 75 / 71 / 67 | 27 / 28 / 27 | committed: verified admissible improvement; equivalent |
+| feynman:vbe_adder_3 | 101 | 128 | 97 | 24 / 56 / 24 | 54 / 58 / 52 | 66 / 76 / 61 | 16 / 30 / 16 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_large_adder_n118_adder_n118 | 1574 | 1782 | 1366 | 416 / 624 / 416 | 741 / 845 / 689 | 643 / 639 / 635 | 224 / 224 / 224 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_large_adder_n118_adder_n118_transpiled | 1809 | 1834 | 1366 | 416 / 624 / 416 | 741 / 845 / 689 | 762 / 679 / 635 | 224 / 224 / 224 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_adder_n28_adder_n28 | 364 | 412 | 316 | 96 / 144 / 96 | 171 / 195 / 159 | 193 / 189 / 185 | 64 / 64 / 64 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_large_adder_n28_adder_n28_transpiled | 419 | 424 | 316 | 96 / 144 / 96 | 171 / 195 / 159 | 222 / 199 / 185 | 64 / 64 / 64 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_adder_n433_adder_n433 | 5809 | 6577 | 5041 | 1536 / 2304 / 1536 | 2736 / 3120 / 2544 | 2218 / 2214 / 2210 | 784 / 784 / 784 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_large_adder_n433_adder_n433_transpiled | 6674 | 6769 | 5041 | 1536 / 2304 / 1536 | 2736 / 3120 / 2544 | 2652 / 2359 / 2210 | 784 / 784 / 784 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_large_adder_n64_adder_n64 | 848 | 960 | 736 | 224 / 336 / 224 | 399 / 455 / 371 | 373 / 369 / 365 | 128 / 128 / 128 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_large_adder_n64_adder_n64_transpiled | 975 | 988 | 736 | 224 / 336 / 224 | 399 / 455 / 371 | 438 / 391 / 365 | 128 / 128 / 128 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n34_ising_n34 | 4966 | 10636 | 4018 | 1914 / 2841 / 1906 | 66 / 66 / 66 | 309 / 561 / 255 | 124 / 142 / 124 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n34_ising_n34_transpiled | 4977 | 10515 | 4006 | 1914 / 2841 / 1900 | 66 / 66 / 66 | 317 / 563 / 254 | 124 / 142 / 123 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n42_ising_n42 | 6049 | 13102 | 4926 | 2348 / 3500 / 2328 | 82 / 82 / 82 | 324 / 570 / 256 | 122 / 143 / 122 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n420_ising_n420 | 62106 | 132380 | 49981 | 23986 / 36123 / 23684 | 838 / 838 / 838 | 301 / 585 / 242 | 116 / 150 / 116 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n420_ising_n420_transpiled | 62449 | 133768 | 49901 | 23986 / 36123 / 23684 | 838 / 838 / 838 | 293 / 620 / 239 | 116 / 150 / 116 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n66_ising_n66 | 9606 | 20394 | 7686 | 3712 / 5564 / 3646 | 130 / 130 / 130 | 306 / 557 / 248 | 120 / 146 / 118 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n66_ising_n66_transpiled | 9650 | 20373 | 7651 | 3712 / 5564 / 3644 | 130 / 130 / 129 | 301 / 561 / 246 | 120 / 146 / 120 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n98_ising_n98 | 14421 | 30133 | 11567 | 5565 / 8375 / 5483 | 194 / 194 / 194 | 312 / 574 / 249 | 120 / 146 / 118 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_ising_n98_ising_n98_transpiled | 14510 | 30263 | 11536 | 5563 / 8375 / 5481 | 194 / 194 / 194 | 315 / 570 / 245 | 120 / 146 / 118 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_multiplier_n350_multiplier_n350 | 166584 | 304183 | 161182 | 39202 / 136080 / 39062 | 92754 / 145880 / 92148 | 85210 / 141075 / 80334 | 21622 / 53489 / 21486 | committed: verified admissible improvement; verification: inconclusive; inconclusive |
+| qasmbench:qasmbench_large_multiplier_n350_multiplier_n350_transpiled | 176925 | 326475 | 161229 | 39202 / 136080 / 39062 | 92754 / 145880 / 92197 | 94856 / 160187 / 80315 | 21622 / 53489 / 21487 | committed: verified admissible improvement; verification: inconclusive; inconclusive |
+| qasmbench:qasmbench_large_multiplier_n400_multiplier_n400 | 217578 | 397635 | 217578 | 51202 / 177920 / 51202 | 121204 / 190720 / 121204 | 111400 / 184438 / 111400 | 28307 / 69929 / 28307 | skipped: search size/work/deadline limit; identical gate sequence |
+| qasmbench:qasmbench_large_multiplier_n400_multiplier_n400_transpiled | — | 426711 | — | — / 177920 / — | — / 190720 / — | — / 209467 / — | — / 69929 / — | failed; stock-prefix: timeout; not checked |
+| qasmbench:qasmbench_large_multiplier_n45_multiplier_n45 | 2756 | 4796 | 2599 | 650 / 2124 / 634 | 1500 / 2286 / 1428 | 1370 / 2224 / 1252 | 333 / 846 / 319 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_multiplier_n45_multiplier_n45_transpiled | 2985 | 5189 | 2611 | 650 / 2124 / 634 | 1500 / 2286 / 1430 | 1518 / 2502 / 1247 | 333 / 846 / 319 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_multiplier_n75_multiplier_n75 | 7651 | 13619 | 7307 | 1802 / 6060 / 1774 | 4206 / 6510 / 4082 | 3833 / 6304 / 3547 | 942 / 2394 / 916 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_multiplier_n75_multiplier_n75_transpiled | 8215 | 14681 | 7320 | 1802 / 6060 / 1774 | 4206 / 6510 / 4086 | 4257 / 7122 / 3533 | 942 / 2394 / 916 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_large_qft_n160_qft_n160 | 119613 | 380659 | 96773 | 46959 / 105786 / 46029 | 2790 / 5700 / 2790 | 26147 / 65327 / 21420 | 10551 / 17920 / 10392 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_qft_n160_qft_n160_transpiled | 106920 | 380702 | 87577 | 41873 / 105786 / 41247 | 2790 / 5700 / 2790 | 25485 / 65327 / 21369 | 10067 / 17919 / 10059 | committed: verified admissible improvement; verification: no_information; no_information |
+| qasmbench:qasmbench_large_qft_n29_qft_n29 | 18253 | 57351 | 15052 | 7266 / 15920 / 7122 | 432 / 722 / 432 | 4479 / 10962 / 3602 | 1774 / 2986 / 1746 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_qft_n29_qft_n29_transpiled | 16994 | 57394 | 13851 | 6634 / 15920 / 6528 | 432 / 722 / 432 | 4343 / 10962 / 3549 | 1683 / 2985 / 1674 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_large_qft_n320_qft_n320 | 239671 | 775539 | 239671 | 95439 / 215546 / 95439 | 5670 / 11780 / 5670 | 52701 / 131727 / 52701 | 21271 / 36160 / 21271 | skipped: search size/work/deadline limit; identical gate sequence |
+| qasmbench:qasmbench_large_qft_n320_qft_n320_transpiled | 216825 | 775582 | 216825 | 84913 / 215546 / 84913 | 5670 / 11780 / 5670 | 52650 / 131727 / 52650 | 20307 / 36159 / 20307 | skipped: search size/work/deadline limit; identical gate sequence |
+| qasmbench:qasmbench_large_qft_n63_qft_n63 | 44289 | 141263 | 36199 | 17568 / 39244 / 17220 | 1044 / 2014 / 1044 | 10041 / 25072 / 8228 | 4052 / 6862 / 3990 | committed: verified admissible improvement; verification: no_information; no_information |
+| qasmbench:qasmbench_large_qft_n63_qft_n63_transpiled | 40124 | 141306 | 32643 | 15780 / 39244 / 15424 | 1044 / 2014 / 1044 | 9561 / 25072 / 8175 | 3859 / 6861 / 3848 | committed: verified admissible improvement; verification: no_information; no_information |
+| qasmbench:qasmbench_medium_bigadder_n18_bigadder_n18 | 242 | 274 | 209 | 64 / 96 / 64 | 114 / 130 / 106 | 160 / 152 / 144 | 48 / 48 / 48 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_medium_bigadder_n18_bigadder_n18_transpiled | 278 | 282 | 209 | 64 / 96 / 64 | 114 / 130 / 106 | 171 / 157 / 142 | 48 / 48 / 48 | committed: verified admissible improvement; equivalent |
+| qasmbench:qasmbench_medium_ising_n26_ising_n26 | 3785 | 7480 | 3045 | 1454 / 2132 / 1442 | 50 / 50 / 50 | 282 / 532 / 228 | 110 / 145 / 109 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+| qasmbench:qasmbench_medium_ising_n26_ising_n26_transpiled | 3814 | 7489 | 3035 | 1454 / 2132 / 1444 | 50 / 50 / 50 | 284 / 531 / 225 | 110 / 145 / 110 | committed: verified admissible improvement; equivalent_up_to_global_phase |
+<!-- END FULL SUITE RESULTS -->
+
+Stock compilation timed out for `feynman:gf2_256_mult` and the transpiled
+400-qubit multiplier; PBC timed out for `feynman:hwb11`. Six compiled pairs
+remain unverified: `ham15_med` returned ZX `probably_not_equivalent`; both
+350-qubit multiplier variants, transpiled QFT-160 and both QFT-63 variants
+returned inconclusive results. These six pairs are excluded from the verified
+aggregate. No secondary verification results are included.
+
+### F.3 Reproduction
+
+The local evidence bundle is `build/pbc-ci-runtime-2026-11-04`. It contains the
+216-case inventory, frozen source snapshot and corpus cache, expanded target
+pipeline, scripts, package versions, configuration manifest, complete result
+matrix and per-case commands, inputs, outputs, telemetry and diagnostics.
+The attempted CUDA-Q/PBC cases use the complete runtime pipeline above.
+Previously measured Qiskit results are reused only when saved QPY hashes match;
+`inherited-qiskit.json` records their provenance. `summary.json` audits coverage,
+configuration hashes and the inputs and outputs supporting each result;
+`status.json` records the stopped state. This is a local run of the CI selection
+and compiler configuration, not a publication to NVDataFlow. The recorded
+driver command was:
+
+```bash
+python3 build/pbc-ci-runtime-2026-11-04/run.py
+```
+
+The driver sets `PYTHONPATH=build/python:build/pauli-ir/verification-deps`,
+`LD_LIBRARY_PATH=build/lib`, `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`, and
+the corpus-cache path, and unsets `CUDAQ_PBC_TELEMETRY`. At most three cases run
+concurrently, with sequential stages per case. Each frontend, stock or Qiskit
+stage has 600 CPU / 605 wall seconds; PBC has 1200 CPU / 1250 wall seconds.
+QCEC has 30 CPU / 35 wall seconds, or 200 CPU / 210 wall seconds for the two
+lookahead cases. These are local per-stage limits, not CI timing measurements.
+
+No extra virtual-address-space limit is imposed, matching CI's launcher.
+Stack size is 64 MiB and core dumps are disabled.
+The driver updates the table and machine-readable matrix as cases finish;
+failures do not terminate the remaining selection. Reproduction needs the
+local evidence bundle and a fresh output directory, especially after compiler
+changes, to preserve the executable identity of these measurements.
+<!-- END FULL CI LIVE RUN -->
+
+## Changelog
+
+- **2026-11-04:** Added partial CI FTQC results and reproduction in Appendix F; corrected the default objective to `total-gates`.

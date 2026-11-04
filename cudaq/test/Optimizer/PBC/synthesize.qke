@@ -1,0 +1,56 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+// RUN: cudaq-opt %s --quake-to-pbc='assume-measure-all=true' --quake-synthesize-pbc='synthesis-simplify=false' --verify-each | FileCheck %s --check-prefix=NATIVE
+// RUN: cudaq-opt %s --quake-to-pbc='assume-measure-all=true' --quake-synthesize-pbc='synthesis-native-entanglers=cx synthesis-simplify=false' --verify-each | FileCheck %s --check-prefix=CX
+// RUN: not cudaq-opt %s --quake-to-pbc='assume-measure-all=true' --quake-synthesize-pbc='synthesis-native-entanglers=swap' 2>&1 | FileCheck %s --check-prefix=INVALID
+
+// The transformed readout must reconstruct the physical swap, preserving
+// both classical result identities. The study profile prices SWAP as one gate.
+func.func @physical_order(%a: !quake.wire, %b: !quake.wire) -> (!quake.measure, !quake.measure) {
+  %s:2 = quake.swap %a, %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  %m, %q = quake.mz %s#0 name "first" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %n, %r = quake.mz %s#1 name "second" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %q : !quake.wire
+  quake.sink %r : !quake.wire
+  return %m, %n : !quake.measure, !quake.measure
+}
+
+func.func @assume_measure_all(%a: !quake.wire, %b: !quake.wire) {
+  %s:2 = quake.swap %a, %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  quake.sink %s#0 : !quake.wire
+  quake.sink %s#1 : !quake.wire
+  return
+}
+
+// NATIVE-LABEL: func.func @physical_order
+// NATIVE-SAME: (%[[A:.*]]: !quake.wire, %[[B:.*]]: !quake.wire)
+// NATIVE-NOT: quake.x
+// NATIVE: %[[S:.*]]:2 = quake.swap %[[B]], %[[A]]
+// NATIVE-NOT: quake.swap
+// NATIVE: quake.mz %[[S]]#1 name "first"
+// NATIVE: quake.mz %[[S]]#0 name "second"
+// NATIVE-NOT: quake.exp_pauli
+// NATIVE-NOT: quake.mpp
+// NATIVE: return
+// NATIVE-LABEL: func.func @assume_measure_all
+// NATIVE: quake.swap
+// NATIVE: quake.mz
+// NATIVE: quake.mz
+// NATIVE: return
+
+// CX-LABEL: func.func @physical_order
+// CX-NOT: quake.swap
+// CX-COUNT-3: quake.x [
+// CX-NOT: quake.x
+// CX: quake.mz
+// CX: quake.mz
+// CX-NOT: quake.swap
+// CX: return
+
+// INVALID: Pauli synthesis requires CX or CZ in its native gate set

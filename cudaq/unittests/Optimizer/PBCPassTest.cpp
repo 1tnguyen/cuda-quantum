@@ -84,6 +84,11 @@ State runGadget(func::FuncOp function, unsigned col, unsigned outcomes) {
             } else if (!((b >> target) & 1))
               std::swap(state[b], state[b ^ (1u << target)]);
           }
+      } else if (isa<cudaq::quake::SwapOp>(op)) {
+        unsigned other = ids.lookup(gate.getTargets()[1]);
+        for (unsigned b = 0; b < state.size(); ++b)
+          if (((b >> target) & 1) && !((b >> other) & 1))
+            std::swap(state[b], state[b ^ (1u << target) ^ (1u << other)]);
       } else if (isa<cudaq::quake::RxOp, cudaq::quake::RyOp, cudaq::quake::RzOp,
                      cudaq::quake::ExpPauliOp>(op)) {
         unsigned x = 0, z = 0;
@@ -665,6 +670,9 @@ TEST_F(PBCBoundaryTest, DynamicWidthRoundTripRetainsHighQubitIdentity) {
     auto module = parseSourceString<ModuleOp>(source.str(), &context);
     ASSERT_TRUE(module);
     cudaq::opt::QuakeTryPBCOptions options;
+    // This test requests T reduction even when readout reconstruction adds
+    // a Clifford gate; the default total-gate objective correctly rejects it.
+    options.objective = "t-count";
     options.enableGraphSynthesis = false;
     PassManager pm(&context);
     pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeTryPBC(options));
@@ -714,6 +722,44 @@ TEST_F(PBCBoundaryTest, LimitsAndDisabledStrategiesLeaveNoStatistics) {
     unchanged(*module, cudaq::opt::createQuakeTryPBC(optional), true);
     if (mode < 3)
       unchanged(*module, cudaq::opt::createQuakeOptimizePBC(strict), true);
+  }
+}
+
+TEST_F(PBCBoundaryTest, MeasuredSynthesisLimitsSkipWithoutMutation) {
+  constexpr StringLiteral source = R"mlir(
+    func.func @test(%a: !quake.wire, %b: !quake.wire) -> (!quake.measure, !quake.measure) {
+      %angle = arith.constant -0.39269908169872414 : f64
+      %r:2 = quake.exp_pauli (%angle) %a, %b to "ZZ" : (f64, !quake.wire, !quake.wire) -> (!quake.wire, !quake.wire) {quake.pbc_angle = array<i64: -1, 8>}
+      %s = quake.exp_pauli (%angle) %r#0 to "X" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: -1, 8>}
+      %t:2 = quake.exp_pauli (%angle) %s, %r#1 to "ZZ" : (f64, !quake.wire, !quake.wire) -> (!quake.wire, !quake.wire) {quake.pbc_angle = array<i64: -1, 8>}
+      %m, %q = quake.mpp %t#0 to "Z" : (!quake.wire) -> (!quake.measure, !quake.wire)
+      %n, %p = quake.mpp %t#1 to "Z" : (!quake.wire) -> (!quake.measure, !quake.wire)
+      quake.sink %q : !quake.wire
+      quake.sink %p : !quake.wire
+      return %m, %n : !quake.measure, !quake.measure
+    }
+  )mlir";
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    SCOPED_TRACE(mode);
+    auto module = parseSourceString<ModuleOp>(source, &context);
+    ASSERT_TRUE(module);
+    cudaq::opt::QuakeTryPBCOptions optional;
+    cudaq::opt::QuakeSynthesizePBCOptions strict;
+    optional.enableTCount = false;
+    optional.enableGraphSynthesis = true;
+    optional.preserveCliffordNetwork = false;
+    optional.simplify = strict.simplify = false;
+    if (mode == 0)
+      optional.maxSteps = strict.maxSteps = 0;
+    else if (mode == 1)
+      optional.maxDependencies = strict.maxDependencies = 1;
+    else
+      optional.maxGates = strict.maxGates = 3;
+    // The strict pass proves this input actually hits a synthesis limit.
+    // The optional pass must retain the original IR, including attributes.
+    unchanged(*module, cudaq::opt::createQuakeSynthesizePBC(strict), false,
+              "limit exceeded");
+    unchanged(*module, cudaq::opt::createQuakeTryPBC(optional), true);
   }
 }
 
@@ -1066,4 +1112,42 @@ TEST_F(PBCBoundaryTest, MeasurementHandleSurvivesStrictAndOptionalRoundTrips) {
     });
     EXPECT_TRUE(succeeded(verify(*module)));
   }
+}
+
+TEST(PBCPass, ExplicitMeasureAllAndOfficialSynthesis) {
+  MLIRContext context;
+  context.loadDialect<arith::ArithDialect, func::FuncDialect,
+                      cudaq::quake::QuakeDialect, cudaq::cc::CCDialect>();
+  context.disableMultithreading();
+  auto module = parseSourceString<ModuleOp>(R"mlir(
+    func.func @test(%a: !quake.wire, %b: !quake.wire) {
+      %h = quake.h %a : (!quake.wire) -> !quake.wire
+      %t = quake.t %h : (!quake.wire) -> !quake.wire
+      %s:2 = quake.swap %t, %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+      quake.sink %s#0 : !quake.wire
+      quake.sink %s#1 : !quake.wire
+      return
+    }
+  )mlir",
+                                            &context);
+  ASSERT_TRUE(module);
+  PassManager pm(&context);
+  cudaq::opt::QuakeToPBCOptions normalization;
+  normalization.assumeMeasureAll = true;
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC(normalization));
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeVerifyPBC());
+  cudaq::opt::QuakeSynthesizePBCOptions synthesis;
+  synthesis.discrepancySteps = 0;
+  synthesis.simplify = false;
+  pm.addNestedPass<func::FuncOp>(
+      cudaq::opt::createQuakeSynthesizePBC(synthesis));
+  ASSERT_TRUE(succeeded(pm.run(*module)));
+  unsigned measured = 0, swaps = 0;
+  module->walk([&](cudaq::quake::MzOp) { ++measured; });
+  module->walk([&](cudaq::quake::SwapOp) { ++swaps; });
+  EXPECT_EQ(measured, 2u);
+  EXPECT_EQ(swaps, 1u);
+  module->walk([&](cudaq::quake::MppOp) { ADD_FAILURE() << "unlowered MPP"; });
+  module->walk(
+      [&](cudaq::quake::ExpPauliOp) { ADD_FAILURE() << "unlowered rotation"; });
 }
