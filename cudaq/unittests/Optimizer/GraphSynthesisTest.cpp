@@ -17,6 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
+#include "Pauli/SignedCliffordFrames.h"
 #include "gtest/gtest.h"
 #include <bit>
 #include <complex>
@@ -379,6 +380,169 @@ TEST(GraphSynthesis, MeasuredSynthesisPreservesAllJointOutcomeEffects) {
               std::abs(std::conj(before[i][outcome]) * before[j][outcome] -
                        std::conj(after[i][outcome]) * after[j][outcome]),
               1e-11);
+  }
+}
+
+TEST(GraphSynthesis, SignedFramesAllCliffordContexts) {
+  // Independent statevector channel oracle: test both T signs in every pair
+  // of Clifford contexts, including scalar phases omitted by the local DP.
+  namespace local = cudaq::pauli::graph::detail;
+  local::LocalCliffords group;
+  for (const auto &left : group.words)
+    for (const auto &right : group.words)
+      for (int sign : {-1, 1}) {
+        std::vector<Gate> word;
+        for (Kind k : left)
+          word.push_back({k, 0});
+        word.push_back(Gate::rotation({0, 1}, {sign, 4}));
+        for (Kind k : right)
+          word.push_back({k, 0});
+        std::string error;
+        auto result = local::signedFrameWord(word, 0, 7, nullptr, error);
+        ASSERT_TRUE(result) << error;
+        EXPECT_LE(result->size(), word.size());
+        std::array<State, 2> before, after;
+        for (unsigned col = 0; col < 2; ++col) {
+          State state(2);
+          state[col] = 1;
+          before[col] = simulate(word, state);
+          after[col] = simulate(*result, state);
+        }
+        for (unsigned i = 0; i < 2; ++i)
+          for (unsigned j = 0; j < 2; ++j)
+            for (unsigned r = 0; r < 2; ++r)
+              for (unsigned s = 0; s < 2; ++s)
+                ASSERT_LT(std::abs(before[i][r] * std::conj(before[j][s]) -
+                                   after[i][r] * std::conj(after[j][s])),
+                          1e-11);
+      }
+}
+
+TEST(GraphSynthesis, SignedFrameProofAndTerminalFreedom) {
+  namespace local = cudaq::pauli::graph::detail;
+  Gate t = Gate::rotation({0, 1}, {1, 4});
+  Gate tdg = Gate::rotation({0, 1}, {-1, 4});
+  std::string error;
+  auto result = local::signedFrameWord({{Kind::H, 0}, t, {Kind::Sdg, 0}}, 0, 7,
+                                       nullptr, error);
+  ASSERT_TRUE(result) << error;
+  EXPECT_EQ(result->size(), 2u);
+  EXPECT_FALSE(local::verifyLocalFrames({t}, {tdg}, 7));
+  EXPECT_TRUE(local::verifyLocalFrames({t}, {tdg}, 4));
+  EXPECT_FALSE(local::verifyLocalFrames({t}, {t, {Kind::X, 0}}, 4));
+  EXPECT_FALSE(local::verifyLocalFrames({t}, {}, 4)); // T-count guard
+  auto measured = local::signedFrameWord({{Kind::H, 0}, {Kind::S, 0}}, 0, 4,
+                                         nullptr, error);
+  auto discarded = local::signedFrameWord({{Kind::H, 0}, {Kind::S, 0}}, 0, 0,
+                                          nullptr, error);
+  ASSERT_TRUE(measured);
+  ASSERT_TRUE(discarded);
+  EXPECT_EQ(measured->size(), 1u);
+  EXPECT_TRUE(discarded->empty());
+}
+
+TEST(GraphSynthesis, SignedFrameBoundariesAndBudget) {
+  namespace local = cudaq::pauli::graph::detail;
+  using cudaq::pauli::QubitSet;
+  unsigned q = 64;
+  Gate t = Gate::rotation({0, QubitSet::single(q)}, {1, 4});
+  Gate opaque = Gate::rotation({0, QubitSet::single(q)}, {0, 1, 7});
+  std::vector<Gate> word{{Kind::H, q},     t,      {Kind::Sdg, q},
+                         {Kind::CX, q, 0}, opaque, {Kind::H, 0}};
+  std::string error;
+  cudaq::pauli::SearchBudget empty(0);
+  EXPECT_FALSE(local::optimizeSignedFrames(65, word, {0}, &empty, error));
+  EXPECT_TRUE(empty.stopped());
+  EXPECT_TRUE(error.empty());
+  auto result = local::optimizeSignedFrames(65, word, {0}, nullptr, error);
+  ASSERT_TRUE(result) << error;
+  ASSERT_EQ(result->size(), 5u);
+  EXPECT_EQ((*result)[2].kind, Kind::CX);
+  EXPECT_EQ((*result)[2].a, q);
+  EXPECT_EQ((*result)[3].angle, opaque.angle);
+  // Exercise the bounded-region cut with arbitrary input coherences.
+  std::vector<Gate> longWord;
+  for (unsigned i = 0; i < 200; ++i) {
+    longWord.push_back({Kind::H, 0});
+    longWord.push_back(Gate::rotation({0, 1}, {i % 2 ? -1 : 1, 4}));
+    longWord.push_back({Kind::Sdg, 0});
+  }
+  auto shortened =
+      local::optimizeSignedFrames(1, longWord, {0}, nullptr, error);
+  ASSERT_TRUE(shortened) << error;
+  std::array<State, 2> before, after;
+  for (unsigned i = 0; i < 2; ++i) {
+    State state(2);
+    state[i] = 1;
+    before[i] = simulate(longWord, state);
+    after[i] = simulate(*shortened, state);
+  }
+  for (unsigned outcome = 0; outcome < 2; ++outcome)
+    for (unsigned i = 0; i < 2; ++i)
+      for (unsigned j = 0; j < 2; ++j)
+        EXPECT_LT(std::abs(std::conj(before[i][outcome]) * before[j][outcome] -
+                           std::conj(after[i][outcome]) * after[j][outcome]),
+                  1e-11);
+}
+
+TEST(GraphSynthesis, SignedFramesRandomPartialMeasurementEffects) {
+  namespace local = cudaq::pauli::graph::detail;
+  std::mt19937 rng(0x5349474e);
+  for (unsigned trial = 0; trial < 32; ++trial) {
+    std::vector<Gate> input;
+    for (unsigned i = 0; i < 60; ++i) {
+      unsigned q = rng() % 2;
+      switch (rng() % 7) {
+      case 0:
+        input.push_back({Kind::H, q});
+        break;
+      case 1:
+        input.push_back({Kind::S, q});
+        break;
+      case 2:
+        input.push_back({Kind::Sdg, q});
+        break;
+      case 3:
+        input.push_back({Kind::CX, q, 1 - q});
+        break;
+      case 4:
+        input.push_back({Kind::CZ, q, 1 - q});
+        break;
+      default:
+        input.push_back(
+            Gate::rotation({0, uint64_t(1) << q}, {rng() % 2 ? -1 : 1, 4}));
+        break;
+      }
+    }
+    for (unsigned mask : {1u, 2u, 3u}) {
+      std::vector<unsigned> wires;
+      for (unsigned q = 0; q < 2; ++q)
+        if (mask & (1u << q))
+          wires.push_back(q);
+      std::string error;
+      auto result =
+          local::optimizeSignedFrames(2, input, wires, nullptr, error);
+      ASSERT_TRUE(result) << error;
+      EXPECT_LE(result->size(), input.size());
+      std::array<State, 4> before, after;
+      for (unsigned i = 0; i < 4; ++i) {
+        State state(4);
+        state[i] = 1;
+        before[i] = simulate(input, state);
+        after[i] = simulate(*result, state);
+      }
+      for (unsigned outcome = 0; outcome < 4; ++outcome)
+        for (unsigned i = 0; i < 4; ++i)
+          for (unsigned j = 0; j < 4; ++j) {
+            Complex lhs = 0, rhs = 0;
+            for (unsigned r = 0; r < 4; ++r)
+              if ((r & mask) == outcome) {
+                lhs += std::conj(before[i][r]) * before[j][r];
+                rhs += std::conj(after[i][r]) * after[j][r];
+              }
+            EXPECT_LT(std::abs(lhs - rhs), 1e-11);
+          }
+    }
   }
 }
 

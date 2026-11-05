@@ -17,6 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "cudaq/Optimizer/Pauli/GateCount.h"
+#include "CliffordDictionary.h"
 #include "TCountInternal.h"
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
 #include <algorithm>
@@ -289,65 +290,11 @@ Circuit reduce(const Circuit &input, SearchBudget &budget, unsigned window) {
 /// A signed tableau key for at most two wires. Each generator image occupies
 /// five bits: X support, Z support and sign. Scalar phase is checked
 /// separately.
-using Key = uint32_t;
-/// Encode the identity action on the local Pauli generators.
-Key identity(unsigned n) {
-  Key key = 0;
-  for (unsigned i = 0; i < 2 * n; ++i)
-    key |= (i < n ? 1u << i : 1u << (i - n + 2)) << (5 * i);
-  return key;
-}
-/// Conjugate every generator image by one appended Clifford.
-Key advance(Key key, const Gate &g, unsigned n) {
-  Key next = 0;
-  for (unsigned i = 0; i < 2 * n; ++i) {
-    unsigned v = (key >> (5 * i)) & 31;
-    Pauli p{v & 3u, (v >> 2) & 3u, bool(v & 16)};
-    p = conjugate(p, g);
-    unsigned value = unsigned(p.sign) << 4;
-    for (unsigned q : p.x.set_bits())
-      value |= 1u << q;
-    for (unsigned q : p.z.set_bits())
-      value |= 1u << (q + 2);
-    next |= value << (5 * i);
-  }
-  return next;
-}
-/// A shortest Clifford word, stored as a predecessor chain instead of copying
-/// a full sequence into each database entry. Database size is fixed by width.
-struct Entry {
-  /// Tableau before the final generator in this shortest word.
-  Key previous;
-  /// Final generator appended to the predecessor word.
-  Gate gate;
-  /// Number of named gates, excluding scalar correction.
-  unsigned length;
-};
-using Database = std::unordered_map<Key, Entry>;
-/// Enumerate the finite local Clifford group in breadth-first word order.
-Database buildDatabase(unsigned n) {
-  std::vector<Gate> generators;
-  for (unsigned q = 0; q < n; ++q)
-    for (auto kind : {Kind::H, Kind::S, Kind::Sdg, Kind::X, Kind::Y, Kind::Z})
-      generators.push_back({kind, q});
-  if (n == 2)
-    for (auto gate : {Gate{Kind::CX, 0, 1}, Gate{Kind::CX, 1, 0},
-                      Gate{Kind::CZ, 0, 1}, Gate{Kind::Swap, 0, 1}})
-      generators.push_back(gate);
-  Key root = identity(n);
-  Database db{{root, {root, {}, 0}}};
-  std::vector<Key> queue{root};
-  for (size_t i = 0; i < queue.size(); ++i) {
-    auto state = queue[i];
-    unsigned length = db.at(state).length;
-    for (auto g : generators) {
-      Key next = advance(state, g, n);
-      if (db.emplace(next, Entry{state, g, length + 1}).second)
-        queue.push_back(next);
-    }
-  }
-  return db;
-}
+using clifford_dictionary::advance;
+using clifford_dictionary::buildDatabase;
+using clifford_dictionary::Database;
+using clifford_dictionary::identity;
+using clifford_dictionary::Key;
 
 /// Replace a contiguous small Clifford window by a shortest native-basis word.
 /// BFS ignores scalar phase; exact replay recovers and checks the eighth-root

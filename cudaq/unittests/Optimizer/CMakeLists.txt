@@ -17,6 +17,34 @@ add_cudaq_unittest("OptimizerUnitTests" "optimizer-unit-tests"
         StatePreparationTest.cpp
         PBCPassTest.cpp
         GraphSynthesisTest.cpp
+        SynthesisCandidatesTest.cpp
+        SynthesisCompletionTest.cpp
+        SynthesisCostTest.cpp
+        SynthesisDependenciesTest.cpp
+        SynthesisDependencyIntegrationTest.cpp
+        SynthesisRepresentationsTest.cpp
+        SynthesisRepresentationIndexTest.cpp
+        SynthesisReadoutTest.cpp
+        SynthesisCommutingTest.cpp
+        SynthesisRegionsTest.cpp
+        SynthesisGeneralTest.cpp
+        SynthesisMacrosTest.cpp
+        SynthesisOpenTest.cpp
+        SynthesisPortfolioTest.cpp
+        SynthesisBootstrapTest.cpp
+        SynthesisAlgebraTest.cpp
+        SynthesisNativeRefinementTest.cpp
+        CliffordDictionaryTest.cpp
+        SynthesisCliffordWindowsTest.cpp
+        SynthesisCompactTransportTest.cpp
+        SynthesisJointReadyPhaseTest.cpp
+        SynthesisJointPhasePlannerTest.cpp
+        SynthesisJointPhaseCostTest.cpp
+        SynthesisJointIntegrationTest.cpp
+        SynthesisLinearWindowsTest.cpp
+        SynthesisLinearFourTest.cpp
+        SynthesisBudgetTest.cpp
+        SynthesisPauliTransportTest.cpp
         TCountTest.cpp
     INCLUDES
         ${CMAKE_SOURCE_DIR}/runtime

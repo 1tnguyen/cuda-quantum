@@ -74,6 +74,7 @@ add_cudaq_library(OptTransforms
   PBCPasses.cpp
   PBCTelemetry.cpp
   Pauli/GraphSynthesis.cpp
+  Pauli/SynthesisCompletion.cpp
   Pauli/Circuit.cpp
   Pauli/Optimizer.cpp
   Pauli/GateCount.cpp

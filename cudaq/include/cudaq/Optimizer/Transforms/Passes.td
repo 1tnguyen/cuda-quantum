@@ -1743,6 +1743,19 @@ def PBCSynthesisControls {
     Option<"swapCost", "synthesis-swap-cost", "double", "1.0", "Native SWAP cost; otherwise decomposed in the native basis">,
     Option<"tieSeed", "synthesis-tie-seed", "uint64_t", "4", "Deterministic tie ordering; zero uses enumeration order">,
     Option<"discrepancySteps", "synthesis-discrepancy-steps", "unsigned", "22", "Alternative greedy decisions to explore; zero is one rollout">,
+    Option<"representationSteps", "synthesis-representation-steps", "unsigned", "0", "Maximum certified Pauli-frame rewrite steps after a verified completion">,
+    Option<"indexedRepresentationSteps", "synthesis-indexed-representation-steps", "unsigned", "0", "Maximum indexed Pauli-frame steps for an independent completed synthesis route">,
+    Option<"jointPhaseCandidates", "synthesis-joint-phase-candidates", "unsigned", "0", "Maximum complete joint-phase plans per source (0 disables, at most 4)">,
+    Option<"jointPhaseAcceptance", "synthesis-joint-phase-acceptance", "std::string", "\"all-metrics\"", "Joint-phase final admission: all-metrics or gates-and-t">,
+    Option<"jointPhasePlannerWork", "synthesis-joint-phase-planner-work", "uint64_t", "3000000000", "Work allowance per source in the first joint-phase planner profile">,
+    Option<"jointPhaseMaxWork", "synthesis-joint-phase-max-work", "uint64_t", "100000000000", "Aggregate joint-phase work including completion and proofs">,
+    Option<"jointPhaseTimeoutMs", "synthesis-joint-phase-timeout-ms", "unsigned", "120000", "Aggregate joint-phase deadline in milliseconds, capped by the parent">,
+    Option<"jointPhaseWideSearch", "synthesis-joint-phase-wide-search", "bool", "false", "Append an independent wider joint-phase planner profile">,
+    Option<"legacyPortfolioTimeoutMs", "synthesis-legacy-portfolio-timeout-ms", "unsigned", "0", "Deadline for the pre-joint portfolio; zero retains the shared deadline">,
+    Option<"readoutCandidates", "synthesis-readout-candidates", "unsigned", "0", "Bounded alternative signed readout completions after a verified completion">,
+    Option<"commutingCandidates", "synthesis-commuting-candidates", "unsigned", "0", "Bounded commuting-region implementations after a verified completion">,
+    Option<"algebraicCandidates", "synthesis-algebraic-candidates", "unsigned", "0", "Checked merge/decoder alternatives; zero retains fixed-word synthesis">,
+    Option<"legacyWorkLimit", "synthesis-legacy-max-work", "uint64_t", "0", "Positive limit enables early checked completion and bounds legacy search in a child slice">,
     Option<"pruneUnobserved", "synthesis-prune-unobserved", "bool", "false", "Remove rotations invisible to every terminal outcome">
   ];
 }

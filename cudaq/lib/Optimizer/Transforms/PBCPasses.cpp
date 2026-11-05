@@ -1009,6 +1009,24 @@ std::string synthesisOptions(const Pass &pass,
   o.swapCost = pass.swapCost;
   o.tieSeed = pass.tieSeed;
   o.discrepancySteps = pass.discrepancySteps;
+  o.representationSteps = pass.representationSteps;
+  o.indexedRepresentationSteps = pass.indexedRepresentationSteps;
+  o.jointPhaseCandidates = pass.jointPhaseCandidates;
+  o.jointPhasePlannerWork = pass.jointPhasePlannerWork;
+  o.jointPhaseMaxWork = pass.jointPhaseMaxWork;
+  o.jointPhaseTimeoutMs = pass.jointPhaseTimeoutMs;
+  o.jointPhaseWideSearch = pass.jointPhaseWideSearch;
+  if (pass.jointPhaseAcceptance == "all-metrics")
+    o.jointPhaseAcceptance = cudaq::pauli::graph::JointPhaseAcceptance::AllFive;
+  else if (pass.jointPhaseAcceptance == "gates-and-t")
+    o.jointPhaseAcceptance = cudaq::pauli::graph::JointPhaseAcceptance::GatesAndT;
+  else
+    return "synthesis-joint-phase-acceptance must be all-metrics or gates-and-t";
+  o.readoutCandidates = pass.readoutCandidates;
+  o.commutingCandidates = pass.commutingCandidates;
+  o.algebraicCandidates = pass.algebraicCandidates;
+  o.legacyWorkLimit = pass.legacyWorkLimit;
+  o.legacyPortfolioTimeoutMs = pass.legacyPortfolioTimeoutMs;
   o.pruneUnobserved = pass.pruneUnobserved;
   o.parallelizationCredit = pass.parallelizationCredit;
   o.frontierWeight = pass.frontierWeight;

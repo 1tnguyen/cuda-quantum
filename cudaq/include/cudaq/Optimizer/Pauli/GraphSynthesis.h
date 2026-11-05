@@ -33,6 +33,7 @@ using ::cudaq::pauli::Kind;
 using ::cudaq::pauli::Pauli;
 
 enum class SynthesisObjective { TotalGates, TCount, Entanglers, Depth, TDepth };
+enum class JointPhaseAcceptance { AllFive, GatesAndT };
 
 /// Controls for one graph-synthesis invocation, not a global optimum search.
 /// The singlet/factor costs, ready-node frontier, and hold/release distinction
@@ -160,11 +161,12 @@ struct Options {
   /// limit or a bound on gates after subsequent target lowering.
   unsigned maxGates = 32768;
 
-  /// Maximum number of recorded noncommutation edges in the dependency DAG.
-  /// Must be positive. Larger values allow denser graphs but more memory and
-  /// traversal work; smaller values reject dense candidates sooner. Edges are
-  /// never dropped to meet the limit. Tune against dependency statistics and
-  /// memory limits; reducing lookahead does not reduce the DAG construction.
+  /// Maximum number of logical noncommuting occurrence pairs in the rotation
+  /// word. Must be positive. This retains the original DAG edge-cap meaning:
+  /// the exact oracle stores axis classes and conflicts instead of all edges,
+  /// but never drops constraints to satisfy this limit. Stored memory depends
+  /// on distinct axes and their conflicts, reported separately in Statistics.
+  /// Reducing lookahead does not reduce dependency-index construction.
   unsigned maxDependencies = 1000000;
 
   /// Maximum entangling synthesis steps, including terminal-frame synthesis.
@@ -174,12 +176,66 @@ struct Options {
   /// (it is not unlimited); exceeding the limit fails the candidate. Retain a
   /// positive bound and use maxGates/shared work to bound the other costs.
   unsigned maxSteps = 1000000;
+
+  /// Optional measured-program providers, run only after the existing search
+  /// has produced a verified incumbent. Zero disables the corresponding
+  /// provider. All providers share the invocation budget, preserve fixed
+  /// physical readouts, and may replace the incumbent only without worsening
+  /// any of its five integral metrics. These controls do not affect
+  /// synthesize() or permit a preserve-network circuit to seed normalized-PBC
+  /// synthesis.
+  unsigned representationSteps = 0;
+  unsigned readoutCandidates = 0;
+  unsigned commutingCandidates = 0;
+  /// Optional full-optimization alternatives from the checked merge/decoder
+  /// backend. Zero keeps the fixed-word synthesis track separate.
+  unsigned algebraicCandidates = 0;
+  /// Zero preserves legacy-first scheduling. A positive limit first proves a
+  /// mechanical completion from normalized PBC, then bounds legacy search in
+  /// a child slice so other providers retain completion/proof resources.
+  /// It is a work allowance, not a circuit-size or quality threshold.
+  uint64_t legacyWorkLimit = 0;
+  /// Optional deadline for the complete pre-joint measured portfolio. Zero
+  /// retains the shared invocation deadline. When joint planning is enabled,
+  /// a positive value also reserves its aggregate work allowance where the
+  /// parent can fund both lanes. This bounds scheduling, not candidate quality.
+  unsigned legacyPortfolioTimeoutMs = 0;
+  /// Append an independent indexed sign/frame search after all older routes
+  /// finish. Its complete continuation uses one greedy rollout without the
+  /// repeated readout-cost heuristic, then the enabled regional/algebraic
+  /// providers. Zero disables this route; the existing representation search
+  /// and its configured step bound remain unchanged.
+  unsigned indexedRepresentationSteps = 0;
+  /// Append source-only joint-phase planning after the existing verified
+  /// portfolio. Zero disables this route; at most four complete plans are
+  /// retained per source. Candidate generation never receives the incumbent
+  /// native network. AllFive retains the existing five-metric guard;
+  /// GatesAndT permits secondary-metric tradeoffs against the same immutable
+  /// incoming incumbent. Neither policy relaxes semantic verification.
+  unsigned jointPhaseCandidates = 0;
+  JointPhaseAcceptance jointPhaseAcceptance = JointPhaseAcceptance::AllFive;
+  /// Work per planner source in the first profile, and aggregate work/time
+  /// across all joint profiles, completion and proofs. The enclosing budget
+  /// remains authoritative. Local exhaustion retains completed candidates.
+  uint64_t jointPhasePlannerWork = 3000000000;
+  uint64_t jointPhaseMaxWork = 100000000000;
+  unsigned jointPhaseTimeoutMs = 120000;
+  /// Append an independent wider profile (10B planner work, 16K callbacks and
+  /// expansions) after the first profile (4K callbacks and expansions). Each
+  /// owns its scoring cache and has at most 60 seconds, within the aggregate
+  /// deadline. Both use 128 MiB planner storage and the same final admission
+  /// policy. This is a fixed portfolio, not a circuit-specific preset.
+  bool jointPhaseWideSearch = false;
 };
 
 /// Graph preprocessing, search, and acceptance counters for one synthesis call.
 struct Statistics {
-  /// Rotation counts before/after preprocessing and recorded dependency edges.
+  /// Rotation counts before/after preprocessing and logical dependency edges.
   unsigned rotationsBefore = 0, rotationsAfter = 0, dependencies = 0;
+  /// Distinct unsigned axes and directed conflict entries in the exact index.
+  /// These describe compressed storage, independently of the logical edge cap.
+  unsigned dependencyAxisClasses = 0;
+  uint64_t dependencyConflictEntries = 0;
   /// Entangling actions, frame SWAPs, generated candidates, and released nodes.
   unsigned tqes = 0, swaps = 0, candidates = 0, released = 0;
   /// False when the standalone cost guard substitutes the original circuit.
