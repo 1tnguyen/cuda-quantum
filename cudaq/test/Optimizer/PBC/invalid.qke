@@ -14,7 +14,7 @@
 /// wire ownership, terminal measurements, and unsupported output semantics.
 //===----------------------------------------------------------------------===//
 
-// RUN: cudaq-opt %s --split-input-file --verify-diagnostics --quake-optimize-pbc
+// RUN: cudaq-opt %s --split-input-file --verify-diagnostics --quake-optimize-pbc='semantics=release'
 
 func.func @marker_is_not_proof(%q: !quake.wire) -> !quake.measure attributes {quake.pbc} {
   // expected-error@+1 {{PBC form permits only quake.exp_pauli unitary operations}}

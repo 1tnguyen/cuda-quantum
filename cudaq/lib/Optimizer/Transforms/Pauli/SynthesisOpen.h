@@ -103,7 +103,7 @@ inline OpenRegionCandidates generateOpenRegionCandidates(
   if (!source.width || !options.maxGates || !options.maxDependencies ||
       source.rotations.size() > options.maxGates || !limits.maxPlans ||
       !limits.maxActiveWires || !limits.maxRegionRotations ||
-      source.observables.empty() ||
+      (!source.unitary && source.observables.empty()) ||
       source.observables.size() != source.readoutWires.size() ||
       (!options.nativeCX && !options.nativeCZ) ||
       static_cast<unsigned>(options.objective) >
@@ -327,6 +327,10 @@ inline OpenRegionCandidates generateOpenRegionCandidates(
       for (const auto &gate : implementation.body)
         plan.prefix.push_back(lift(gate));
       for (const auto &localGate : implementation.exitCliffords) {
+        if (source.unitary && plan.exitCliffords.size() >= options.maxGates)
+          return finish();
+        if (source.unitary)
+          plan.exitCliffords.push_back(lift(localGate));
         if (!charge(remaining.size() - last + plan.observables.size() + 1,
                     limbs))
           return finish();

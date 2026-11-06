@@ -34,9 +34,13 @@ enum class RegionStatus { Complete, Unsupported, Exhausted, InvalidProof };
 /// carried Clifford exit. Physical readout wires remain those of the immutable
 /// source problem. A caller must complete readout and check the complete
 /// circuit before treating this unverified proposal as a candidate.
+/// Quantum-boundary plans additionally retain their actual Clifford exit;
+/// callers must reconstruct the source frame composed with its inverse.
 struct RegionalPlan {
   std::vector<Gate> prefix;
   std::vector<Pauli> observables;
+  /// Retained only for quantum-boundary planning: prefix = exit * source.
+  std::vector<Gate> exitCliffords = {};
 };
 
 /// Optional ranking of complete proposals, including a caller's signed readout
@@ -110,8 +114,15 @@ inline bool validClifford(unsigned width, const Gate &gate) {
 }
 
 inline bool samePlan(const RegionalPlan &a, const RegionalPlan &b) {
-  if (a.observables != b.observables || a.prefix.size() != b.prefix.size())
+  if (a.observables != b.observables || a.prefix.size() != b.prefix.size() ||
+      a.exitCliffords.size() != b.exitCliffords.size())
     return false;
+  for (size_t i = 0; i < a.exitCliffords.size(); ++i) {
+    const auto &x = a.exitCliffords[i], &y = b.exitCliffords[i];
+    if (x.kind != y.kind || x.a != y.a || x.b != y.b || x.pauli != y.pauli ||
+        x.angle != y.angle)
+      return false;
+  }
   for (size_t i = 0; i < a.prefix.size(); ++i) {
     const auto &x = a.prefix[i], &y = b.prefix[i];
     if (x.kind != y.kind || x.a != y.a || x.b != y.b || x.pauli != y.pauli ||
@@ -157,7 +168,7 @@ inline RegionCandidates generateRegionSweeps(const MeasuredProblem &source,
   };
   if (!source.width || !limits.maxPlans || !limits.commuting.maxCandidates ||
       !options.maxGates || source.rotations.size() > options.maxGates ||
-      source.observables.empty() ||
+      (!source.unitary && source.observables.empty()) ||
       source.observables.size() != source.readoutWires.size() ||
       (!options.nativeCX && !options.nativeCZ))
     return unsupported("invalid regional problem dimensions or limits");
@@ -287,6 +298,13 @@ inline RegionCandidates generateRegionSweeps(const MeasuredProblem &source,
       }
       plan.prefix.insert(plan.prefix.end(), selected.body.begin(),
                          selected.body.end());
+      if (source.unitary && selected.exitCliffords.size() >
+                                options.maxGates - plan.exitCliffords.size())
+        return exhausted("hold regional exit gate limit exceeded");
+      if (source.unitary)
+        plan.exitCliffords.insert(plan.exitCliffords.end(),
+                                  selected.exitCliffords.begin(),
+                                  selected.exitCliffords.end());
       for (const auto &clifford : selected.exitCliffords) {
         if (!budget.take(
                 work(remaining.size() - last + plan.observables.size())))

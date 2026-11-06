@@ -14,7 +14,7 @@
 /// the pass reports the expected reduction from 16 to seven T rotations.
 //===----------------------------------------------------------------------===//
 
-// RUN: cudaq-opt %s --quake-to-pbc --quake-optimize-pbc='objective=t-count' --quake-verify-pbc | FileCheck %s
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release' --quake-optimize-pbc='semantics=release objective=t-count' --quake-verify-pbc | FileCheck %s
 
 func.func @mod5(%q0: !quake.wire, %q1: !quake.wire, %q2: !quake.wire, %q3: !quake.wire, %q4: !quake.wire) -> (!quake.measure, !quake.measure, !quake.measure, !quake.measure, !quake.measure) {
   %v0 = quake.x %q0 : (!quake.wire) -> !quake.wire

@@ -248,6 +248,23 @@ TEST(SynthesisDependencies, BudgetFailuresDoNotPublishPartialState) {
   EXPECT_FALSE(*fresh.value->ready(3).value);
 }
 
+TEST(SynthesisDependencies, StorageAdmissionUsesCompressedConflicts) {
+  std::vector<Pauli> word(40000, Pauli{0, 1});
+  SearchBudget budget(1000000);
+  auto index = DependencyIndex::build(word, unlimited, &budget, 2ull << 20);
+  ASSERT_TRUE(index);
+  const auto bytes = index.value->statistics().storageBytes;
+  EXPECT_EQ(index.value->statistics().classes, 1u);
+  EXPECT_EQ(index.value->statistics().storedConflicts, 0u);
+  EXPECT_LT(bytes, 2ull << 20);
+  EXPECT_TRUE(DependencyIndex::build(word, unlimited, nullptr, bytes));
+  auto tooSmall = DependencyIndex::build(word, unlimited, nullptr, bytes - 1);
+  EXPECT_FALSE(tooSmall);
+  EXPECT_EQ(tooSmall.error, DependencyError::StorageLimit);
+  EXPECT_TRUE(tooSmall.exhausted());
+  EXPECT_FALSE(budget.stopped());
+}
+
 TEST(SynthesisDependencies, EmptyAndInvalidOccurrenceQueries) {
   auto empty = DependencyIndex::build({}, 0);
   ASSERT_TRUE(empty);

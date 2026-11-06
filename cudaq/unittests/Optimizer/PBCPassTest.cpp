@@ -35,6 +35,14 @@
 
 using namespace mlir;
 namespace {
+template <typename Options>
+Options releaseOptions(Options options = {}) {
+  options.semantics = "release";
+  return options;
+}
+} // namespace
+
+namespace {
 using Complex = std::complex<double>;
 using State = std::vector<Complex>;
 constexpr Complex I{0, 1};
@@ -89,6 +97,12 @@ State runGadget(func::FuncOp function, unsigned col, unsigned outcomes) {
         for (unsigned b = 0; b < state.size(); ++b)
           if (((b >> target) & 1) && !((b >> other) & 1))
             std::swap(state[b], state[b ^ (1u << target) ^ (1u << other)]);
+      } else if (isa<cudaq::quake::PhaseOp>(op)) {
+        double angle = scalar(gate.getParameters()[0]);
+        if (op.hasAttr("is_adj"))
+          angle = -angle;
+        for (auto &amplitude : state)
+          amplitude *= std::exp(I * angle);
       } else if (isa<cudaq::quake::RxOp, cudaq::quake::RyOp, cudaq::quake::RzOp,
                      cudaq::quake::ExpPauliOp>(op)) {
         unsigned x = 0, z = 0;
@@ -284,8 +298,10 @@ TEST(PBCPass, FullPipelinePreservesEveryJointOutcomeEffect) {
   ASSERT_TRUE(original);
   OwningOpRef<ModuleOp> optimized(cast<ModuleOp>(original->clone()));
   PassManager pm(&context);
-  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC());
-  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeOptimizePBC());
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC(
+      releaseOptions<cudaq::opt::QuakeToPBCOptions>()));
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeOptimizePBC(
+      releaseOptions<cudaq::opt::QuakeOptimizePBCOptions>()));
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeLowerPBC());
   ASSERT_TRUE(succeeded(pm.run(*optimized)));
   auto lhs = original->lookupSymbol<func::FuncOp>("test");
@@ -414,9 +430,14 @@ TEST_F(PBCBoundaryTest, ReusedXYMeasurementFallsBackWithoutMutation) {
         probability += std::norm(value);
       EXPECT_NEAR(probability, 0.25, 1e-12);
     }
-    unchanged(*module, cudaq::opt::createQuakeTryPBC(), true);
-    unchanged(*module, cudaq::opt::createQuakeToPBC(), false,
-              "PBC requires mx/my results to go directly to sink");
+    unchanged(*module,
+              cudaq::opt::createQuakeTryPBC(
+                  releaseOptions<cudaq::opt::QuakeTryPBCOptions>()),
+              true);
+    unchanged(*module,
+              cudaq::opt::createQuakeToPBC(
+                  releaseOptions<cudaq::opt::QuakeToPBCOptions>()),
+              false, "PBC requires mx/my results to go directly to sink");
   }
 }
 
@@ -449,7 +470,8 @@ TEST_F(PBCBoundaryTest, TerminalReadoutPreservesPhysicalWiresAndJointEffects) {
     ASSERT_TRUE(module);
     OwningOpRef<ModuleOp> original(cast<ModuleOp>(module->clone()));
     PassManager pm(&context);
-    pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC());
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC(
+        releaseOptions<cudaq::opt::QuakeToPBCOptions>()));
     pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeLowerPBC());
     ASSERT_TRUE(succeeded(pm.run(*module)));
     auto before = original->lookupSymbol<func::FuncOp>("test");
@@ -586,14 +608,23 @@ TEST_F(PBCBoundaryTest, UnknownMetadataNeverDisappears) {
             (kind == "return" && isa<func::ReturnOp>(op)))
           op->setAttr("audit.semantic_contract", b.getUnitAttr());
       });
-    unchanged(*module, cudaq::opt::createQuakeTryPBC(), true);
+    unchanged(*module,
+              cudaq::opt::createQuakeTryPBC(
+                  releaseOptions<cudaq::opt::QuakeTryPBCOptions>()),
+              true);
     StringRef expected = kind == "disabled" ? "respects quake.noOptimization"
                          : kind == "argument" || kind == "result"
                              ? "argument/result attributes"
                              : "unsupported PBC attribute";
-    unchanged(*module, cudaq::opt::createQuakeToPBC(), false, expected);
+    unchanged(*module,
+              cudaq::opt::createQuakeToPBC(
+                  releaseOptions<cudaq::opt::QuakeToPBCOptions>()),
+              false, expected);
     unchanged(*module, cudaq::opt::createQuakeVerifyPBC(), false, expected);
-    unchanged(*module, cudaq::opt::createQuakeOptimizePBC(), false, expected);
+    unchanged(*module,
+              cudaq::opt::createQuakeOptimizePBC(
+                  releaseOptions<cudaq::opt::QuakeOptimizePBCOptions>()),
+              false, expected);
     unchanged(*module, cudaq::opt::createQuakeLowerPBC(), false, expected);
   }
 }
@@ -611,11 +642,14 @@ TEST_F(PBCBoundaryTest, LateUnknownOperationRejectsTheWholeFunction) {
                                             &context);
   ASSERT_TRUE(module);
   cudaq::opt::QuakeTryPBCOptions options;
+  options.semantics = "release";
   options.emitRemarks = true;
   unchanged(*module, cudaq::opt::createQuakeTryPBC(options), true,
             "unsupported operation in PBC");
-  unchanged(*module, cudaq::opt::createQuakeToPBC(), false,
-            "unsupported operation in PBC");
+  unchanged(*module,
+            cudaq::opt::createQuakeToPBC(
+                releaseOptions<cudaq::opt::QuakeToPBCOptions>()),
+            false, "unsupported operation in PBC");
 }
 
 TEST_F(PBCBoundaryTest, EscapingQuantumOutputSkipsCleanly) {
@@ -627,9 +661,14 @@ TEST_F(PBCBoundaryTest, EscapingQuantumOutputSkipsCleanly) {
   )mlir",
                                             &context);
   ASSERT_TRUE(module);
-  unchanged(*module, cudaq::opt::createQuakeTryPBC(), true);
-  unchanged(*module, cudaq::opt::createQuakeToPBC(), false,
-            "escaping quantum outputs");
+  unchanged(*module,
+            cudaq::opt::createQuakeTryPBC(
+                releaseOptions<cudaq::opt::QuakeTryPBCOptions>()),
+            true);
+  unchanged(*module,
+            cudaq::opt::createQuakeToPBC(
+                releaseOptions<cudaq::opt::QuakeToPBCOptions>()),
+            false, "escaping quantum outputs");
 }
 
 TEST_F(PBCBoundaryTest, UnsupportedRegionsAndReferencesSkipCleanly) {
@@ -647,8 +686,14 @@ TEST_F(PBCBoundaryTest, UnsupportedRegionsAndReferencesSkipCleanly) {
            })mlir"}) {
     auto module = parseSourceString<ModuleOp>(source, &context);
     ASSERT_TRUE(module);
-    unchanged(*module, cudaq::opt::createQuakeTryPBC(), true);
-    unchanged(*module, cudaq::opt::createQuakeToPBC(), false);
+    unchanged(*module,
+              cudaq::opt::createQuakeTryPBC(
+                  releaseOptions<cudaq::opt::QuakeTryPBCOptions>()),
+              true);
+    unchanged(*module,
+              cudaq::opt::createQuakeToPBC(
+                  releaseOptions<cudaq::opt::QuakeToPBCOptions>()),
+              false);
   }
 }
 
@@ -670,6 +715,7 @@ TEST_F(PBCBoundaryTest, DynamicWidthRoundTripRetainsHighQubitIdentity) {
     auto module = parseSourceString<ModuleOp>(source.str(), &context);
     ASSERT_TRUE(module);
     cudaq::opt::QuakeTryPBCOptions options;
+    options.semantics = "release";
     // This test requests T reduction even when readout reconstruction adds
     // a Clifford gate; the default total-gate objective correctly rejects it.
     options.objective = "t-count";
@@ -708,7 +754,9 @@ TEST_F(PBCBoundaryTest, LimitsAndDisabledStrategiesLeaveNoStatistics) {
     auto module = parseSourceString<ModuleOp>(pbcInput, &context);
     ASSERT_TRUE(module);
     cudaq::opt::QuakeTryPBCOptions optional;
+    optional.semantics = "release";
     cudaq::opt::QuakeOptimizePBCOptions strict;
+    strict.semantics = "release";
     if (mode == 0)
       optional.maxWork = strict.maxWork = 1;
     else if (mode == 1)
@@ -744,7 +792,9 @@ TEST_F(PBCBoundaryTest, MeasuredSynthesisLimitsSkipWithoutMutation) {
     auto module = parseSourceString<ModuleOp>(source, &context);
     ASSERT_TRUE(module);
     cudaq::opt::QuakeTryPBCOptions optional;
+    optional.semantics = "release";
     cudaq::opt::QuakeSynthesizePBCOptions strict;
+    strict.semantics = "release";
     optional.enableTCount = false;
     optional.enableGraphSynthesis = true;
     optional.preserveCliffordNetwork = false;
@@ -773,8 +823,14 @@ TEST_F(PBCBoundaryTest, NoImprovementIsAnIdentityRewrite) {
   )mlir",
                                             &context);
   ASSERT_TRUE(module);
-  unchanged(*module, cudaq::opt::createQuakeTryPBC(), true);
-  unchanged(*module, cudaq::opt::createQuakeOptimizePBC(), true);
+  unchanged(*module,
+            cudaq::opt::createQuakeTryPBC(
+                releaseOptions<cudaq::opt::QuakeTryPBCOptions>()),
+            true);
+  unchanged(*module,
+            cudaq::opt::createQuakeOptimizePBC(
+                releaseOptions<cudaq::opt::QuakeOptimizePBCOptions>()),
+            true);
 }
 
 TEST_F(PBCBoundaryTest, InvalidIRIsNeverAQuietSkip) {
@@ -784,8 +840,10 @@ TEST_F(PBCBoundaryTest, InvalidIRIsNeverAQuietSkip) {
   module->walk([&](cudaq::quake::ExpPauliOp op) {
     op->setAttr("quake.pbc_angle", b.getDenseI64ArrayAttr({1, 0}));
   });
-  unchanged(*module, cudaq::opt::createQuakeTryPBC(), false,
-            "pbc_angle requires two i64 coefficients");
+  unchanged(*module,
+            cudaq::opt::createQuakeTryPBC(
+                releaseOptions<cudaq::opt::QuakeTryPBCOptions>()),
+            false, "pbc_angle requires two i64 coefficients");
 }
 
 TEST_F(PBCBoundaryTest, InvalidOptionsFailEvenOnIneligibleInput) {
@@ -794,6 +852,7 @@ TEST_F(PBCBoundaryTest, InvalidOptionsFailEvenOnIneligibleInput) {
   module->lookupSymbol<func::FuncOp>("test")->setAttr("audit.unknown",
                                                       UnitAttr::get(&context));
   cudaq::opt::QuakeTryPBCOptions options;
+  options.semantics = "release";
   options.maxWork = 0;
   unchanged(*module, cudaq::opt::createQuakeTryPBC(options), false,
             "requires positive limits");
@@ -819,6 +878,7 @@ TEST_F(PBCBoundaryTest, ExactLoweringFailureDoesNotCommitConversion) {
                                             &context);
   ASSERT_TRUE(module);
   cudaq::opt::QuakeTryPBCOptions options;
+  options.semantics = "release";
   options.emitRemarks = true;
   unchanged(*module, cudaq::opt::createQuakeTryPBC(options), true,
             "exact-angle contract");
@@ -835,7 +895,8 @@ TEST_F(PBCBoundaryTest,
   function->setAttr("cudaq-entrypoint", UnitAttr::get(&context));
   OwningOpRef<ModuleOp> optimized(cast<ModuleOp>(original->clone()));
   PassManager pm(&context);
-  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeTryPBC());
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeTryPBC(
+      releaseOptions<cudaq::opt::QuakeTryPBCOptions>()));
   ASSERT_TRUE(succeeded(pm.run(*optimized)));
   auto lhs = original->lookupSymbol<func::FuncOp>("test");
   auto rhs = optimized->lookupSymbol<func::FuncOp>("test");
@@ -890,6 +951,7 @@ TEST_F(PBCBoundaryTest, TelemetryReportsCommittedMetricsWithoutChangingIR) {
       llvm::sys::fs::createTemporaryFile("cudaq-pbc-telemetry", "jsonl", path));
   llvm::FileRemover cleanup(path);
   cudaq::opt::QuakeTryPBCOptions options;
+  options.semantics = "release";
   options.telemetry = "off";
   PassManager baseline(&context);
   baseline.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeTryPBC(options));
@@ -942,6 +1004,7 @@ TEST_F(PBCBoundaryTest, TelemetryReportsSkipsFailuresAndTruncation) {
                                                     "jsonl", path));
     llvm::FileRemover cleanup(path);
     cudaq::opt::QuakeTryPBCOptions options;
+    options.semantics = "release";
     options.telemetry = path.str().str();
     if (mode == 0)
       module->lookupSymbol<func::FuncOp>("test")->setAttr(
@@ -980,6 +1043,7 @@ TEST_F(PBCBoundaryTest, TelemetryWriteFailureDoesNotFailOptimization) {
   auto module = parseSourceString<ModuleOp>(primitiveInput, &context);
   ASSERT_TRUE(module);
   cudaq::opt::QuakeTryPBCOptions options;
+  options.semantics = "release";
   // /dev/null is a file, so this cannot accidentally become a writable path.
   options.telemetry = "/dev/null/pbc.jsonl";
   bool warned = false;
@@ -1017,6 +1081,7 @@ TEST_F(PBCBoundaryTest, TelemetryDistinguishesCXAndCZAndUnknownTCost) {
       llvm::sys::fs::createTemporaryFile("cudaq-pbc-telemetry", "jsonl", path));
   llvm::FileRemover cleanup(path);
   cudaq::opt::QuakeTryPBCOptions options;
+  options.semantics = "release";
   options.telemetry = path.str().str();
   PassManager pm(&context);
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeTryPBC(options));
@@ -1056,6 +1121,7 @@ TEST_F(PBCBoundaryTest, TotalGateNetworkPreservesEveryJointOutcomeEffect) {
   ASSERT_TRUE(original);
   OwningOpRef<ModuleOp> optimized(cast<ModuleOp>(original->clone()));
   cudaq::opt::QuakeTryPBCOptions options;
+  options.semantics = "release";
   options.objective = "total-gates";
   options.enableTCount = options.enableGraphSynthesis = false;
   options.enableGateCount = true;
@@ -1095,10 +1161,12 @@ TEST_F(PBCBoundaryTest, MeasurementHandleSurvivesStrictAndOptionalRoundTrips) {
     PassManager pm(&context);
     if (optional) {
       cudaq::opt::QuakeTryPBCOptions options;
+      options.semantics = "release";
       options.preserveCliffordNetwork = true;
       pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeTryPBC(options));
     } else {
-      pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC());
+      pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC(
+          releaseOptions<cudaq::opt::QuakeToPBCOptions>()));
       pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeVerifyPBC());
       pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeLowerPBC());
     }
@@ -1133,10 +1201,12 @@ TEST(PBCPass, ExplicitMeasureAllAndOfficialSynthesis) {
   ASSERT_TRUE(module);
   PassManager pm(&context);
   cudaq::opt::QuakeToPBCOptions normalization;
+  normalization.semantics = "release";
   normalization.assumeMeasureAll = true;
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC(normalization));
   pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeVerifyPBC());
   cudaq::opt::QuakeSynthesizePBCOptions synthesis;
+  synthesis.semantics = "release";
   synthesis.discrepancySteps = 0;
   synthesis.simplify = false;
   pm.addNestedPass<func::FuncOp>(
@@ -1150,4 +1220,215 @@ TEST(PBCPass, ExplicitMeasureAllAndOfficialSynthesis) {
   module->walk([&](cudaq::quake::MppOp) { ADD_FAILURE() << "unlowered MPP"; });
   module->walk(
       [&](cudaq::quake::ExpPauliOp) { ADD_FAILURE() << "unlowered rotation"; });
+}
+
+TEST_F(PBCBoundaryTest, NativeSynthesisRetainsEveryOrderedJointOutcomeEffect) {
+  for (uint64_t work : {uint64_t(1), uint64_t(1000000000)}) {
+    auto original = parseSourceString<ModuleOp>(R"mlir(
+      func.func @test(%a: !quake.wire, %b: !quake.wire) -> (!quake.measure, !quake.measure) {
+        %h = quake.h %a : (!quake.wire) -> !quake.wire
+        %c:2 = quake.x [%h] %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+        %t = quake.t %c#1 : (!quake.wire) -> !quake.wire
+        %u = quake.t %t : (!quake.wire) -> !quake.wire
+        %m, %q = quake.mx %c#0 name "first" : (!quake.wire) -> (!quake.measure, !quake.wire)
+        %n, %r = quake.mz %u name "second" : (!quake.wire) -> (!quake.measure, !quake.wire)
+        quake.sink %q : !quake.wire
+        quake.sink %r : !quake.wire
+        return %m, %n : !quake.measure, !quake.measure
+      }
+    )mlir",
+                                                &context);
+    ASSERT_TRUE(original);
+    OwningOpRef<ModuleOp> optimized(cast<ModuleOp>(original->clone()));
+    cudaq::opt::QuakeSynthesizePBCOptions options;
+    options.semantics = "release";
+    options.nativeInput = true;
+    options.maxWork = work;
+    PassManager pm(&context);
+    pm.addNestedPass<func::FuncOp>(
+        cudaq::opt::createQuakeSynthesizePBC(options));
+    ASSERT_TRUE(succeeded(pm.run(*optimized)));
+    auto lhs = original->lookupSymbol<func::FuncOp>("test");
+    auto rhs = optimized->lookupSymbol<func::FuncOp>("test");
+    ASSERT_TRUE(rhs->hasAttr("pbc.synthesis_selected"));
+    if (work == 1)
+      EXPECT_EQ(
+          rhs->getAttrOfType<StringAttr>("pbc.synthesis_selected").getValue(),
+          "incoming");
+    for (unsigned outcome = 0; outcome < 4; ++outcome)
+      for (unsigned i = 0; i < 4; ++i)
+        for (unsigned j = 0; j < 4; ++j) {
+          auto a = runGadget(lhs, i, outcome), b = runGadget(lhs, j, outcome);
+          auto c = runGadget(rhs, i, outcome), d = runGadget(rhs, j, outcome);
+          Complex before = 0, after = 0;
+          for (unsigned row = 0; row < 4; ++row) {
+            before += std::conj(a[row]) * b[row];
+            after += std::conj(c[row]) * d[row];
+          }
+          EXPECT_LT(std::abs(before - after), 1e-12);
+        }
+  }
+}
+
+TEST_F(PBCBoundaryTest, DefaultHoldPreservesPhaseAndReturnedQuantumOwners) {
+  auto original = parseSourceString<ModuleOp>(R"mlir(
+    func.func @test(%a: !quake.wire, %b: !quake.wire) -> (!quake.wire, !quake.wire) {
+      %theta = arith.constant 0.4487989505128276 : f64
+      %h = quake.h %a : (!quake.wire) -> !quake.wire
+      %t = quake.t %h : (!quake.wire) -> !quake.wire
+      %c:2 = quake.x [%t] %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+      %p = quake.phase (%theta) %c#0 : (f64, !quake.wire) -> !quake.wire
+      %s:2 = quake.swap %p, %c#1 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+      return %s#0, %s#1 : !quake.wire, !quake.wire
+    }
+  )mlir",
+                                              &context);
+  ASSERT_TRUE(original);
+  for (bool synthesize : {false, true}) {
+    OwningOpRef<ModuleOp> output(cast<ModuleOp>(original->clone()));
+    PassManager pm(&context);
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC());
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeVerifyPBC());
+    if (synthesize) {
+      cudaq::opt::QuakeSynthesizePBCOptions options;
+      options.discrepancySteps = 0;
+      options.commutingCandidates = 2;
+      options.jointPhaseCandidates = 2;
+      pm.addNestedPass<func::FuncOp>(
+          cudaq::opt::createQuakeSynthesizePBC(options));
+    } else
+      pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeLowerPBC());
+    ASSERT_TRUE(succeeded(pm.run(*output))) << printed(*output);
+    auto before = original->lookupSymbol<func::FuncOp>("test");
+    auto after = output->lookupSymbol<func::FuncOp>("test");
+    EXPECT_EQ(
+        after->getAttrOfType<StringAttr>("quake.pbc_semantics").getValue(),
+        "hold");
+    for (unsigned column = 0; column < 4; ++column) {
+      auto a = runGadget(before, column, 0), b = runGadget(after, column, 0);
+      for (unsigned row = 0; row < 4; ++row)
+        EXPECT_LT(std::abs(a[row] - b[row]), 1e-12);
+    }
+    EXPECT_TRUE(succeeded(verify(*output)));
+  }
+}
+
+TEST_F(PBCBoundaryTest,
+       HoldConversionRetainsLocalFramesForCheckpointSynthesis) {
+  auto original = parseSourceString<ModuleOp>(R"mlir(
+    func.func @test(%a: !quake.wire, %b: !quake.wire, %c: !quake.wire, %d: !quake.wire)
+        -> (!quake.wire, !quake.wire, !quake.wire, !quake.wire) {
+      %h = quake.h %a : (!quake.wire) -> !quake.wire
+      %x:2 = quake.x [%h] %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+      %y:2 = quake.x [%x#1] %c : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+      %z:2 = quake.x [%y#1] %d : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+      %t = quake.t %z#1 : (!quake.wire) -> !quake.wire
+      return %x#0, %y#0, %z#0, %t : !quake.wire, !quake.wire, !quake.wire, !quake.wire
+    }
+  )mlir",
+                                              &context);
+  ASSERT_TRUE(original);
+  for (bool local : {true, false}) {
+    OwningOpRef<ModuleOp> output(cast<ModuleOp>(original->clone()));
+    PassManager normalization(&context);
+    cudaq::opt::QuakeToPBCOptions conversion;
+    conversion.localFrames = local;
+    normalization.addNestedPass<func::FuncOp>(
+        cudaq::opt::createQuakeToPBC(conversion));
+    normalization.addNestedPass<func::FuncOp>(
+        cudaq::opt::createQuakeVerifyPBC());
+    ASSERT_TRUE(succeeded(normalization.run(*output)));
+    unsigned support = 0;
+    output->walk([&](cudaq::quake::ExpPauliOp op) {
+      support = std::max(support, unsigned(op.getTargets().size()));
+    });
+    EXPECT_EQ(support, local ? 1u : 4u);
+    PassManager synthesis(&context);
+    cudaq::opt::QuakeSynthesizePBCOptions settings;
+    settings.discrepancySteps = 0;
+    synthesis.addNestedPass<func::FuncOp>(
+        cudaq::opt::createQuakeSynthesizePBC(settings));
+    ASSERT_TRUE(succeeded(synthesis.run(*output)));
+    auto a = original->lookupSymbol<func::FuncOp>("test");
+    auto b = output->lookupSymbol<func::FuncOp>("test");
+    for (unsigned column = 0; column < 16; ++column) {
+      auto before = runGadget(a, column, 0), after = runGadget(b, column, 0);
+      for (unsigned row = 0; row < 16; ++row)
+        EXPECT_LT(std::abs(before[row] - after[row]), 1e-12);
+    }
+  }
+}
+
+TEST_F(PBCBoundaryTest, HoldRetainsOriginalMeasurementInstrumentAndLiveState) {
+  for (const char *measurement : {"mx", "my"}) {
+    std::string source = R"mlir(
+      func.func @test(%q: !quake.wire) -> (!quake.measure, !quake.wire) {
+        %h = quake.h %q : (!quake.wire) -> !quake.wire
+        %t = quake.t %h : (!quake.wire) -> !quake.wire
+        %m, %r = quake.MEASURE %t name "live" : (!quake.wire) -> (!quake.measure, !quake.wire)
+        return %m, %r : !quake.measure, !quake.wire
+      }
+    )mlir";
+    source.replace(source.find("MEASURE"), 7, measurement);
+    auto original = parseSourceString<ModuleOp>(source, &context);
+    ASSERT_TRUE(original);
+    OwningOpRef<ModuleOp> output(cast<ModuleOp>(original->clone()));
+    PassManager pm(&context);
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeToPBC());
+    pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeSynthesizePBC());
+    ASSERT_TRUE(succeeded(pm.run(*output)));
+    auto a = original->lookupSymbol<func::FuncOp>("test");
+    auto b = output->lookupSymbol<func::FuncOp>("test");
+    for (unsigned outcome = 0; outcome < 2; ++outcome)
+      for (unsigned column = 0; column < 2; ++column) {
+        auto before = runGadget(a, column, outcome);
+        auto after = runGadget(b, column, outcome);
+        for (unsigned row = 0; row < 2; ++row)
+          EXPECT_LT(std::abs(before[row] - after[row]), 1e-12);
+      }
+  }
+}
+
+TEST_F(PBCBoundaryTest, HoldRejectsPreviouslyReleasedInputWithoutMutation) {
+  auto module = parseSourceString<ModuleOp>(pbcInput, &context);
+  ASSERT_TRUE(module);
+  module->lookupSymbol<func::FuncOp>("test")->setAttr(
+      "quake.pbc_semantics", StringAttr::get(&context, "release"));
+  unchanged(*module, cudaq::opt::createQuakeSynthesizePBC(), false,
+            "release PBC has discarded its quantum frame");
+}
+
+TEST_F(PBCBoundaryTest, InvalidContractAttributeCannotSelectAWeakerBoundary) {
+  auto module = parseSourceString<ModuleOp>(pbcInput, &context);
+  ASSERT_TRUE(module);
+  module->lookupSymbol<func::FuncOp>("test")->setAttr("quake.pbc_semantics",
+                                                      UnitAttr::get(&context));
+  unchanged(*module, cudaq::opt::createQuakeToPBC(), false,
+            "PBC semantics attribute must be a string");
+}
+
+TEST_F(PBCBoundaryTest, DefaultHoldOptimizationRewritesLiveSubcircuit) {
+  auto original = parseSourceString<ModuleOp>(R"mlir(
+    func.func @test(%q: !quake.wire) -> !quake.wire {
+      %h = quake.h %q : (!quake.wire) -> !quake.wire
+      %t = quake.t %h : (!quake.wire) -> !quake.wire
+      %u = quake.t %t : (!quake.wire) -> !quake.wire
+      return %u : !quake.wire
+    }
+  )mlir",
+                                              &context);
+  ASSERT_TRUE(original);
+  OwningOpRef<ModuleOp> output(cast<ModuleOp>(original->clone()));
+  PassManager pm(&context);
+  pm.addNestedPass<func::FuncOp>(cudaq::opt::createQuakeTryPBC());
+  ASSERT_TRUE(succeeded(pm.run(*output)));
+  auto before = original->lookupSymbol<func::FuncOp>("test");
+  auto after = output->lookupSymbol<func::FuncOp>("test");
+  EXPECT_TRUE(after->hasAttr("pbc.t_after"));
+  EXPECT_EQ(after->getAttrOfType<IntegerAttr>("pbc.t_after").getInt(), 0);
+  for (unsigned column = 0; column < 2; ++column) {
+    auto a = runGadget(before, column, 0), b = runGadget(after, column, 0);
+    for (unsigned row = 0; row < 2; ++row)
+      EXPECT_LT(std::abs(a[row] - b[row]), 1e-12);
+  }
 }

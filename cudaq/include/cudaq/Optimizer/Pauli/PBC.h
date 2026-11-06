@@ -8,7 +8,7 @@
 
 //===----------------------------------------------------------------------===//
 /// \file
-/// \brief Normalization to rotations and terminal Pauli measurements.
+/// \brief Lossless unitary and released terminal-measurement normalization.
 ///
 /// Declares Clifford-frame absorption and commuting-observable validation. The
 /// normalization contract preserves joint measurement probabilities for
@@ -47,6 +47,21 @@ struct Result {
   std::string error;
   explicit operator bool() const { return error.empty(); }
 };
+
+/// Lossless Pauli representation, in circuit order: rotations, then frame.
+/// The actual Clifford/phase word fixes the scalar absent from a tableau.
+/// It is a witness of the required action, not a network to preserve.
+struct UnitaryForm {
+  std::vector<Gate> rotations;
+  std::vector<Gate> frame;
+  std::string error;
+  explicit operator bool() const { return error.empty(); }
+};
+
+/// Preserve the entire input unitary, including scalar phase and wire order.
+/// No preparation, terminal-measurement, or initial-state assumption is used.
+UnitaryForm normalizeUnitary(unsigned width, const std::vector<Gate> &,
+                             SearchBudget *budget = nullptr);
 
 /// Absorb Clifford operations into rotations and terminal joint measurements.
 /// Preserves the ordered joint measurement probabilities for every input state;

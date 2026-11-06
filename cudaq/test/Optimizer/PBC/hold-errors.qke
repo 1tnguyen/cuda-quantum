@@ -1,0 +1,27 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+// This source code is licensed under the Apache License 2.0 which accompanies //
+// this distribution.                                                        //
+// ========================================================================== //
+
+// RUN: not cudaq-opt %s --quake-to-pbc='semantics=release' --quake-synthesize-pbc 2>&1 | FileCheck %s --check-prefix=LOST
+// RUN: not cudaq-opt %s --quake-to-pbc='assume-measure-all=true' 2>&1 | FileCheck %s --check-prefix=ASSUME
+// RUN: not cudaq-opt %s --quake-synthesize-pbc='synthesis-prune-unobserved=true' 2>&1 | FileCheck %s --check-prefix=PRUNE
+// RUN: not cudaq-opt %s --quake-to-pbc='semantics=invalid' 2>&1 | FileCheck %s --check-prefix=INVALID
+// RUN: cudaq-opt %s --pass-pipeline='builtin.module(func.func(quake-to-pbc,quake-to-pbc{semantics=release assume-measure-all=true},quake-synthesize-pbc{semantics=release}))' --verify-each | FileCheck %s --check-prefix=PROJECT
+
+func.func @closed(%q: !quake.wire) {
+  %s = quake.s %q : (!quake.wire) -> !quake.wire
+  quake.sink %s : !quake.wire
+  return
+}
+
+// LOST: release PBC has discarded its quantum frame
+// ASSUME: assume-measure-all requires semantics=release
+// PRUNE: synthesis-prune-unobserved requires semantics=release
+// INVALID: PBC semantics must be hold or release
+// PROJECT: quake.pbc_semantics = "release"
+// PROJECT-NOT: quake.s
+// PROJECT: quake.mz
+// PROJECT: return

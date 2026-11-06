@@ -1,10 +1,180 @@
 # PBC synthesis architecture
 
+## Hold and release synthesis contracts
+
+The synthesis interface defaults to the explicit `hold` contract,
+which preserves the complete unitary of a quantum region, including scalar
+phase and physical wire identities. This is network-changing Pauli synthesis:
+the original Clifford network is not a constraint on the synthesized network.
+The existing terminal-measurement implementation remains the `release` route.
+
+Hold conversion retains local Clifford/phase frames between Pauli rotations.
+It does not absorb the entire circuit into one frame before synthesis: that
+spreads local arithmetic into wide axes and creates expensive reconstruction
+debt. Each synthesized block has a lossless rotation word and an actual
+Clifford/phase witness, with `U = F * R`. A synthesized rotation body can have
+an actual Clifford exit `E`, satisfying `body = E * R`. Hold completion
+synthesizes `F * inverse(E)` and appends it to the body. Release completion
+instead reconstructs the transported terminal observables. A measured proof
+cannot certify a hold result.
+
+`pbc::normalizeUnitary` returns `UnitaryForm { rotations, frame, error }`.
+The frame is an actual primitive-Clifford/phase witness. Exact Clifford-angle
+rotations remain in the Pauli word, matching the independent replay's supported
+normalization. The frame supplies the action to reconstruct; its gate network is not a
+search incumbent. The default `graph::synthesizeUnitary` portfolio in
+[SynthesisHold.h](../cudaq/lib/Optimizer/Transforms/Pauli/SynthesisHold.h) first
+partitions the source into blocks of at most three active wires and 64 imported
+operations. An individually wider operation remains intact. Every block is
+compacted onto its active wires, independently normalized and bound to its
+actual source, and has both its rotation graph and full Clifford frame rebuilt.
+The same injective wire map embeds source and result into the original physical
+interface, so local unitary proofs compose for arbitrary entangled inputs and
+retain scalar phase. No original or preserved-network optimized circuit is an
+incumbent. Native refinement consumes only generated, verified circuits.
+
+After this complete route, a four-wire route has a separate 10B-work/30-second
+slice, followed by a global route with a 1B-work/5-second slice. Parent work and
+deadlines remain authoritative. Optional exhaustion retains the completed
+incumbent; an invalid proof or certificate binding is fatal even if a verified
+incumbent exists. Route diagnostics distinguish these outcomes. Blocks use
+graph/frame reconstruction and phase-exact native continuations. The optional
+global route additionally explores the enabled regional, general/macro,
+open-region, and joint-phase routes. Quantum-boundary plans retain
+`RegionalPlan::exitCliffords`; the joint
+planner transfers its already accumulated actual exit into the published plan.
+Whole-program completion synthesizes the inverse exit followed by the source
+frame and independently checks the resulting full unitary against that source.
+Completion and final admission include the tail's native cost. Native and
+Clifford-window continuations compose their source-bound, phase-sensitive
+certificates with this proof.
+
+The generic planning view marks quantum-boundary requests explicitly; the
+measured candidate sink rejects those requests. No fictitious measurements are
+introduced to represent a quantum output. Release plans retain their original
+observable/readout interfaces and leave the extra exit vector empty. Their
+search order, measured proof, and admission policy are unchanged.
+
+`quake-to-pbc`, `quake-synthesize-pbc`, `quake-optimize-pbc`, and
+`quake-try-pbc` expose `semantics=hold|release`, defaulting to `hold`.
+Normalization records `quake.pbc_semantics` on the function. Hold retains local
+Clifford frames and scalar phases as real Quake operations, rather than opaque
+metadata. It preserves the original terminal measurement operations and their
+post-measurement basis, and reconnects scalar quantum return operands as well
+as sinks. `quake-verify-pbc` and `quake-lower-pbc` honor the recorded contract.
+Marked release input is rejected by a hold request: its missing original frame
+cannot be recovered by changing a synthesis option. Regenerate it from the
+original pre-normalization circuit. An unmarked input is interpreted as the
+actual supplied circuit, without claiming recovery of earlier discarded data.
+
+The Quake boundary accounts for `T = exp(i*pi/8) Rz(pi/4)` and the compensating
+phase when a rotation is emitted as named Z/S/T gates. Exact scalar phases use
+`quake.phase` with checked rational metadata and a matching constant operand;
+opaque scalar angles retain their SSA identity. Consequently hold is suitable
+for later adjoint/control specialization. Scalar SSA quantum returns are
+supported; borrowed wire sets, reference inputs, control flow and quantum
+feed-forward remain outside this importer.
+
+Readout alternatives and signed-observable representation searches are
+release-only providers; their tuning controls do not enable them for hold.
+`synthesis-prune-unobserved=true` and `assume-measure-all=true` require release.
+The regional readout beam and the joint planner's partial readout-context scorer
+also remain release-specific. Hold uses exit-carrying regional sweeps and full
+Clifford completion when scoring complete joint plans. Its search remains
+bounded and heuristic; there is no promise that a cheap prefix has a cheap tail.
+Hold ranks complete proposals by the configured objective with a T-nonincreasing
+guard against its verified incumbent. The release portfolio's joint acceptance
+and legacy scheduling policies remain release-specific. Exact native
+hold continuations rank source-bound generated words by the requested objective
+with nonincreasing T count, allowing explicitly visible secondary-metric
+tradeoffs. Release continuations retain their existing five-metric guards. No cost or
+acceptance option relaxes the selected semantic proof.
+
+Hold native refinement also checks a bounded three-wire four-T identity that
+reconstructs a 14-gate generated gadget in 12 gates, retaining four T rotations.
+The established native portfolio runs first. The extra candidate starts from
+the same generated source, preserves intervening scalar phases, and is admitted
+only when its full-circuit objective improves without increasing the retained
+incumbent's T count. Each match is compacted onto its actual three physical
+wires and independently replayed including scalar phase. A 32-operation match
+window, a 262,144-operation entry bound and the shared work/deadline budget
+bound this optional stage. Exhaustion retains completed candidates. The
+T-only decoder's strict T-reduction policy is unchanged.
+
+The remaining portfolio description below documents the release route. Hold
+measurements and release regression comparisons are recorded separately in
+[the synthesis tuning report](pbc_synthesis_tuning.md).
+
+```mermaid
+flowchart LR
+    Q[Original quantum circuit] --> N[Lossless rotations and local Clifford frames]
+    N --> H[Hold checkpoint partition: default]
+    H --> C[Rebuild every block graph and full frame]
+    C --> P[Bounded wider and global alternatives]
+    P --> U[Composed unitary and scalar-phase proofs]
+    N --> R[Explicit release projection]
+    R --> M[Measured Pauli synthesis and readout completion]
+    M --> V[Ordered joint-outcome proof]
+    U --> E[Verified transactional emission]
+    V --> E
+```
+
+Hold Quake accepts explicit primitive Clifford/phase operations as well as
+Pauli rotations. Hold conversion preserves local frame boundaries;
+`quake-to-pbc='local-frames=false'` instead requests global absorption for
+controlled comparisons. `synthesis-hold-checkpoints=false` selects the global
+hold synthesis route. These hold-only choices do not change release behavior.
+Within each block, normalization establishes the rotation-word/frame split;
+completed native networks may interleave their gates. The verifier checks the
+actual operations, SSA ownership, supported measurements, and quantum exits;
+the semantics attribute alone never proves equivalence.
+
+The initial hold implementation passed 366 native tests and all 14 PBC lit tests. Added
+checks compare full complex matrices including phase, signed and exact
+Clifford-angle rotations, carried regional/joint exits, native entangler
+profiles, scalar wire returns, original live measurement instruments, default
+hold optimization, exhausted proof budgets and rejected release-to-hold
+promotion. Existing release tests explicitly request release. Independent
+before/after release benchmark checks are reported with the hold measurements.
+The initial fifteen-key-case hold run emitted fourteen independently verified circuits;
+adder433 reached its 120-second synthesis limit. Adder4, QFT-2 and mod5_4 have
+identical independently verified release outputs before and after this change.
+
+The integrated checkpoint implementation passes **380 native tests and all
+15 PBC lit tests**, including sparse physical-wire embedding, a Pauli operation
+wider than a checkpoint, scalar-only identity rotations, optional exhaustion
+and fatal invalid proofs after an incumbent exists. Conversion tests show that
+local frame retention avoids widening a one-wire rotation into a four-wire
+axis, and independently compare the full complex unitary including phase.
+The final fifteen-case checkpoint measurements and exact profile are recorded
+in [the tuning report](pbc_synthesis_tuning.md#integrated-hold-checkpoints-fifteen-case-validation-2026-11-06).
+
 ## Scope and implementation model
 
-The implementation reconstructs a native circuit from normalized Pauli-based computation (PBC): an ordered rotation word, signed terminal observables, and fixed physical readout wires. Its terminal contract preserves the **ordered joint measurement distribution for arbitrary input states**, including states entangled with an external reference. It does not preserve the post-measurement quantum state.
+The release implementation reconstructs a native circuit from normalized Pauli-based computation (PBC): an ordered rotation word, signed terminal observables, and fixed physical readout wires. Its terminal contract preserves the **ordered joint measurement distribution for arbitrary input states**, including states entangled with an external reference. It does not preserve the post-measurement quantum state.
 
 The top-level architecture is a **portfolio of complete-circuit routes**. An existing synthesis and optimization pipeline first produces a verified native incumbent. An optional joint-phase family then constructs additional complete programs from the normalized source. Each family contains bounded regional planners, but there is no single planner choosing freely among all strategies at each region. Candidate generation, proof, completion, and final selection are separate responsibilities.
+
+The normalized-input entry point reconstructs that incumbent from the Pauli
+source. It cannot recover the circuit that existed before normalization. The
+historical quality gap is recorded in
+[the optimization report, F.5](pbc-optimization-report.md#f5-suite-capacity-investigation-2026-11-06).
+The explicit `semantics=release native-input=true` entry point now imports the
+primitive native source, normalizes it privately and checks the source binding
+before using the incoming circuit as an immutable incumbent. The default
+`native-acceptance=all-metrics` admits a synthesis result only when none of the
+five native metrics increases and the configured rank strictly improves.
+`native-acceptance=gates-and-t` permits reported secondary-metric tradeoffs.
+Expected search limits retain the incoming circuit; a proof mismatch fails the
+pass. This mode does not invoke the preserve-network optimizer. It is separate
+from default `semantics=hold`.
+
+Joint planning and completion now use the configured global source gate cap,
+without an additional 32,768-rotation cutoff. Dependency admission bounds the
+compressed occurrences, axis classes and stored class conflicts before
+allocation, independently of the logical dependency limit. Local packet,
+scratch, work and deadline limits still apply; enabling a route does not imply
+that it completed a candidate.
 
 The main entry point is `graph::synthesizeMeasured` in [GraphSynthesis.cpp](../cudaq/lib/Optimizer/Transforms/Pauli/GraphSynthesis.cpp), with public controls in [GraphSynthesis.h](../cudaq/include/cudaq/Optimizer/Pauli/GraphSynthesis.h). The implementation and configuration described here are the integrated architecture used for the fixed-configuration reconciliation. Benchmark results and their current validation status belong in [the synthesis report](pbc_synthesis_tuning.md), rather than being duplicated in this document.
 
@@ -12,6 +182,7 @@ The main entry point is `graph::synthesizeMeasured` in [GraphSynthesis.cpp](../c
 flowchart TB
     Q[Supported scalar-wire Quake] --> I[Import and validate]
     I --> N[PBC normalization]
+    I -. explicit native-input: checked source binding .-> A
     N --> S[Immutable normalized measured source]
     S --> E[Existing complete-circuit portfolio]
     E --> A[Verified native incumbent]
@@ -25,7 +196,10 @@ flowchart TB
     O --> R
 ```
 
-The preserve-network reference is not an input to any normalized-PBC synthesis provider. It is a separate optimization path and a comparison target. Generated native words may be refined after synthesis; this does not reintroduce the original or preserve-network circuit as a seed.
+The preserve-network reference is a separate optimization path and comparison
+target. Normalized-PBC providers do not use it. The explicit native-input mode
+retains the unoptimized incoming circuit as a checked quality floor; generated
+native words may undergo their usual synthesis continuations.
 
 ## 1. IR boundary and semantic contracts
 
@@ -96,6 +270,14 @@ Opaque rotations use the existing unresolved-rotation proxy for ranking; their e
 
 The logical dependency cap retains the meaning of the original occurrence graph: the number of earlier/later anticommuting occurrence pairs. Compression changes storage, not which edges are enforced. If there are `m` occurrences, `K` distinct axes, and `A` stored class conflicts, storage is proportional to `m + K + A`; conflict discovery uses O(K²) Pauli comparisons. The index does not silently discard constraints to fit a cap.
 
+`synthesis-dependency-bytes` defaults to 536,870,912 bytes. The index checks a
+conservative storage bound before each allocation and reports its accounted
+bytes separately from logical edges. The joint planner additionally fits that
+index inside its 128 MiB phase envelope with its other live storage. A logical
+edge allowance is no longer charged as though every occurrence edge were
+stored. Exhaustion publishes no partial index and leaves checked incumbents
+available.
+
 A common Clifford conjugation preserves all pairwise commutation relations, so the joint planner can reuse the original dependency index while carrying exits. Rewrites that change the underlying obligation word require the appropriate reconstruction or a new index. The legacy `Synthesizer::run` also preserves its established occurrence traversal and newly unblocked-node behavior.
 
 ## 3. Existing complete-circuit portfolio
@@ -123,7 +305,17 @@ The diagram shows orchestration, not a requirement that every stage run. Resourc
 
 `representationBaseline` selects the baseline schedule. With `legacyWorkLimit == 0`, it retains legacy-first behavior. A positive limit first attempts a checked mechanical completion, then bounds legacy search in a child slice so other providers retain resources.
 
-[SynthesisBootstrap.h](../cudaq/lib/Optimizer/Transforms/Pauli/SynthesisBootstrap.h), `buildBootstrapPrefix`, lowers normalized rotations using independent basis/parity gadgets. It establishes a feasible prefix from PBC alone; the caller must still supply and prove readout. It is not a hidden original-circuit fallback.
+[SynthesisBootstrap.h](../cudaq/lib/Optimizer/Transforms/Pauli/SynthesisBootstrap.h),
+`buildBootstrapPrefix`, lowers normalized rotations while sharing compatible
+basis/parity prefixes between neighboring gadgets. It emits the inverse of
+the previous unmatched suffix and the next unmatched suffix, then restores the
+final Clifford frame. Signed axes, opaque angles and scalar phases retain
+their exact meanings. Two streaming traversals count the actual shared output
+before reserving its vector; scratch is proportional to circuit width. The
+diagnostics also report the independent-gadget size for comparison. The caller
+still supplies and proves readout. Native-input mode bounds this mechanical
+attempt by the incoming word size without reducing the established caps of
+later search and cleanup routes.
 
 `runMeasuredSearch` and the private `Synthesizer` explore primitive Clifford actions, ready Pauli obligations, frame costs, and bounded discrepancy rollouts. Candidate scoring can include emitted action cost, sampled residual support, ready-frontier weight, readout cost, and ASAP scheduling credit. These are heuristics. Completed circuits go through measured replay and the sink.
 
@@ -367,13 +559,74 @@ The joint planner admits its sequential and beam phases separately. A greedy exp
 
 Completion keeps source/cache/final-candidate storage separate from scratch. Ranked native refinement separately accounts for temporary gates and retained output words: a smaller retained-output gate cap must not be reused as the temporary-expansion cap, or inexpensive cleanup can be suppressed before it runs. The fixed configuration funds the 262,144 temporary-gate allowance while retaining a bounded output cap derived from available scratch.
 
+Whole-program capacity and optional completion storage are configured separately.
+The joint adapter retains the completion service's 262,144-gate ceiling under
+its fixed 2 GiB live-storage allowance, even when the outer reconstruction cap
+is larger. Ranked native refinement also bounds its temporary reservation by
+the provider's established temporary-gate allowance. Enlarging a whole-program
+cap therefore does not reserve that many local temporary gates or disable
+small-program completion before search starts.
+
+The completion service distinguishes the global source cap from its retained
+output cap. Large sources and checked indexed representations may enter while
+their scratch and output reservations remain bounded. The indexed provider's
+default source limit is 2,000,000 rotations, subject to its actual work and
+storage envelope.
+
+Native, Four-wire, Clifford-window and algebraic continuations also derive
+their local gate limit from the actual native source size. The limit is the
+smaller of the global cap and the larger of that source size and the established
+262,144-gate local allowance. This lets larger sources enter without turning a
+larger global reconstruction ceiling into additional local search capacity or
+a worst-case local memory reservation. Raising the suite cap had otherwise
+changed backend scheduling and disabled Clifford cleanup for small circuits.
+The two affected benchmark spot checks now reproduce all five previous metrics
+and identical gate sequences; [the regression record](pbc-optimization-report.md#f6-parallel-continuation-and-capacity-regression-fix-2026-11-06)
+contains the build, tests and reproduction procedure.
+
+For sources whose owned Clifford-window proposal would exceed its 512 MiB
+envelope, cleanup borrows the already retained native buffer. Exact adjacent
+primitive inverses are removed in a streaming pass. Further bounded windows
+use local replacement and undo storage, independent scalar-sensitive checks,
+and whole-word five-metric admission before a patch is retained. A rejected
+patch is restored; exhaustion leaves only completed checked changes. This
+avoids reserving multiple full-circuit copies. Small circuits retain the
+existing owned-certificate route and its established local allowance.
+
+Measured replay imports the rotation word and accumulated Clifford frame
+without retaining an unused copy of the Clifford history. Exactly matching
+rotation words are checked directly, including their signed terminal
+observables. General partially commuting-word matching retains matched-node
+flags instead of repeatedly erasing vector elements. Mechanical native cost
+scoring streams parity-gadget expansion in the same order as materialization;
+it does not allocate the expanded word just to count it. These changes retain
+the proof and five-metric definitions.
+
 Raw publication is charged using known readout/prefix sizes before copying and proof. Optional providers reserve work for binding and publication, then charge actual returned sizes instead of billing every possible maximum-sized output. Their own nested caps remain effective rather than being unintentionally halved by a second small wrapper slice. A locally exhausted provider cannot consume its publication reserve; the enclosing deadline remains authoritative.
+
+Release emission records at most 64 route events in `pbc.synthesis_routes`,
+plus `pbc.synthesis_routes_dropped`. Events distinguish completed, exhausted,
+unsupported and invalid-proof outcomes, with source/candidate sizes, work,
+accounted memory, logical dependencies and stored conflicts where
+available. Selection and all five before/after costs are separate attributes.
+These bounded diagnostics explain route admission; independent output
+verification remains a required benchmark step.
 
 ### Reproducibility boundary
 
 Deterministic enumeration and fixed work bounds make search choices inspectable. Finite wall-clock deadlines can still change which complete candidates are reached, even with the same executable and input. Increasing a budget or adding a locally better candidate can change subsequent heuristic feedback. The architecture therefore preserves complete incumbents, isolates profile caches, and distinguishes final admission from search ranking. It does not promise monotonic quality under arbitrary budget changes.
 
 ## 8. Validation and code navigation
+
+The post-refactor release quality fix passes **375 native tests and all 15 PBC
+lit tests**. Added checks cover shared-gadget full matrices with signs and
+opaque angles, a 40,000-rotation compressed index and planner admission,
+separate source/output completion caps, bounded in-place cleanup, immutable
+native admission, and every ordered joint outcome effect for arbitrary quantum
+inputs. Seven native-input benchmark spot checks pass independent output
+verification and the five-metric floor. The exact compiler, commands, outcomes
+and normalized-only limitations are recorded in
+[Appendix H of the optimization report](pbc-optimization-report.md#appendix-h-post-refactor-release-quality-fix-2026-11-06).
 
 The integrated frozen build passed the **350-test native suite** and completed the fixed-configuration benchmark validation. Separately, 13 benchmark-runner policy tests passed. These tests exercise contracts and bounded behavior; they are separate from independent end-to-end QCEC checks of actual compiler output.
 

@@ -6,10 +6,10 @@
 // Source-only composition of exact dependency-ready phase packets.
 #pragma once
 
-#include "SynthesisJointReadyPhase.h"
 #include "SynthesisCompactTransport.h"
-#include "SynthesisDependencies.h"
 #include "SynthesisCost.h"
+#include "SynthesisDependencies.h"
+#include "SynthesisJointReadyPhase.h"
 #include <set>
 
 namespace cudaq::pauli::graph::detail {
@@ -55,6 +55,8 @@ struct JointPhasePlannerCandidates {
   JointPhaseMemoryPhase greedyMemory, contextualMemory, beamMemory;
   uint64_t reservedLiveBytes = 0, contextWork = 0;
   uint64_t dependencyWork = 0, packetWork = 0, stateWork = 0;
+  uint64_t dependencyStorageBytes = 0, logicalDependencies = 0;
+  uint64_t storedDependencyConflicts = 0;
   uint64_t transportWork = 0, residualScoreWork = 0;
   uint64_t affectedRotations = 0, affectedObservables = 0;
   unsigned exactContextScores = 0, estimatedContextScores = 0;
@@ -217,8 +219,10 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
     if (status == OpenRegionStatus::InvalidProof)
       result.candidates.clear();
   };
-  if (!source.width || source.width > 4096 || source.rotations.size() > 32768 ||
-      source.observables.empty() || source.observables.size() > 4096 ||
+  if (!source.width || source.width > 4096 ||
+      source.rotations.size() > options.maxGates ||
+      (!source.unitary && source.observables.empty()) ||
+      source.observables.size() > 4096 ||
       source.observables.size() != source.readoutWires.size() ||
       !limits.maxPlans || !limits.maxReadyNodes || !limits.maxPacketSeeds ||
       !limits.region.maxActiveWires || !limits.region.maxRotations ||
@@ -268,13 +272,10 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
   uint64_t rowBytes = sizeof(Gate) + 80 + 16 * limbs;
   uint64_t solverBytes =
       std::min(limits.region.maxLiveBytes, limits.maxLiveBytes / 4);
+  // Reserve the occurrence-axis scratch, not a hypothetical dense graph.
+  // DependencyIndex admits its actual compressed payload before allocation.
   uint64_t dependencyBytes =
-      rp::add(rp::mul(source.rotations.size(), 256 + 16 * limbs),
-              rp::mul(std::min<uint64_t>(options.maxDependencies,
-                                         rp::mul(source.rotations.size(),
-                                                 source.rotations.size()) /
-                                             2),
-                      16));
+      rp::mul(source.rotations.size(), sizeof(Pauli) + 16 * limbs);
   uint64_t sourceRows = source.rotations.size() + source.observables.size();
   // Readout checks its gate cap after one row. Reserve that row's possible
   // native lowering overshoot and vector reallocation, even for a tiny cap.
@@ -295,7 +296,8 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
     for (const auto &plan : result.candidates)
       phase.retainedBytes =
           rp::add(phase.retainedBytes,
-                  rp::mul(plan.prefix.capacity() + plan.observables.capacity(),
+                  rp::mul(plan.prefix.capacity() + plan.observables.capacity() +
+                              plan.exitCliffords.capacity(),
                           rowBytes));
     uint64_t fixed = rp::add(
         commonBytes,
@@ -308,7 +310,8 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
     // vector growth/reallocation; three additional gate slots cover readout
     // scratch. Local solver proposal storage is reserved in solverBytes.
     uint64_t perGate =
-        rp::mul(rowBytes, 6 * uint64_t(states) + 3 + 2 * futurePlans);
+        rp::mul(rowBytes, 6 * uint64_t(states) + 3 +
+                              (source.unitary ? 4 : 2) * futurePlans);
     if (!solverBytes || fixed >= limits.maxLiveBytes ||
         perGate > limits.maxLiveBytes - fixed) {
       fail(OpenRegionStatus::Exhausted, "joint-phase memory phase unavailable");
@@ -324,14 +327,17 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
     memoryPhase = &phase;
     return true;
   };
-  if (!admitMemory(result.greedyMemory, 3, 0))
+  if (commonBytes >= limits.maxLiveBytes) {
+    fail(OpenRegionStatus::Exhausted, "joint-phase source storage unavailable");
     return finish();
+  }
   if (!charge(rp::mul(source.rotations.size() + source.observables.size() + 1,
                       limbs)))
     return finish();
   result.candidates.reserve(planCap);
   result.trace.reserve(traceCap);
   std::vector<Pauli> axes;
+  axes.reserve(source.rotations.size());
   for (const auto &gate : source.rotations) {
     if (gate.kind != Kind::Rotate || !gate.pauli.x.fits(source.width) ||
         !gate.pauli.z.fits(source.width) || !gate.pauli.weight() ||
@@ -358,8 +364,9 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
     }
   }
   uint64_t dependencyStart = budget.work();
-  auto dependencies =
-      DependencyIndex::build(axes, options.maxDependencies, &budget);
+  auto dependencies = DependencyIndex::build(
+      axes, options.maxDependencies, &budget,
+      std::min(options.maxDependencyBytes, limits.maxLiveBytes - commonBytes));
   result.dependencyWork += budget.work() - dependencyStart;
   if (!dependencies) {
     fail(dependencies.exhausted() ? OpenRegionStatus::Exhausted
@@ -367,6 +374,14 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
          "joint-phase dependency construction failed");
     return finish();
   }
+  const auto &dependencyStats = dependencies.value->statistics();
+  result.dependencyStorageBytes = dependencyStats.storageBytes;
+  result.logicalDependencies = dependencyStats.logicalEdges;
+  result.storedDependencyConflicts = dependencyStats.storedConflicts;
+  commonBytes = rp::add(commonBytes, dependencyStats.storageBytes);
+  std::vector<Pauli>().swap(axes);
+  if (!admitMemory(result.greedyMemory, 3, 0))
+    return finish();
   uint64_t ordinal = 0;
   auto initial = [&]() -> std::optional<jp::State> {
     if (!charge(rp::mul(source.rotations.size() + source.observables.size() + 1,
@@ -946,6 +961,8 @@ generateJointPhasePlans(const MeasuredProblem &source, const Options &options,
       return false;
     }
     ++result.completedProposals;
+    if (source.unitary)
+      state.plan.exitCliffords = std::move(state.exit);
     for (const auto &old : result.candidates) {
       if (!charge(rp::mul(old.prefix.size() + state.plan.prefix.size() +
                               source.observables.size() + 1,

@@ -264,6 +264,40 @@ TEST(SynthesisBootstrap, ExactGateCapsIncludeTheConfiguredNativeExpansion) {
             local::BootstrapStatus::Exhausted);
 }
 
+TEST(SynthesisBootstrap, SharedParityFitsBelowTheIndependentGateCap) {
+  const std::vector<Gate> input{Gate::rotation({0, 7}, {1, 4}),
+                                Gate::rotation({0, 11}, {-1, 4})};
+  synthesis::Options options;
+  options.maxGates = 8;
+  auto result = bootstrap(4, input, options);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_EQ(result.independentGates, 10u);
+  EXPECT_EQ(result.gates.size(), 8u);
+  EXPECT_EQ(std::count_if(result.gates.begin(), result.gates.end(),
+                          [](const Gate &g) { return g.kind == Kind::CX; }),
+            6);
+  sameUnitary(4, input, result.gates);
+  options.maxGates = 7;
+  EXPECT_EQ(bootstrap(4, input, options).status,
+            local::BootstrapStatus::Exhausted);
+}
+
+TEST(SynthesisBootstrap, SharedBasesRetainNoncommutingSignsAndScalarPhase) {
+  for (unsigned profile = 0; profile < 2; ++profile) {
+    synthesis::Options options;
+    options.nativeCX = profile == 0;
+    for (unsigned axis = 1; axis < 16; ++axis) {
+      const std::vector<Gate> input{
+          Gate::rotation({axis, 7, true}, {1, 4}), Gate::phase({1, 7}),
+          Gate::rotation({axis ^ 3, 11}, {0, 1, 23, true}),
+          Gate::rotation({3, 5, true}, {-3, 8})};
+      auto result = bootstrap(4, input, options);
+      ASSERT_TRUE(result) << result.error;
+      sameUnitary(4, input, result.gates);
+    }
+  }
+}
+
 TEST(SynthesisBootstrap, EveryBudgetFailureDiscardsItsPartialPrefix) {
   const std::vector<Gate> input{Gate::phase({1, 8}),
                                 Gate::rotation({1, 3}, {1, 4})};

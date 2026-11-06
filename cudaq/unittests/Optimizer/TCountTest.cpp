@@ -961,6 +961,23 @@ TEST(GateCount, LastPlacementUsesEndOfParityLifetime) {
   EXPECT_TRUE(improvedLast);
 }
 
+TEST(TCount, RepeatedWidePauliGadgetsHaveExactScheduledCosts) {
+  constexpr unsigned width = 128, repeats = 1000;
+  QubitSet support;
+  for (unsigned q = 0; q < width; ++q)
+    support.set(q);
+  std::vector<Gate> input(repeats, Gate::rotation({{}, support}, {-1, 4}));
+  auto measured = tc::cost(width, input);
+  // Each independently closed all-Z gadget has 127 compute CNOTs, one T,
+  // and 127 uncompute CNOTs. Their shared pivot serializes every gate and
+  // propagates each T layer to all wires before the next gadget begins.
+  EXPECT_EQ(measured.gates, uint64_t(repeats) * (2 * width - 1));
+  EXPECT_EQ(measured.twoQubit, uint64_t(repeats) * 2 * (width - 1));
+  EXPECT_EQ(measured.t, repeats);
+  EXPECT_EQ(measured.depth, measured.gates);
+  EXPECT_EQ(measured.tDepth, repeats);
+}
+
 TEST(TCount, VisitsVerifiedAlternativesBeforeBeamPruning) {
   // Forward and reverse merging place the resulting S on different sides of
   // the CX. Even a one-entry T beam must expose both to the composing search.

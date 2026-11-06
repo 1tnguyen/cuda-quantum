@@ -16,6 +16,31 @@
 using namespace cudaq::pauli;
 namespace synthesis = cudaq::pauli::graph::detail;
 
+TEST(SynthesisNativeRefinement, WholeProgramCapacityKeepsLocalCleanupPolicy) {
+  for (unsigned gates : {20000u, 40000u}) {
+    std::vector<Gate> word(gates, {Kind::CX, 0, 1});
+    unsigned expectedCalls = gates == 20000 ? 1 : 0;
+    for (unsigned capacity : {262144u, 200000000u}) {
+      cudaq::pauli::graph::Options options;
+      options.maxGates = capacity;
+      auto limits =
+          synthesis::boundedNativeRefinementLimits(options, word.size());
+      limits.gateCountRounds = 1;
+      limits.enableTCount = limits.enableLinearWindows = false;
+      limits.maxBackendWork = 2000000;
+      SearchBudget budget(50000000);
+      auto result =
+          synthesis::refineSynthesizedNative(2, word, options, limits, budget);
+      ASSERT_NE(result.status, synthesis::NativeRefinementStatus::InvalidProof)
+          << result.error;
+      // Crossing the local temporary bound must have the same effect for
+      // both whole-program capacities, rather than consuming linear cleanup's
+      // allowance through newly admitted backend work.
+      EXPECT_EQ(result.gateCountCalls, expectedCalls);
+    }
+  }
+}
+
 namespace {
 using Complex = std::complex<double>;
 using State = std::vector<Complex>;

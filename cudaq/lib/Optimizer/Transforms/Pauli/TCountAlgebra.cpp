@@ -229,17 +229,17 @@ std::vector<Gate> adjoint(const std::vector<Gate> &gates) {
 }
 /// Expand supported multi-wire rotations into exact parity gadgets. This is
 /// mechanical reconstruction, with no search for shared entangling networks.
-std::vector<Gate> materialize(const std::vector<Gate> &gates) {
-  std::vector<Gate> out;
+template <typename Emit>
+void visitMaterialized(const std::vector<Gate> &gates, const Emit &emit) {
   for (const auto &g : gates) {
     if (g.kind != Kind::Rotate || g.pauli.weight() == 1) {
-      out.push_back(g);
+      emit(g);
       continue;
     }
     if (!g.pauli.weight()) {
       // Decoding only emits nonidentity axes. Keep opaque identity rotations
       // untouched; no implicit division of an SSA angle is permitted.
-      out.push_back(g);
+      emit(g);
       continue;
     }
     std::vector<Gate> basis;
@@ -256,14 +256,20 @@ std::vector<Gate> materialize(const std::vector<Gate> &gates) {
     }
     for (auto bits = support.withoutFirst(); bits; bits.resetFirst())
       basis.push_back({Kind::CX, unsigned(firstBit(bits)), pivot});
-    out.insert(out.end(), basis.begin(), basis.end());
-    out.push_back(Gate::rotation({0, QubitSet::single(pivot, 1)},
-                                 g.pauli.sign ? g.angle.negated() : g.angle));
-    auto undo = adjoint(basis);
+    for (const auto &gate : basis)
+      emit(gate);
+    emit(Gate::rotation({0, QubitSet::single(pivot, 1)},
+                        g.pauli.sign ? g.angle.negated() : g.angle));
     // Uncompute both parity and basis changes; retain the signed angle rather
     // than dropping the scalar phase associated with a different convention.
-    out.insert(out.end(), undo.begin(), undo.end());
+    for (auto it = basis.rbegin(); it != basis.rend(); ++it)
+      emit(inverse(*it));
   }
+}
+
+std::vector<Gate> materialize(const std::vector<Gate> &gates) {
+  std::vector<Gate> out;
+  visitMaterialized(gates, [&](const Gate &gate) { out.push_back(gate); });
   return out;
 }
 /// Cancel primitive inverse pairs only after proving every crossed gate
@@ -365,30 +371,42 @@ Cost cudaq::pauli::tcount::cost(unsigned width,
   std::vector<uint64_t> depths(width), tDepths(width);
   // Score concrete parity gadgets, not each multi-wire rotation as one gate.
   // Arbitrary angles remain one unresolved rotation with no estimated T cost.
-  for (const auto &g : detail::materialize(input)) {
+  // Stream the identical lowering order. Broad Pauli words can expand to
+  // hundreds of millions of gates; scoring must not store that temporary word.
+  detail::visitMaterialized(input, [&](const Gate &g) {
     if (g.kind == Kind::Phase)
-      continue;
-    auto support = g.kind == Kind::Rotate ? g.pauli.x | g.pauli.z
-                                          : QubitSet::single(g.a, 1);
-    unsigned count = 1, t = 0;
-    if (g.kind == Kind::Rotate) {
-      support = g.pauli.x | g.pauli.z;
-      if (auto k = detail::quarters(g.angle)) {
-        unsigned magnitude = std::abs(*k);
-        if (magnitude > 8)
-          magnitude = 16 - magnitude;
-        // Count a Z/S/T decomposition, ignoring its scalar phase. Only an odd
-        // coefficient consumes T; X/Y axes also need local basis changes.
-        count = std::popcount(magnitude & 7u);
-        t = (magnitude & 1) && support;
-        result.t += t;
-        if (count && g.pauli.x)
-          count += 2 + (g.pauli.x == g.pauli.z ? 2 : 0);
+      return;
+    if (g.kind != Kind::Rotate) {
+      bool two =
+          g.kind == Kind::CX || g.kind == Kind::CZ || g.kind == Kind::Swap;
+      uint64_t depth = depths[g.a], tDepth = tDepths[g.a];
+      if (two) {
+        depth = std::max(depth, depths[g.b]);
+        tDepth = std::max(tDepth, tDepths[g.b]);
+        depths[g.b] = depth + 1;
+        tDepths[g.b] = tDepth;
+        ++result.twoQubit;
       }
-    } else if (g.kind == Kind::CX || g.kind == Kind::CZ ||
-               g.kind == Kind::Swap) {
-      support |= QubitSet::single(g.b, 1);
-      ++result.twoQubit;
+      depths[g.a] = depth + 1;
+      tDepths[g.a] = tDepth;
+      ++result.gates;
+      result.depth = std::max(result.depth, depth + 1);
+      result.tDepth = std::max(result.tDepth, tDepth);
+      return;
+    }
+    auto support = g.pauli.x | g.pauli.z;
+    unsigned count = 1, t = 0;
+    if (auto k = detail::quarters(g.angle)) {
+      unsigned magnitude = std::abs(*k);
+      if (magnitude > 8)
+        magnitude = 16 - magnitude;
+      // Count a Z/S/T decomposition, ignoring its scalar phase. Only an odd
+      // coefficient consumes T; X/Y axes also need local basis changes.
+      count = std::popcount(magnitude & 7u);
+      t = (magnitude & 1) && support;
+      result.t += t;
+      if (count && g.pauli.x)
+        count += 2 + (g.pauli.x == g.pauli.z ? 2 : 0);
     }
     uint64_t depth = 0, tDepth = 0;
     // Synchronize every touched wire before advancing its schedule. Clifford
@@ -404,6 +422,6 @@ Cost cudaq::pauli::tcount::cost(unsigned width,
     result.tDepth = std::max(result.tDepth, tDepth + t);
     result.gates += count;
     result.depth = std::max(result.depth, depth + count);
-  }
+  });
   return result;
 }

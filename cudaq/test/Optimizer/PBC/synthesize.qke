@@ -6,9 +6,9 @@
 // the terms of the Apache License 2.0 which accompanies this distribution.    //
 // ========================================================================== //
 
-// RUN: cudaq-opt %s --quake-to-pbc='assume-measure-all=true' --quake-synthesize-pbc='synthesis-simplify=false' --verify-each | FileCheck %s --check-prefix=NATIVE
-// RUN: cudaq-opt %s --quake-to-pbc='assume-measure-all=true' --quake-synthesize-pbc='synthesis-native-entanglers=cx synthesis-simplify=false' --verify-each | FileCheck %s --check-prefix=CX
-// RUN: not cudaq-opt %s --quake-to-pbc='assume-measure-all=true' --quake-synthesize-pbc='synthesis-native-entanglers=swap' 2>&1 | FileCheck %s --check-prefix=INVALID
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release assume-measure-all=true' --quake-synthesize-pbc='semantics=release synthesis-simplify=false' --verify-each | FileCheck %s --check-prefix=NATIVE
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release assume-measure-all=true' --quake-synthesize-pbc='semantics=release synthesis-native-entanglers=cx synthesis-simplify=false' --verify-each | FileCheck %s --check-prefix=CX
+// RUN: not cudaq-opt %s --quake-to-pbc='semantics=release assume-measure-all=true' --quake-synthesize-pbc='semantics=release synthesis-native-entanglers=swap' 2>&1 | FileCheck %s --check-prefix=INVALID
 
 // The transformed readout must reconstruct the physical swap, preserving
 // both classical result identities. The study profile prices SWAP as one gate.

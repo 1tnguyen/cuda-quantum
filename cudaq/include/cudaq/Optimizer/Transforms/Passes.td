@@ -1701,8 +1701,11 @@ def ObserveAnsatz : Pass<"observe-ansatz", "mlir::func::FuncOp"> {
 }
 
 def QuakeVerifyPBC : Pass<"quake-verify-pbc", "mlir::func::FuncOp"> {
-  let summary = "Verify measured Pauli-based Quake normal form";
+  let summary = "Verify the recorded hold or release Pauli-based Quake contract";
   let description = [{
+    Hold form retains local primitive Clifford/scalar frames and supports returned
+    scalar SSA wires. It preserves the complete unitary and original terminal
+    measurement instruments. Release form has the following narrower boundary.
     Requires a single block, distinct scalar SSA wires, static Pauli words,
     arbitrary-angle uncontrolled exp_pauli rotations before terminal commuting
     mpp operations, and explicit sink closure. Scalar wire function
@@ -1717,15 +1720,23 @@ def QuakeVerifyPBC : Pass<"quake-verify-pbc", "mlir::func::FuncOp"> {
 }
 
 def QuakeToPBC : Pass<"quake-to-pbc", "mlir::func::FuncOp"> {
-  let summary = "Absorb Cliffords into Pauli rotations and terminal observables";
+  let summary = "Normalize Pauli rotations with a held frame or released readouts";
   let description = [{
+    Defaults to semantics=hold: retain local Clifford/phase frame boundaries
+    and quantum outputs. semantics=release selects the measured-only contract
+    below. Record the contract in quake.pbc_semantics; a released original
+    frame cannot be recovered by a later hold request.
     Converts supported scalar-wire circuits to the quake-verify-pbc contract.
     Preserves the ordered joint measurement distribution for every input state.
     Scalar phase and post-measurement quantum states are not observable outputs.
     Arbitrary angles are retained; no Clifford+T approximation is performed.
     Unsupported input is rejected before mutation, rather than partly converted.
   }];
-  let options = [Option<"assumeMeasureAll", "assume-measure-all", "bool", "false", "Explicitly add terminal Z measurements when the function has none">];
+  let options = [
+    Option<"semantics", "semantics", "std::string", "\"hold\"", "hold preserves the entire unitary; release preserves terminal measurement probabilities">,
+    Option<"assumeMeasureAll", "assume-measure-all", "bool", "false", "Explicit release-only terminal Z measurements when the function has none">,
+    Option<"localFrames", "local-frames", "bool", "true", "Retain local hold Clifford frames before checkpoint synthesis; false absorbs one global frame">
+  ];
   let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
 }
 
@@ -1733,6 +1744,9 @@ def QuakeToPBC : Pass<"quake-to-pbc", "mlir::func::FuncOp"> {
 // entanglers and primitive costs describe the emitted target basis.
 def PBCSynthesisControls {
   list<Option> options = [
+    Option<"semantics", "semantics", "std::string", "\"hold\"", "hold (default) preserves unitary and phase; release preserves ordered terminal measurement probabilities">,
+    Option<"holdCheckpoints", "synthesis-hold-checkpoints", "bool", "true", "Hold-only local graph/frame portfolio before optional global synthesis">,
+    Option<"maxDependencyBytes", "synthesis-dependency-bytes", "uint64_t", "536870912", "Maximum actual compressed dependency storage, separate from the logical edge cap">,
     Option<"actionWeight", "synthesis-action-weight", "double", "0.5", "Weight of actual emitted action cost">,
     Option<"readoutWeight", "synthesis-readout-weight", "double", "0.125", "Weight of shared terminal readout cost change">,
     Option<"nativeEntanglers", "synthesis-native-entanglers", "std::string", "\"cx,cz,swap\"", "Comma-separated native entanglers: cx, cz, swap; CX or CZ required">,
@@ -1950,7 +1964,8 @@ def QuakeOptimizePBC : Pass<"quake-optimize-pbc", "mlir::func::FuncOp"> {
    * https://arxiv.org/abs/2305.10966v2. ASAP scoring here is implementation
    * specific. The portfolio overrides standalone graph acceptance and uses
    * objective, including graph candidate ranking. Unitary
-   * hold semantics are required internally; there is no release-mode CLI knob.
+   * hold semantics are required internally. The semantics option chooses the
+   * whole-program boundary; it does not relax the native optimizer's proofs.
    */
   let options = !listconcat(PBCSynthesisControls.options, [
     Option<"enableGateCount", "gate-count", "bool", "false", "Enable exact network-preserving total-gate strategies">,
@@ -1989,7 +2004,7 @@ def QuakeOptimizePBC : Pass<"quake-optimize-pbc", "mlir::func::FuncOp"> {
     Option<"candidateNodes", "synthesis-candidate-nodes", "unsigned", "0", "Pauli graph synthesis cheapest ready-node limit; 0 means all">,
     Option<"simplify", "synthesis-simplify", "bool", "true", "Simplify commuting rotation words before Pauli graph synthesis">,
     Option<"asymmetric", "synthesis-asymmetric", "bool", "true", "Carry trailing local Clifford gates">,
-    Option<"maxDependencies", "max-dependencies", "unsigned", "1000000", "Maximum Pauli graph synthesis DAG edges">,
+    Option<"maxDependencies", "max-dependencies", "uint64_t", "1000000", "Maximum Pauli graph synthesis DAG edges">,
     Option<"maxSteps", "synthesis-max-steps", "unsigned", "1000000", "Maximum Pauli graph synthesis steps">
   ]);
 }
@@ -2001,13 +2016,15 @@ def QuakeTryPBC : Pass<"quake-try-pbc", "mlir::func::FuncOp"> {
     quake-optimize-pbc. Preflights the entire function, optimizes its native
     representation, and lowers a private candidate to primitive Quake. Commits
     only a verified, representable improvement under the selected objective.
-    Unsupported operations, attributes, control flow or quantum outputs leave
+    Unsupported operations, attributes, control flow or unsupported quantum interfaces leave
     the original function untouched, as do size/work limits and no improvement.
     No statistics attributes are added on fallback. Invalid IR, invalid options
     and internal verification failures fail the pass, without committing edits.
     Exact rational angles must lower exactly; no approximation is enabled.
-    Acceptance preserves joint classical outcomes for arbitrary input states,
-    not post-measurement quantum states (which must not escape).
+    Default hold acceptance preserves the complete unitary, scalar phase,
+    original measurement instruments and scalar SSA quantum returns.
+    Explicit release preserves joint classical outcomes for arbitrary inputs;
+    its final quantum states must not escape.
   }];
   let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
   let options = !listconcat(QuakeOptimizePBC.options, [
@@ -2020,14 +2037,22 @@ def QuakeTryPBC : Pass<"quake-try-pbc", "mlir::func::FuncOp"> {
 def QuakeSynthesizePBC : Pass<"quake-synthesize-pbc", "mlir::func::FuncOp"> {
   let summary = "Synthesize normalized PBC in a configurable native Clifford+T basis";
   let description = [{
-    Reconstructs rotations and terminal joint measurements using native-action
-    costs, shared basis changes, and bounded alternative greedy decisions.
-    Preserves ordered measurement probabilities for arbitrary inputs. Does not
-    run the T decoder or network-preserving cleanup families. Every completed
-    candidate is independently replay checked before it can be selected.
+    Rebuilds the native network from Pauli rotations using native-action costs,
+    shared basis changes and bounded alternative decisions. Default hold
+    reconstructs the full Clifford tail and scalar phase, preserving arbitrary
+    quantum inputs and scalar SSA outputs. Explicit release reconstructs only
+    terminal readouts and preserves their ordered joint probabilities.
+    Optional exact refinements operate on newly generated circuits. Every
+    completed candidate requires the selected contract's independent proof.
+    Explicit native-input with release semantics performs normalization inside
+    the same transaction and retains the incoming circuit as a quality floor;
+    it does not invoke the network-preserving optimization pass.
   }];
   let dependentDialects = ["cudaq::quake::QuakeDialect", "mlir::arith::ArithDialect"];
   let options = !listconcat(PBCSynthesisControls.options, [
+    Option<"nativeInput", "native-input", "bool", "false", "Normalize native release input transactionally and retain its incoming quality floor">,
+    Option<"assumeMeasureAll", "assume-measure-all", "bool", "false", "Explicit release-only terminal Z measurements for native-input when the function has none">,
+    Option<"nativeAcceptance", "native-acceptance", "std::string", "\"all-metrics\"", "Incoming floor: all-metrics or gates-and-t; applies to native-input">,
     Option<"objective", "objective", "std::string", "\"total-gates\"", "total-gates, t-count, t-depth, entanglers, or depth; T never increases">,
     Option<"maxWork", "max-work", "uint64_t", "100000000", "Shared synthesis and proof work allowance">,
     Option<"timeoutMs", "timeout-ms", "unsigned", "0", "Optional search deadline; zero disables">,
@@ -2039,7 +2064,7 @@ def QuakeSynthesizePBC : Pass<"quake-synthesize-pbc", "mlir::func::FuncOp"> {
     Option<"candidateNodes", "synthesis-candidate-nodes", "unsigned", "0", "Cheapest ready-node cap; zero considers all">,
     Option<"simplify", "synthesis-simplify", "bool", "true", "Merge compatible exact rotations before synthesis">,
     Option<"asymmetric", "synthesis-asymmetric", "bool", "true", "Include asymmetric native entangling actions">,
-    Option<"maxDependencies", "max-dependencies", "unsigned", "1000000", "Dependency edge limit">,
+    Option<"maxDependencies", "max-dependencies", "uint64_t", "1000000", "Dependency edge limit">,
     Option<"maxSteps", "synthesis-max-steps", "unsigned", "1000000", "Entangling decision limit">
   ]);
 }
@@ -2047,6 +2072,9 @@ def QuakeSynthesizePBC : Pass<"quake-synthesize-pbc", "mlir::func::FuncOp"> {
 def QuakeLowerPBC : Pass<"quake-lower-pbc", "mlir::func::FuncOp"> {
   let summary = "Lower Quake PBC rotations and joint measurements to primitives";
   let description = [{
+    Honor the recorded contract. Hold preserves scalar phase, quantum return
+    identities and original measurement instruments when lowering rotations
+    and its Clifford tail. Release follows the readout lowering below.
     Verifies PBC input, then lowers rotations with parity gadgets and mpp with
     a shared Clifford readout network followed by terminal Z measurements on
     the original readout wires. No gates are emitted after measurement. Readout

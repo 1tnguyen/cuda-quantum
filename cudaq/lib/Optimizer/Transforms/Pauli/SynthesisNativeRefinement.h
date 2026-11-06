@@ -30,6 +30,25 @@ struct NativeRefinementLimits {
   uint64_t maxWork = 100000000;
   uint64_t maxBackendWork = 10000000;
 };
+
+/// Grow admission with the actual native source, rather than using the
+/// whole-program reconstruction ceiling as extra local search capacity.
+/// Small sources retain the established temporary allowance and search lanes.
+inline unsigned nativeContinuationGateLimit(const Options &options,
+                                            size_t sourceGates) {
+  return std::min<uint64_t>(
+      options.maxGates,
+      std::max<uint64_t>(NativeRefinementLimits{}.maxTemporaryGates,
+                         sourceGates));
+}
+inline NativeRefinementLimits
+boundedNativeRefinementLimits(const Options &options, size_t sourceGates) {
+  NativeRefinementLimits limits;
+  limits.maxGates = nativeContinuationGateLimit(options, sourceGates);
+  limits.maxTemporaryGates =
+      std::max(limits.maxTemporaryGates, limits.maxGates);
+  return limits;
+}
 enum class NativeRefinementStatus {
   Complete,
   Unchanged,

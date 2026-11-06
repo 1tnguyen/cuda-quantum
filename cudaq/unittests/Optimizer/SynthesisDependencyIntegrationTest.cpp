@@ -96,6 +96,24 @@ TEST(SynthesisDependencyIntegration, CommutingSingletsKeepOccurrenceOrder) {
   sameCircuit(result.gates, input);
 }
 
+TEST(SynthesisDependencyIntegration, LogicalDependencyCountsExceed32Bits) {
+  constexpr uint64_t repeats = 70000;
+  std::vector<Gate> input(repeats, Gate::rotation({1, 0}, {1, 8}));
+  input.insert(input.end(), repeats, Gate::rotation({0, 1}, {1, 8}));
+  auto options = isolatedSynthesis();
+  options.maxGates = 200000;
+  options.maxDependencies = 1000000000000ULL;
+  // Fund import and the compressed two-class index, then stop at cursor
+  // construction. No quadratic occurrence graph or synthesis rollout is needed.
+  SearchBudget budget(600000);
+  auto result = synthesize(1, input, options, &budget);
+  EXPECT_FALSE(result);
+  EXPECT_TRUE(budget.stopped());
+  EXPECT_EQ(result.stats.dependencies, repeats * repeats);
+  EXPECT_EQ(result.stats.dependencyAxisClasses, 2u);
+  EXPECT_EQ(result.stats.dependencyConflictEntries, 2u);
+}
+
 TEST(SynthesisDependencyIntegration,
      IndexUsesTheWordAfterSimplificationAndPruning) {
   const std::vector<Gate> input{Gate::rotation({0, 1}, {1, 4}),

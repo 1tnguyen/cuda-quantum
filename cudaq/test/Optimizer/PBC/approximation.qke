@@ -14,7 +14,7 @@
 /// requires explicit permission to approximate exact rational angles.
 //===----------------------------------------------------------------------===//
 
-// RUN: cudaq-opt %s --quake-verify-pbc --quake-optimize-pbc --quake-verify-pbc | FileCheck %s --check-prefix=KEEP
+// RUN: cudaq-opt %s --quake-verify-pbc --quake-optimize-pbc='semantics=release' --quake-verify-pbc | FileCheck %s --check-prefix=KEEP
 // RUN: cudaq-opt %s --canonicalize --quake-verify-pbc | FileCheck %s --check-prefix=ADJOINT
 // RUN: not cudaq-opt %s --quake-lower-pbc 2>&1 | FileCheck %s --check-prefix=REJECT
 // RUN: cudaq-opt %s --quake-lower-pbc='allow-approximate-angles=true' | FileCheck %s --check-prefix=LOWER

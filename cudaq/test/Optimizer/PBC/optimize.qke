@@ -15,15 +15,15 @@
 /// limits are reached.
 //===----------------------------------------------------------------------===//
 
-// RUN: cudaq-opt %s --quake-verify-pbc --quake-optimize-pbc --quake-verify-pbc | FileCheck %s
-// RUN: cudaq-opt %s --quake-optimize-pbc='graph-synthesis=false' | FileCheck %s
-// RUN: cudaq-opt %s --quake-optimize-pbc='max-work=1' | FileCheck %s --check-prefix=BUDGET
-// RUN: cudaq-opt %s --quake-optimize-pbc='max-gates=1' | FileCheck %s --check-prefix=SIZE
-// RUN: not cudaq-opt %s --quake-optimize-pbc='max-work=0' 2>&1 | FileCheck %s --check-prefix=LIMIT
-// RUN: not cudaq-opt %s --quake-optimize-pbc='objective=invalid' 2>&1 | FileCheck %s --check-prefix=OBJECTIVE
-// RUN: cudaq-opt %s --quake-optimize-pbc='objective=t-depth' --quake-verify-pbc > /dev/null
-// RUN: cudaq-opt %s --quake-optimize-pbc='objective=depth' --quake-verify-pbc > /dev/null
-// RUN: cudaq-opt %s --quake-optimize-pbc='objective=entanglers t-count=false' --quake-verify-pbc > /dev/null
+// RUN: cudaq-opt %s --quake-verify-pbc --quake-optimize-pbc='semantics=release' --quake-verify-pbc | FileCheck %s
+// RUN: cudaq-opt %s --quake-optimize-pbc='semantics=release graph-synthesis=false' | FileCheck %s
+// RUN: cudaq-opt %s --quake-optimize-pbc='semantics=release max-work=1' | FileCheck %s --check-prefix=BUDGET
+// RUN: cudaq-opt %s --quake-optimize-pbc='semantics=release max-gates=1' | FileCheck %s --check-prefix=SIZE
+// RUN: not cudaq-opt %s --quake-optimize-pbc='semantics=release max-work=0' 2>&1 | FileCheck %s --check-prefix=LIMIT
+// RUN: not cudaq-opt %s --quake-optimize-pbc='semantics=release objective=invalid' 2>&1 | FileCheck %s --check-prefix=OBJECTIVE
+// RUN: cudaq-opt %s --quake-optimize-pbc='semantics=release objective=t-depth' --quake-verify-pbc > /dev/null
+// RUN: cudaq-opt %s --quake-optimize-pbc='semantics=release objective=depth' --quake-verify-pbc > /dev/null
+// RUN: cudaq-opt %s --quake-optimize-pbc='semantics=release objective=entanglers t-count=false' --quake-verify-pbc > /dev/null
 
 func.func @two_t(%a: !quake.wire, %b: !quake.wire) -> !quake.measure {
   %angle = arith.constant -0.39269908169872414 : f64

@@ -22,6 +22,7 @@
 #include "cudaq/Optimizer/Pauli/SearchBudget.h"
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cudaq::pauli::graph {
@@ -34,6 +35,25 @@ using ::cudaq::pauli::Pauli;
 
 enum class SynthesisObjective { TotalGates, TCount, Entanglers, Depth, TDepth };
 enum class JointPhaseAcceptance { AllFive, GatesAndT };
+enum class SearchTermination { Complete, Exhausted, Unsupported, InvalidProof };
+
+/// Optional bounded diagnostics. Events explain route admission and exhaustion;
+/// they are never correctness certificates or transferable source bindings.
+struct RouteEvent {
+  std::string route, status, reason;
+  uint64_t sourceGates = 0, candidateGates = 0, work = 0, memoryBytes = 0;
+  uint64_t logicalDependencies = 0, storedConflicts = 0, independentGates = 0;
+};
+struct Diagnostics {
+  std::vector<RouteEvent> events;
+  unsigned dropped = 0;
+  void record(RouteEvent event) {
+    if (events.size() < 64)
+      events.push_back(std::move(event));
+    else
+      ++dropped;
+  }
+};
 
 /// Controls for one graph-synthesis invocation, not a global optimum search.
 /// The singlet/factor costs, ready-node frontier, and hold/release distinction
@@ -51,6 +71,8 @@ enum class JointPhaseAcceptance { AllFive, GatesAndT };
 /// an exhausted graph search/replay can return an error with a partial
 /// candidate.
 struct Options {
+  /// Borrowed, optional sink; child routes share the same bounded event log.
+  Diagnostics *diagnostics = nullptr;
   SynthesisObjective objective = SynthesisObjective::TotalGates;
   /// Score the actual emitted Clifford action and terminal measurement network.
   double actionWeight = 0.5;
@@ -151,6 +173,15 @@ struct Options {
   /// hint. The combined unitary optimizer rejects release=true.
   bool release = false;
 
+  /// Hold-only locality portfolio: fully reconstruct bounded Pauli/frame
+  /// blocks before optional wider and global routes. Input must retain local
+  /// Clifford frames to benefit; no original native network is a fallback.
+  /// False selects the monolithic hold route for controlled comparisons.
+  bool holdCheckpoints = true;
+  /// Internal hold continuation policy. Release and standalone synthesis retain
+  /// their established H/S local factor completion unless explicitly enabled.
+  bool nativeLocalCliffords = false;
+
   /// Maximum native gate-vector length for both input and emitted output.
   /// Must be positive. Oversized input or output fails this synthesis
   /// candidate;
@@ -167,7 +198,10 @@ struct Options {
   /// but never drops constraints to satisfy this limit. Stored memory depends
   /// on distinct axes and their conflicts, reported separately in Statistics.
   /// Reducing lookahead does not reduce dependency-index construction.
-  unsigned maxDependencies = 1000000;
+  uint64_t maxDependencies = 1000000;
+  /// Actual compressed dependency storage, independently of logical edges.
+  /// Exhaustion declines this route without dropping ordering constraints.
+  uint64_t maxDependencyBytes = 512ull << 20;
 
   /// Maximum entangling synthesis steps, including terminal-frame synthesis.
   /// A step selects an entangling action; it is not one arbitrary emitted gate
@@ -182,8 +216,8 @@ struct Options {
   /// provider. All providers share the invocation budget, preserve fixed
   /// physical readouts, and may replace the incumbent only without worsening
   /// any of its five integral metrics. These controls do not affect
-  /// synthesize() or permit a preserve-network circuit to seed normalized-PBC
-  /// synthesis.
+  /// synthesize(). Providers do not implicitly import a native network; an
+  /// explicit incoming argument must first bind to the same measured source.
   unsigned representationSteps = 0;
   unsigned readoutCandidates = 0;
   unsigned commutingCandidates = 0;
@@ -231,7 +265,8 @@ struct Options {
 /// Graph preprocessing, search, and acceptance counters for one synthesis call.
 struct Statistics {
   /// Rotation counts before/after preprocessing and logical dependency edges.
-  unsigned rotationsBefore = 0, rotationsAfter = 0, dependencies = 0;
+  unsigned rotationsBefore = 0, rotationsAfter = 0;
+  uint64_t dependencies = 0;
   /// Distinct unsigned axes and directed conflict entries in the exact index.
   /// These describe compressed storage, independently of the logical edge cap.
   unsigned dependencyAxisClasses = 0;
@@ -251,6 +286,8 @@ struct Result {
   Statistics stats;
   /// Empty after successful semantic checking; otherwise explains failure.
   std::string error;
+  /// Hold routes distinguish optional exhaustion from a fatal invalid proof.
+  SearchTermination termination = SearchTermination::Complete;
   explicit operator bool() const { return error.empty(); }
 };
 
@@ -262,6 +299,17 @@ Result synthesize(unsigned width, const std::vector<Gate> &, const Options &,
                   SearchBudget *budget = nullptr,
                   uint64_t *verificationNs = nullptr);
 
+/// Network-changing hold synthesis from a lossless Pauli representation.
+/// Reconstructs the complete unitary, including frame, scalar and wire order.
+/// By default completes local graph/frame checkpoints before optional wider
+/// and global reconstruction. Local Clifford witnesses may interleave
+/// rotations; absorbing them globally before this call loses the locality
+/// information. Uses graph reconstruction and the enabled regional/joint-phase
+/// providers; measured-only transformations cannot certify a result of this
+/// entry point.
+Result synthesizeUnitary(unsigned width, const std::vector<Gate> &,
+                         const Options &, SearchBudget *budget = nullptr);
+
 /// Joint terminal readout on the specified physical wires. Empty error means
 /// success; returns no partial network on invalid/dependent readouts.
 Result synthesizeReadout(unsigned width, const std::vector<Pauli> &,
@@ -271,11 +319,24 @@ Result synthesizeReadout(unsigned width, const std::vector<Pauli> &,
 /// Reconstruct a normalized measured program. The returned gate network
 /// includes terminal readout Cliffords; measurements are Z on readoutWires.
 /// Every candidate is replay checked before selection. No full-unitary or
-/// classical output-permutation equivalence is assumed.
-pbc::Result synthesizeMeasured(unsigned width, const std::vector<Gate> &,
-                               const std::vector<Pauli> &,
-                               const std::vector<unsigned> &readoutWires,
-                               const Options &, SearchBudget * = nullptr);
+/// classical output-permutation equivalence is assumed. An explicit incoming
+/// candidate must include its readout network; it is independently bound to
+/// this source before it can serve as an incumbent. Optional exhaustion retains
+/// that checked incumbent, while an invalid binding is fatal.
+pbc::Result synthesizeMeasured(
+    unsigned width, const std::vector<Gate> &, const std::vector<Pauli> &,
+    const std::vector<unsigned> &readoutWires, const Options &,
+    SearchBudget * = nullptr, SearchTermination * = nullptr,
+    const std::vector<Gate> *incoming = nullptr,
+    JointPhaseAcceptance incomingAcceptance = JointPhaseAcceptance::AllFive);
+
+/// Independent normalization/source-binding replay. This restricted checker
+/// does not replace the certificates of later local algebraic refinements.
+bool verifyMeasured(unsigned width, const std::vector<Gate> &input,
+                    const std::vector<Pauli> &observables,
+                    const std::vector<Gate> &output,
+                    const std::vector<Pauli> &outcomes,
+                    SearchBudget * = nullptr);
 
 /// Gate cost in the configured primitive basis; includes exact Clifford+T
 /// lowering of one-wire rotations. Does not approximate arbitrary rotations.

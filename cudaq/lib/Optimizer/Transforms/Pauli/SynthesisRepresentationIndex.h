@@ -15,9 +15,9 @@ namespace cudaq::pauli::graph::detail {
 
 struct IndexedRepresentationLimits {
   unsigned maxSteps = 64;
-  /// Explicit input bounds, also capped internally at these defaults. Scores
-  /// consequently fit int64_t even at maximum support on every input row.
-  unsigned maxRotations = 32768, maxObservables = 4096, maxWidth = 4096;
+  /// Source admission is separate from checked temporary storage and work.
+  /// Support sums fit int64_t for an unsigned row count and width <= 4096.
+  unsigned maxRotations = 2000000, maxObservables = 4096, maxWidth = 4096;
   uint64_t maxWork = 100000000;
   /// Conservative owned-payload bound including both transactional words,
   /// wide Pauli limbs, score vectors, changed-row indices and certificate.
@@ -87,7 +87,7 @@ exploreIndexedRepresentations(const MeasuredProblem &source,
     return false;
   };
   if (!source.width || source.width > std::min(limits.maxWidth, 4096u) ||
-      source.rotations.size() > std::min(limits.maxRotations, 32768u) ||
+      source.rotations.size() > limits.maxRotations ||
       source.observables.size() > std::min(limits.maxObservables, 4096u)) {
     unsupported("indexed representation dimensions exceed their limits");
     return finish();

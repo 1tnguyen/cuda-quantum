@@ -13,7 +13,24 @@ with stock CUDA-Q and preserve-network PBC.
 
 ## Contract and scope
 
-Normalization absorbs the Clifford network into rotation axes and signed terminal
+The existing measurements below describe **release** synthesis. Their
+reproduction requires `semantics=release` on conversion and synthesis now that
+the pass default is **hold**. Hold retains and reconstructs the full terminal
+Clifford/phase obligation; its results are reported separately from these
+historical release results and use the original pre-normalization inputs.
+
+The subsequent release quality fix adds an explicit `native-input=true` mode
+that binds an incoming native incumbent across private normalization and
+enforces an immutable five-metric floor by default. Shared parity
+reconstruction and compressed dependency admission also apply to normalized
+sources. The historical measurements below retain their original recipes.
+[Appendix H of the optimization report](pbc-optimization-report.md#appendix-h-post-refactor-release-quality-fix-2026-11-06)
+records the new recipe, independently verified spot checks and remaining
+normalized-only quality gaps. This mode requires `semantics=release`; the
+default hold implementation and the isolated hold tuning results retain their
+separate scope.
+
+Release normalization absorbs the Clifford network into rotation axes and signed terminal
 observables. Synthesis reconstructs a native circuit that preserves **ordered
 joint terminal measurement probabilities for arbitrary input states**. It need
 not preserve discarded output states or the full unitary. Physical readout wires,
@@ -117,11 +134,11 @@ CUDAQ_OPT="$CUDAQ_BUILD_DIR/bin/cudaq-opt"
 "$CUDAQ_OPT" input.qke --convert-to-linear-values \
   --mlir-disable-threading -o prepared.qke
 "$CUDAQ_OPT" prepared.qke \
-  --quake-to-pbc='assume-measure-all=true' --quake-verify-pbc \
+  --quake-to-pbc='semantics=release assume-measure-all=true' --quake-verify-pbc \
   --mlir-disable-threading -o normalized.qke
 prlimit --as=8589934592 --cpu=3600 --core=0 -- \
   "$CUDAQ_OPT" normalized.qke \
-  --quake-synthesize-pbc='objective=total-gates synthesis-native-entanglers=cx,cz,swap synthesis-swap-cost=1 synthesis-simplify=false synthesis-prune-unobserved=false synthesis-discrepancy-steps=22 max-work=1000000000000000 timeout-ms=0' \
+  --quake-synthesize-pbc='semantics=release objective=total-gates synthesis-native-entanglers=cx,cz,swap synthesis-swap-cost=1 synthesis-simplify=false synthesis-prune-unobserved=false synthesis-discrepancy-steps=22 max-work=1000000000000000 timeout-ms=0' \
   --mlir-disable-threading -o synthesized.qke
 "$CUDAQ_OPT" synthesized.qke \
   --pass-pipeline='builtin.module(func.func(regtomem))' \
@@ -960,32 +977,35 @@ identical fixed-work greedy settings, not repeated speedup measurements.
 <!-- reconciliation-results:start -->
 ### Final results for all fifteen cases
 
-This validation uses one frozen Release compiler and identical pass options
-for all fifteen cases. It compares both total gates and T count with the
+The historical release validation uses one frozen Release compiler and identical pass options
+for all fifteen cases. The added hold column uses the separately recorded
+`hold-v1-120s` configuration below, on the same original inputs. It compares both total gates and T count with the
 preserve-network reference and with the independently verified results
 recorded before reconciliation.
-**All 15 cases are independently verified; 12 meet both preserve targets,
+**Release: all 15 cases are independently verified; 12 meet both preserve targets,
 and all 15 meet the preserve T-count target.**
 
-| Circuit | Stock CUDA-Q gates / T | Preserve gates / T | Reconciled gates / T | Gate gap to preserve |
-|---|---:|---:|---:|---:|
-| adder4 | 24 / 8 | 22 / 8 | 20 / 7 | -2 |
-| adder10 | 140 / 32 | 106 / 32 | 102 / 31 | -4 |
-| adder28 | 418 / 96 | 316 / 96 | 306 / 96 | -10 |
-| adder64 | 974 / 224 | 736 / 224 | 709 / 224 | -27 |
-| adder118 | 1808 / 416 | 1366 / 416 | 1361 / 416 | -5 |
-| adder433 | 6673 / 1536 | 5041 / 1536 | 6344 / 1536 | +1303 |
-| multiply13 | 105 / 32 | 91 / 32 | 73 / 32 | -18 |
-| rc_adder_6 | 191 / 63 | 147 / 47 | 151 / 47 | +4 |
-| csla_mux_3 | 161 / 64 | 156 / 62 | 146 / 62 | -10 |
-| qft_n002 | 8 / 3 | 8 / 3 | 7 / 3 | -1 |
-| mod5_4 | 57 / 16 | 37 / 7 | 18 / 7 | -19 |
-| basis_trotter_n4_transpiled | 20299 / 7190 | 14816 / 7108 | 14702 / 7108 | -114 |
-| basis_trotter_n4 | 19667 / 7136 | 14410 / 6886 | 14233 / 6886 | -177 |
-| basis_test_n4_transpiled | 885 / 314 | 654 / 310 | 651 / 310 | -3 |
-| grover_5 | 668 / 178 | 500 / 166 | 512 / 166 | +12 |
+| Circuit | Stock CUDA-Q gates / T | Preserve gates / T | Release gates / T | Hold gates / T | Release gate gap to preserve |
+|---|---:|---:|---:|---:|---:|
+| adder4 | 24 / 8 | 22 / 8 | 20 / 7 | 20 / 8 | -2 |
+| adder10 | 140 / 32 | 106 / 32 | 102 / 31 | 145 / 32 | -4 |
+| adder28 | 418 / 96 | 316 / 96 | 306 / 96 | 434 / 96 | -10 |
+| adder64 | 974 / 224 | 736 / 224 | 709 / 224 | 1031 / 224 | -27 |
+| adder118 | 1808 / 416 | 1366 / 416 | 1361 / 416 | 2216 / 416 | -5 |
+| adder433 | 6673 / 1536 | 5041 / 1536 | 6344 / 1536 | — (120 s limit) | +1303 |
+| multiply13 | 105 / 32 | 91 / 32 | 73 / 32 | 91 / 32 | -18 |
+| rc_adder_6 | 191 / 63 | 147 / 47 | 151 / 47 | 163 / 47 | +4 |
+| csla_mux_3 | 161 / 64 | 156 / 62 | 146 / 62 | 177 / 62 | -10 |
+| qft_n002 | 8 / 3 | 8 / 3 | 7 / 3 | 8 / 3 | -1 |
+| mod5_4 | 57 / 16 | 37 / 7 | 18 / 7 | 29 / 8 | -19 |
+| basis_trotter_n4_transpiled | 20299 / 7190 | 14816 / 7108 | 14702 / 7108 | 17964 / 7190 | -114 |
+| basis_trotter_n4 | 19667 / 7136 | 14410 / 6886 | 14233 / 6886 | 17769 / 7136 | -177 |
+| basis_test_n4_transpiled | 885 / 314 | 654 / 310 | 651 / 310 | 650 / 310 | -3 |
+| grover_5 | 668 / 178 | 500 / 166 | 512 / 166 | 493 / 166 | +12 |
 
-Positive gate gaps remain above the preserve-network target. The stock
+The hold column has 14 independently verified outputs and one synthesis limit;
+see [the hold evidence](#hold-contract-measurements-2026-11-06). Positive release
+gate gaps remain above the preserve-network target. The stock
 and preserve columns are the saved paired references for these exact inputs.
 
 | Circuit | Gates | T | Two-qubit | Depth | T-depth |
@@ -1159,6 +1179,18 @@ profile, and a combined 100-billion joint work allowance. Each planner has
 storage within 2 GiB. The wider 256 MiB planner probe did not improve the retained
 result, so the fixed configuration uses the smaller tested bound.
 
+The subsequent full-suite capacity configuration is documented in
+[the optimization report, F.5](pbc-optimization-report.md#f5-suite-capacity-investigation-2026-11-06).
+It raises the outer structural and replay-work limits while retaining these
+search strategies and deadlines. Optional joint completion keeps its own
+262,144-gate and 2 GiB storage bounds, and native refinement keeps its bounded
+temporary allowance. Local native, Four-wire, Clifford and algebraic limits
+grow with the actual native source size rather than the global reconstruction
+ceiling. The [capacity regression fix](pbc-optimization-report.md#f6-parallel-continuation-and-capacity-regression-fix-2026-11-06)
+records the two exact-output spot checks and the compiler used for subsequent
+collection. The earlier reconciliation measurements retain the
+configuration recorded with them.
+
 The exact options are in `reconciliation-config.json`; the recorded invocation
 is `reconciliation-command.json`, both under
 `build/pbc-synthesis-redesign-2026-11-05/`. To reproduce a frozen run, use its
@@ -1271,7 +1303,440 @@ profile require a coordinated interface revision; local heuristic experiments
 do not. This lets a module improve its subproblem without changing the meaning
 of another module's result or weakening global verification.
 
+## Hold contract measurements (2026-11-06)
+
+The `hold-v1-120s` run uses the fifteen original pre-normalization inputs from
+`build/pbc-synthesis-redesign-2026-11-05/benchmark/`. It rebuilds native circuits
+under the full-unitary contract, including scalar phase and wire identities.
+The release figures in the comparison above retain their historical frozen
+configuration; the hold run has its own fixed configuration and source hashes.
+It does not use a preserve-network output as a synthesis seed or fallback.
+
+**Fourteen of fifteen hold circuits were emitted and independently verified.**
+`adder433` exhausted the 120-second synthesis allowance before a complete
+candidate existed. `adder118` retained a previously verified incumbent when its
+allowance expired. These outcomes are not replaced by original-circuit metrics.
+
+| Circuit | Gates | T | Two-qubit | Depth | T-depth | Hold verification |
+|---|---:|---:|---:|---:|---:|---|
+| adder4 | 20 | 8 | 8 | 14 | 5 | verified |
+| adder10 | 145 | 32 | 74 | 77 | 16 | verified |
+| adder28 | 434 | 96 | 215 | 144 | 29 | verified |
+| adder64 | 1031 | 224 | 495 | 282 | 62 | verified |
+| adder118 | 2216 | 416 | 958 | 555 | 134 | verified |
+| adder433 | — | — | — | — | — | 120 s synthesis limit; no complete output |
+| multiply13 | 91 | 32 | 39 | 28 | 7 | verified |
+| rc_adder_6 | 163 | 47 | 79 | 103 | 34 | verified |
+| csla_mux_3 | 177 | 62 | 83 | 67 | 18 | verified |
+| qft_n002 | 8 | 3 | 3 | 7 | 2 | verified |
+| mod5_4 | 29 | 8 | 17 | 20 | 5 | verified |
+| basis_trotter_n4_transpiled | 17964 | 7190 | 368 | 9042 | 3590 | verified |
+| basis_trotter_n4 | 17769 | 7136 | 327 | 7801 | 3091 | verified |
+| basis_test_n4_transpiled | 650 | 310 | 28 | 397 | 188 | verified |
+| grover_5 | 493 | 166 | 228 | 356 | 104 | verified |
+
+All emitted gate portions passed MQT QCEC 3.11.0 unitary equivalence checks,
+with simulation checking disabled. The compiler's phase-sensitive source-bound
+proofs preserve the stronger exact scalar contract. Independent dense matrices
+including actual scalar phase were additionally compared for all six inputs
+of at most eight qubits; the largest entrywise error was `2.31e-13` at the
+unchanged `1e-10` tolerance. The proof-only retries for the two long Trotter
+circuits corrected naive floating-point accumulation of thousands of scalar
+angles to `math.fsum`. Both original attempts are retained, and all twenty
+saved hold/release outputs have unchanged hashes across those retries.
+
+The release regression spot checks ran the pre-change and post-change compilers
+on `adder4`, `qft_n002`, and `mod5_4`, with the same release options and prepared
+inputs. All six outputs passed the independent ordered joint-measurement
+coherent-copy check. Each pair has identical native gate words, physical
+readouts and all five metrics:
+
+| Release spot check | Gates | T | Two-qubit | Depth | T-depth |
+|---|---:|---:|---:|---:|---:|
+| adder4, before and after | 20 | 7 | 10 | 12 | 3 |
+| qft_n002, before and after | 7 | 3 | 2 | 5 | 2 |
+| mod5_4, before and after | 18 | 7 | 9 | 10 | 3 |
+
+The build passed **366 native tests and all 14 PBC lit tests**, including the
+existing release tests with explicit `semantics=release`.
+
+### Hold reproduction and evidence
+
+Compiler SHA-256: `290bb75d1644a5252f240bf3aa26ab50b50f67bfa36e86fdf34de83139d8ae3e`.
+Configuration: one worker, 8 GiB address-space cap, native CX/CZ/SWAP with unit
+costs, total-gates objective, `max-gates=262144`,
+`max-dependencies=64000000`, `max-work=1000000000000`,
+`timeout-ms=120000`, 22 discrepancy decisions, 8 commuting candidates,
+4 algebraic candidates, 4 joint-phase plans, 3B first-profile planner work,
+100B aggregate joint work, a 120-second joint allowance and the wider profile.
+Preprocessing simplification and unobserved pruning are disabled. Readout and
+observable representation providers are release-only; the spot checks enable
+8 readout candidates, 32 representation steps and 64 indexed steps.
+
+Only compiler-generated `quake.evince` implicit-output annotations are removed
+before scalar-wire conversion, as in the existing benchmark workflow. Original
+circuits and explicit measurements are retained and hashed. Release inserts
+terminal Z measurements only for sources without measurements; hold adds none.
+Counts come from the emitted native circuit and exclude scalar phases,
+measurements, allocations and sinks.
+
+The tracked runner is [benchmark_contracts.py](../utils/pbc/benchmark_contracts.py).
+The complete options, commands, input/output hashes, independent proofs and
+retry history are in
+`build/pbc-hold-2026-11-06/benchmark-final/results.json`.
+`compiler-manifest.json`, `tests.json`, and `lit.log` in the parent directory
+identify the build and checks; `runner.executed.py` retains the initial runner.
+
+```sh
+PYTHONPATH=/tmp/pbc-hold-python python3 utils/pbc/benchmark_contracts.py \
+  --compiler build/pbc-hold-2026-11-06/cudaq-opt-hold \
+  --before-compiler build/pbc-hold-2026-11-06/cudaq-opt-before \
+  --snapshot build/pbc-synthesis-redesign-2026-11-05/benchmark \
+  --output build/pbc-hold-2026-11-06/benchmark-repeat
+```
+
+The isolated Python directory contains Qiskit 2.6.0 and MQT QCEC 3.11.0.
+`--cases adder4 adder10 ...` selects a smaller subset; `--verify-only` retries
+unresolved proofs on saved outputs without compilation or resynthesis.
+
+## Isolated hold-only architecture tuning (2026-11-06)
+
+This separate study targets the original ten circuits with study-proposal data:
+adder4, adder10, adder28, adder64, adder118, adder433, multiply13,
+rc_adder_6, csla_mux_3 and qft_n002. Its target is a strictly smaller native gate
+count than both recorded stock CUDA-Q and Qiskit counts, while preserving the
+full unitary, scalar phase and output interface. T count, entanglers, depth and
+T-depth remain visible. Release or state-preparation equivalence is ineligible.
+
+All tuning code, compiler variants, immutable source snapshots, generated
+circuits and proof artifacts live under `/tmp/pbc-hold-tuning-20261106-ob5kvhcm`. Only this tuning document is
+updated in the source tree, which is undergoing an independent refactor.
+The initial 46 production source files are reconstructed from the earlier
+compiler's source patch and checked against its frozen source manifest.
+
+The investigation starts with architectural ablations: feasible completion and
+budget scheduling before global discrepancy search; quantum-frame cost in
+partial-plan ranking; and gate/T admission of phase-exact refinements instead
+of rejecting useful gate reductions on secondary metrics. Reconstructed PBC
+words may be refined, but a preserved original/native optimizer output is not
+used as a substitute synthesis result. Every reported improvement requires an
+actual emitted circuit and independent unitary verification.
+
+The saved Qiskit QFT-2 result records a swapped final layout. Its seven counted
+gates omit the physical output swap that the existing fixed-wire hold result
+contains. The mapping and feasibility of a strict improvement target are
+audited below before treating this reference as directly comparable.
+
+### Exact QFT-2 bound and comparison audit
+
+The QFT-2 target is already optimal at **8 gates** for the fixed-wire unitary
+and declared Clifford+T/CX/CZ/SWAP basis. An exact projective
+meet-in-the-middle search enumerated every circuit of at most seven gates,
+using radius-three and radius-four sets of 1,952 and 10,072 distinct projective
+unitaries. The search even allowed native CY in both directions and arbitrary
+free global phase. No shorter implementation exists in that enlarged basis.
+The radius search independently recovered minima 1 for H and CZ, 5 for
+controlled-S, and 7 for QFT without the final swap. Undefined-behavior
+sanitization passed the same exact-integer enumeration.
+
+The saved Qiskit seven-gate circuit differs from the fixed-wire source by a
+maximum matrix-entry error of approximately 1; applying its recorded swapped
+final layout gives error 0. The historical study also allows swap elision.
+Thus strictly beating *all* ten recorded stock/Qiskit totals is infeasible under
+the present fixed-wire hold contract: stock QFT-2 is already at the proven
+minimum. This is recorded as a lower-bound limitation, not a tuned win or
+permission to weaken hold semantics. The final profile below achieves all
+nine remaining strict targets.
+
+The exact-search source, sanitized executable/output and Qiskit layout audit
+are saved under the isolated workspace as `tools/qft_lower_bound.cpp`,
+`qft-lower-bound-ubsan.json`, `qft-search-sanity.log` and `qft-reference/`.
+
+### Architectural ablations and local frame checkpoints
+
+The first controlled ablations expose two different problems. Removing the
+five-metric admission restriction admits a few real gate reductions, but does
+not explain the large gap. Rescaling the frame penalty or mechanically
+reconstructing a feasible PBC prefix does not close it either. A bounded
+frontier (one cheapest ready node, a sixteen-node scoring horizon) with 22
+discrepancy decisions gives verified totals 134 for adder10, 152 for CSLA and
+180 for rc_adder_6. However, the same profile gives 453 for adder28 and 1,109
+for adder64. Local action tuning alone therefore fails to scale.
+
+The larger architectural loss happens before those decisions: whole-circuit
+Clifford absorption spreads a local arithmetic circuit into wide Pauli axes
+and leaves one global frame to reconstruct. Hold must repay that frame cost;
+release measurements can hide much of it. The isolated checkpoint variant
+retains the input's local frame boundaries until partitioning, then fully
+normalizes and resynthesizes each block's Pauli graph **and** its Clifford
+frame. Boundaries carry the complete unitary on the same wires. No original
+native network is an incumbent or fallback. Certified native cleanup applies
+only to the resulting synthesized word, including across block boundaries.
+
+The initial deterministic partition caps each block at three active wires and
+64 imported operations, using the same bounded frontier and discrepancy
+settings for every case. A larger-support individual operation remains intact.
+Each block is compacted onto its active wires, checked independently with
+signed/scalar-phase replay, and mapped back to its original wire identities.
+Source-bound cleanup certificates compose with those block proofs. Preliminary
+independent whole-circuit checks give 130 gates for adder10, 377 for adder28 and
+156 for CSLA. These are genuine PBC resynthesis results; the preserved-network
+Clifford+T optimizer is reference data only.
+
+The runner's checkpoint profile deliberately receives scalar-wire source IR
+before whole-circuit `quake-to-pbc` absorption. Applying the partition after
+global absorption cannot recover the lost locality. A production integration
+therefore needs explicit local frame boundaries in the PBC representation or
+partitioning before conversion, rather than just another scalar heuristic in
+the existing global planner.
+
+The refinement boundary also matters. With native refinement disabled, the
+three-wire checkpoint profile produces 165/496/161 gates for
+adder10/adder28/CSLA; enabling refinement of the generated words gives
+130/377/156. The local PBC/frame synthesis and generated-word cleanup are
+complementary. The original circuit never enters that cleanup as a seed.
+
+The final fixed portfolio completes the three-wire route first, then tries a
+four-wire route with a separate 10-billion-work/30-second slice, then a global
+graph/frame route with a 1-billion-work/5-second slice. Optional route
+exhaustion retains the already verified checkpoint result. Selection minimizes
+the requested total-gate score with nonincreasing T count; secondary metrics
+are reported, rather than silently turned into hard admission constraints.
+All routes use a sixteen-node scoring horizon, one cheapest frontier seed,
+22 discrepancy decisions, exact simplification, four algebraic candidates and
+native CX/CZ/SWAP with unit costs. Local Clifford completion considers the
+actual native H/S/Sdg/X/Y/Z basis. The final profile does not enable the
+experimental regional beam or quantum-context joint planner: neither closed
+the gap in its controlled three-case check.
+
+The remaining design shortfall is ranking before native cleanup: a better raw
+completion can refine worse than a discarded alternative. The discrepancy-free
+global profile reaches 91 on multiply13, whereas the fixed portfolio reaches
+93. A production completion interface should rank source-bound, refined full
+unitaries, including their frame debt, and retain several distinct boundary
+states. It should combine local frame checkpoints with bounded open-boundary
+planning to reduce the seven remaining gaps to the native optimizer. Those are
+future integration targets, not improvements claimed by this experiment.
+
+### Verified ten-case results: fixed checkpoint portfolio
+
+One fixed profile, with no case IDs or reference counts in synthesis, produces strictly fewer total gates than both recorded stock and Qiskit references on **9 of 10 cases**. All ten outputs pass independent unitary checks. QFT-2 ties the optimal fixed-wire stock result; its seven-gate Qiskit/study values use swap elision as audited above.
+
+| Circuit | Stock | Qiskit | Study proposal | Native Clifford+T | Earlier hold | Tuned hold | Compile wall (s) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| adder4 | 24 | 25 | 22 | 22 | 20 | **20** | 0.30 |
+| adder10 | 140 | 142 | 127 | 106 | 145 | **128** | 0.89 |
+| adder28 | 418 | 424 | 369 | 316 | 434 | **370** | 2.83 |
+| adder64 | 974 | 988 | 857 | 736 | 1031 | **828** | 6.68 |
+| adder118 | 1808 | 1834 | 1589 | 1366 | 2216 | **1506** | 13.03 |
+| adder433 | 6673 | 6769 | 5859 | 5041 | 120 s limit | **5715** | 36.96 |
+| multiply13 | 105 | 95 | 93 | 91 | 91 | **93** | 0.71 |
+| rc_adder_6 | 191 | 185 | 172 | 147 | 163 | **157** | 1.31 |
+| csla_mux_3 | 161 | 157 | 157 | 156 | 177 | **152** | 0.96 |
+| qft_n002 | 8 | 7 | 7 | 8 | 8 | **8** | 0.19 |
+
+The study-proposal column retains the original comparison data; it is not rerun or used by the planner. A separate historical study table lists multiply13 as 91 rather than the main comparison's 93; the native reference here is also 91. Study semantics and QFT layout freedom differ from fixed-wire hold. Stock and Qiskit columns reuse the saved paired measurements, rather than recompiling those tools during this tuning run. The stock native gate words were checked to match the frozen tuning inputs exactly. Compile times are single wall-time observations for normalization, synthesis and regtomem, excluding independent verification; no comparative compiler speedup or peak-RSS claim is made.
+
+Every tuple below is **gates / T / two-qubit gates / depth / T-depth**. The preserved-network native optimizer remains a comparison only.
+
+| Circuit | Stock CUDA-Q | Qiskit | Native Clifford+T | Tuned hold |
+|---|---|---|---|---|
+| adder4 | 24 / 8 / 10 / 12 / 2 | 25 / 8 / 10 / 13 / 2 | 22 / 8 / 10 / 11 / 2 | 20 / 8 / 8 / 14 / 5 |
+| adder10 | 140 / 32 / 57 / 113 / 32 | 142 / 48 / 65 / 103 / 32 | 106 / 32 / 53 / 95 / 32 | 128 / 32 / 63 / 87 / 22 |
+| adder28 | 418 / 96 / 171 / 221 / 64 | 424 / 144 / 195 / 199 / 64 | 316 / 96 / 159 / 185 / 64 | 370 / 96 / 192 / 180 / 52 |
+| adder64 | 974 / 224 / 399 / 437 / 128 | 988 / 336 / 455 / 391 / 128 | 736 / 224 / 371 / 365 / 128 | 828 / 224 / 437 / 327 / 98 |
+| adder118 | 1808 / 416 / 741 / 761 / 224 | 1834 / 624 / 845 / 679 / 224 | 1366 / 416 / 689 / 635 / 224 | 1506 / 416 / 804 / 497 / 151 |
+| adder433 | 6673 / 1536 / 2736 / 2651 / 784 | 6769 / 2304 / 3120 / 2359 / 784 | 5041 / 1536 / 2544 / 2210 / 784 | 5715 / 1536 / 2995 / 2092 / 628 |
+| multiply13 | 105 / 32 / 40 / 40 / 15 | 95 / 36 / 40 / 39 / 15 | 91 / 32 / 40 / 39 / 15 | 93 / 32 / 40 / 32 / 12 |
+| rc_adder_6 | 191 / 63 / 91 / 111 / 40 | 185 / 67 / 83 / 103 / 39 | 147 / 47 / 76 / 91 / 31 | 157 / 47 / 88 / 87 / 30 |
+| csla_mux_3 | 161 / 64 / 76 / 69 / 26 | 157 / 64 / 72 / 68 / 25 | 156 / 62 / 72 / 69 / 26 | 152 / 62 / 74 / 67 / 21 |
+| qft_n002 | 8 / 3 / 3 / 6 / 3 | 7 / 3 / 2 / 5 / 3 | 8 / 3 / 3 / 6 / 3 | 8 / 3 / 3 / 6 / 3 |
+
+Across these ten cases the tuned output has 8,977 gates, versus 10,502 stock, 10,626 Qiskit and 7,989 native-optimizer gates. This is a total-gate improvement, not five-metric dominance. For example, adder433 uses 2,995 entanglers versus stock's 2,736, while reducing gates from 6,673 to 5,715 and depth from 2,651 to 2,092. Adder4's T-depth grows from 2 to 5. The native optimizer still has fewer total gates on seven cases; multiply13's earlier hold result of 91 also remains better than this fixed portfolio's 93. Those gaps are retained visibly rather than replaced by weaker-contract results.
+
+
+### Isolated validation and reproduction
+
+The final ten-case compiler artifact is
+`compilers/checkpoint-portfolio/cudaq-opt` inside the isolated workspace, SHA-256
+`31cd8eb0f3dd7dbc37ba2dbd5b4bba254b0a87fd0d17c776152dd283420b23c3`.
+`final-comparison.json` includes all five metrics, paired baseline hashes,
+input/output hashes, measured compile times and independent checker results.
+`runs/checkpoint-portfolio-ten/results.json` records exact commands and options.
+`hold-tuning.patch` contains only the isolated experimental changes relative to
+the frozen hold compiler; the complete built sources and build manifest are
+under `compilers/checkpoint-portfolio/source/` and `manifest.json`.
+
+All ten outputs pass QCEC 3.11.0 with simulation checking disabled, checking
+the unitary gate portion on the same physical wires. The exact scalar contract
+additionally follows from signed/phase replay of every synthesized block and
+source-bound refinement certificates, composed across unchanged wire
+interfaces. Dense matrices including the emitted scalar phases independently
+pass for adder4 and QFT-2 at the unchanged `1e-10` tolerance. Two deterministic
+100-gate mixed Clifford+T fixtures on four and seven wires, including a nonzero
+input scalar phase and nonadjacent wire interactions, additionally pass dense
+full-unitary checks with maximum errors `7.84e-16` and `2.37e-16`
+(`boundary-checks/results.json`). These exercise the new local/global wire
+mapping and block boundaries on arbitrary inputs.
+
+The final compiler's release spot checks on adder4, multiply13 and QFT-2
+produce identical native gate words, physical readouts and all five metrics
+as the frozen pre-tuning compiler. All six pass independent ordered joint
+measurement checks (`release-spot-final/results.json`). The paired totals
+are 20, 73 and 7. These checks use explicit release semantics and the existing
+release options; no hold tuning environment variables are set. The full
+benchmark suite and the source tree's refactoring build are not run.
+
+All paths below are inside `/tmp`; this experiment changes only this document
+in the repository. Reproduce the fixed ten-case profile with:
+
+```sh
+PBC_HOLD_PRIMARY=1 PBC_HOLD_LOCAL_CLIFFORD=1 \
+PBC_HOLD_CHECKPOINT_PORTFOLIO=1 PYTHONPATH=/tmp/pbc-hold-python \
+python3 /tmp/pbc-hold-tuning-20261106-ob5kvhcm/tools/run.py checkpoint-repeat \
+  --binary /tmp/pbc-hold-tuning-20261106-ob5kvhcm/compilers/checkpoint-portfolio/cudaq-opt \
+  --cases adder4 adder10 adder28 adder64 adder118 adder433 \
+          multiply13 rc_adder_6 csla_mux_3 qft_n002 \
+  --local-input --timeout 120 --proof \
+  --options 'synthesis-candidate-nodes=1 synthesis-lookahead=16 synthesis-discrepancy-steps=22'
+```
+
+`--local-input` retains source-local Clifford checkpoints through scalar-wire
+conversion. Each block still undergoes PBC normalization and full graph/frame
+resynthesis; it does not select the preserve-network path. The build and runner
+scripts used for this artifact are frozen beside its manifest. The generic
+hold profile and final table cover exactly the ten requested study cases.
+
+## Integrated hold checkpoints: fifteen-case validation (2026-11-06)
+
+The isolated checkpoint fix is now implemented in the source tree. Default
+hold conversion retains local primitive Clifford/phase frames between Pauli
+rotations. `SynthesisHold.h` partitions before absorption, compacts active
+wires, and invokes full Pauli-graph **and** Clifford-frame reconstruction for
+every block. Source-bound refinement consumes only the generated circuits.
+The combined hold synthesis driver also starts from the original source,
+without first selecting a preserved-network optimizer output. Conversion's
+`local-frames=false` and synthesis's `synthesis-hold-checkpoints=false` expose
+controlled global-route comparisons; release behavior is unchanged.
+
+The first complete route uses three active wires and 64 imported operations
+per block; an individual wider operation stays intact. A four-wire route then
+has a separate 10B-work/30-second allowance, followed by a global route with a
+1B-work/5-second allowance. All child work and deadlines remain inside the
+parent. Optional exhaustion retains a verified completion; an invalid unitary
+proof or source binding is fatal. Native continuation ranks generated circuits
+by the configured objective with nonincreasing T count. Local factor completion
+uses native H/S/Sdg/X/Y/Z. The experimental regional beam and joint-context
+hooks from the isolated study are not included.
+
+**All fifteen final hold outputs are independently verified.** The original
+ten reproduce the isolated portfolio's exact five-metric vectors, including
+nine strict total-gate wins over both paired stock CUDA-Q and Qiskit references.
+QFT-2 remains at its proven fixed-wire eight-gate minimum; its seven-gate
+Qiskit/study references elide the physical output swap. The recorded Qiskit and
+study columns in the ten-case table above still apply. These remain reference
+data, never synthesis inputs.
+
+| Circuit | Stock gates | Native C+T gates | Earlier hold gates | Checkpoint hold gates | T | Two-qubit | Depth | T-depth | Compile wall (s) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| adder4 | 24 | 22 | 20 | **20** | 8 | 8 | 14 | 5 | 0.30 |
+| adder10 | 140 | 106 | 145 | **128** | 32 | 63 | 87 | 22 | 0.86 |
+| adder28 | 418 | 316 | 434 | **370** | 96 | 192 | 180 | 52 | 2.70 |
+| adder64 | 974 | 736 | 1031 | **828** | 224 | 437 | 327 | 98 | 6.94 |
+| adder118 | 1808 | 1366 | 2216 | **1506** | 416 | 804 | 497 | 151 | 14.57 |
+| adder433 | 6673 | 5041 | 120 s limit | **5715** | 1536 | 2995 | 2092 | 628 | 40.62 |
+| multiply13 | 105 | 91 | 91 | **93** | 32 | 40 | 32 | 12 | 0.77 |
+| rc_adder_6 | 191 | 147 | 163 | **157** | 47 | 88 | 87 | 30 | 1.35 |
+| csla_mux_3 | 161 | 156 | 177 | **152** | 62 | 74 | 67 | 21 | 0.96 |
+| qft_n002 | 8 | 8 | 8 | **8** | 3 | 3 | 6 | 3 | 0.19 |
+| mod5_4 | 57 | 37 | 29 | **33** | 8 | 17 | 22 | 5 | 0.34 |
+| basis_trotter_n4_transpiled | 20299 | 14816 | 17964 | **14888** | 7110 | 378 | 8060 | 3865 | 25.24 |
+| basis_trotter_n4 | 19667 | 14410 | 17769 | **14573** | 6958 | 342 | 6542 | 3095 | 25.56 |
+| basis_test_n4_transpiled | 885 | 654 | 650 | **648** | 310 | 26 | 480 | 228 | 1.37 |
+| grover_5 | 668 | 500 | 493 | **510** | 166 | 228 | 395 | 146 | 5.96 |
+
+Counts exclude scalar phases, allocations, measurements and sinks. Depth and
+T-depth use the same dependency scheduling convention as the prior reports.
+Compile wall time covers conversion, synthesis and regtomem, excluding
+independent verification. Times are single local observations, not a comparative
+compiler-speed benchmark. The stock/native columns are the frozen paired
+references for these exact input circuits; those compilers were not rerun.
+All fifteen new hold compilations completed within their 120-second allowance.
+
+There are nine gate-count improvements over the earlier completed hold results,
+two ties, three regressions, and one newly completed case (adder433). The
+regressions are multiply13 **91 -> 93**, mod5_4 **29 -> 33**, and grover_5
+**493 -> 510**. Native Clifford+T still wins ten of fifteen total-gate
+comparisons. Secondary metrics also trade off: basis_test_n4_transpiled reduces
+gates 650 -> 648 but increases depth 397 -> 480 and T-depth 188 -> 228;
+adder433 uses 2,995 entanglers versus stock's 2,736. The table retains these
+costs instead of claiming five-metric dominance or borrowing release results.
+Across all fifteen, hold emits **39,629 gates**, compared with **52,078 stock**
+and **38,406 native Clifford+T** gates.
+
+### Configuration, verification and reproduction
+
+One fixed `checkpoints` hold profile is used for every input: native CX/CZ/SWAP
+and one-qubit Clifford+T at unit costs, total-gates objective,
+`synthesis-hold-checkpoints=true`, `synthesis-simplify=true`,
+`synthesis-candidate-nodes=1`, `synthesis-lookahead=16`,
+`synthesis-discrepancy-steps=22`, `synthesis-algebraic-candidates=4`,
+`synthesis-commuting-candidates=0`, `synthesis-joint-phase-candidates=0`,
+no pruning, `max-gates=262144`, `max-dependencies=64000000`, a 512 MiB
+compressed-dependency cap, `max-work=1000000000000`, and `timeout-ms=120000`.
+Compiler processes use one worker and an 8 GiB address-space cap. Hold
+conversion explicitly uses `semantics=hold local-frames=true`, retains original
+measurements and quantum owners, and inserts no terminal measurements. Only
+compiler-generated implicit `quake.evince` annotations are removed, as in the
+existing workflow. No environment-variable tuning hooks are required.
+
+MQT QCEC 3.11.0 independently verifies every final circuit's unitary gate
+portion on identical physical wires, with simulation disabled; ordered readout
+identities are checked separately. Exact scalar phase additionally follows
+from block-wise signed/phase replay and compositional refinement certificates.
+Dense full matrices including emitted scalar phases pass for all six inputs
+of at most eight qubits; maximum entrywise error is `1.01e-13` at the unchanged
+`1e-10` tolerance. Release regression spot checks on adder4, QFT-2 and mod5_4
+retain identical native words, physical readouts and all five metrics; all six
+before/after outputs pass independent ordered joint-measurement checks.
+
+The final implementation passes **380 native tests and all 15 PBC lit tests**.
+Added checks cover arbitrary entangled inputs, sparse physical-wire embeddings,
+oversized Pauli operations, scalar-only identity rotations, optional budget
+exhaustion, fatal invalid certificates, and local-frame retention through
+Quake conversion. The broader benchmark suite was not run.
+
+Final compiler SHA-256:
+`5405c7f8351e4eab7051c45c12991c97e0162e77a21b47ba3877fca6971d565e`.
+Artifacts are under `build/pbc-hold-checkpoints-2026-11-06/`:
+`compiler-manifest.json`, frozen `source/`, `implementation.patch`,
+`benchmark-final/results.json`, `comparison.json`, `tests.json` and `lit.log`.
+The earlier `benchmark/` run is retained separately; its scalar-only corner
+case review led to the final identity-rotation fix before this final run.
+The final runner, compiler and every input/output have recorded hashes.
+
+```sh
+PYTHONPATH=/tmp/pbc-hold-python python3 utils/pbc/benchmark_contracts.py \
+  --compiler build/pbc-hold-checkpoints-2026-11-06/cudaq-opt-hold \
+  --before-compiler build/pbc-hold-2026-11-06/cudaq-opt-before \
+  --snapshot build/pbc-synthesis-redesign-2026-11-05/benchmark \
+  --output build/pbc-hold-checkpoints-2026-11-06/repeat \
+  --hold-profile checkpoints --timeout-ms 120000
+```
+
+`--hold-profile legacy` selects the older globally absorbed profile on the new
+compiler for controlled comparisons. Release spot checks retain their own
+unchanged configuration. Full commands and proof results remain per-case in
+the final JSON; checker inconclusiveness would remain unverified rather than
+being substituted with original-circuit counts.
+
 ## Changelog
+
+- **2026-11-06:** Integrated local-frame hold checkpoint synthesis; all fifteen cases independently verified with one fixed hold configuration, 380 native tests and 15 PBC lit tests passing.
+
+- **2026-11-06:** Added isolated hold-only checkpoint tuning for the original ten study cases, complete metric comparisons, exact QFT-2 lower bound and final release spot checks. Experimental code and artifacts stay in `/tmp`.
+
+- **2026-11-06:** Added default full-unitary hold synthesis, fifteen-case hold measurements, and unchanged before/after release spot checks.
 
 - **2026-11-04:** Documented production synthesis, ten-case outcomes, native-SWAP QFT proof, runtime findings, and safe synthesis-limit fallback.
 - **2026-11-05:** Integrated exact signed Clifford-frame refinement and recorded independently verified results for nine original and five additional cases.

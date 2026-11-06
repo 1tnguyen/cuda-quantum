@@ -14,15 +14,17 @@
 
 namespace cudaq::pauli::graph::detail {
 
-/// Borrowed, immutable whole-program contract. Observable order and physical
-/// readout wires are part of the problem: neither may be permuted by a solver.
-/// This contract releases the terminal quantum state for arbitrary inputs. It
-/// must not be used for an internal region with live quantum outputs.
+/// Borrowed, immutable planning view. Observable order and physical readout
+/// wires are fixed for measured programs. Quantum-boundary planning instead
+/// sets unitary and leaves those lists empty; it must retain the actual exit.
+/// A measured sink only accepts the released boundary, never quantum plans.
 struct MeasuredProblem {
   unsigned width;
   const std::vector<Gate> &rotations;
   const std::vector<Pauli> &observables;
   const std::vector<unsigned> &readoutWires;
+  /// Planner-only quantum boundary. Measured sinks reject this contract.
+  bool unitary = false;
 };
 
 enum class SubmissionStatus {

@@ -1,5 +1,16 @@
 # Pauli-based optimization in Quake
 
+The **PBC synthesis (release)** columns in the main benchmark table use
+`semantics=release`: ordered joint terminal measurement probabilities are
+preserved for arbitrary inputs, while the final quantum state and full unitary
+need not be preserved. The separate **PBC synthesis (hold)** columns now
+collect the completed hold implementation on the same 197-case cohort. The synthesis
+passes now default to **hold**, preserving the full unitary and scalar phase.
+Historical release configurations must explicitly select `semantics=release`.
+Hold results use original pre-normalization circuits and are reported
+separately; a release-normalized input cannot recover its original unitary.
+See [the hold/release architecture](pbc_synthesis_architecture.md#hold-and-release-synthesis-contracts).
+
 The implementation represents Pauli-based computation (PBC) as a verified form
 of Quake. A shared native library optimizes Pauli rotations and Clifford frames;
 MLIR passes validate the input, import it, search for equivalent candidates, and
@@ -18,6 +29,14 @@ Pauli-frame, phase-placement, and small Clifford-window strategies. The current
 validation passes 69 relevant unit tests and all 11 PBC lit tests. Descriptions
 and option defaults in this report follow the accompanying source code.
 
+Standalone normalized-PBC synthesis has a separate measured-program entry
+point, `quake-synthesize-pbc`. Its final complete-circuit portfolio and checked
+generated-circuit refinements are documented in
+[the synthesis architecture](pbc_synthesis_architecture.md) and
+[the final tuning configuration](pbc_synthesis_tuning.md#final-results-for-all-fifteen-cases).
+Appendix F adds this path to the full runtime benchmark alongside the
+preserve-network optimization, with independent output verification.
+
 No numerical advantage over CUDA-Q or Qiskit is asserted without a matching
 pass run and configuration record. In particular, the available objectives and
 lowering path must match the metric being compared. Earlier result tables without
@@ -26,15 +45,21 @@ that implementation provenance are not evidence for this pass.
 <!-- BEGIN PASS MEASUREMENTS -->
 ## Measured pass results
 
+Benchmark tables call the native, network-preserving techniques **Clifford+T
+optimization**, and the circuit reconstruction path **PBC synthesis**. The
+former optimizes the existing Clifford+T circuit; the latter synthesizes a new
+native circuit from normalized PBC. Compiler pass names and historical evidence
+keys such as `pbc` retain their original spelling.
+
 Configuration **total-gates-v1**, detailed in Appendix B, uses the compiled
-CUDA-Q pass. CUDA-Q and PBC were remeasured after the reproduction fixes below;
+CUDA-Q pass. CUDA-Q and Clifford+T optimization were remeasured after the reproduction fixes below;
 the Qiskit references retain the preceding measured run on the same preserved
 suite circuits and declared basis. Eight CUDA-Q inputs were imported afresh;
 the 118- and 433-qubit adders use their preserved original Quake inputs after fresh imports failed
 under the imposed frontend resource cap. Both then run through the same compiled
-CUDA-Q baseline and PBC pass. No cases were added.
+CUDA-Q baseline and Clifford+T optimization pass. No cases were added.
 Measurements are excluded from gate counts and from the circuit depths in this
-table. T and two-qubit/depth columns show CUDA-Q baseline → PBC output.
+table. T and two-qubit/depth columns show CUDA-Q baseline → Clifford+T optimization output.
 
 Completed paired measurements: **10/10**. All ten pass independent equivalence
 checking up to global phase. The implemented pass beats the proposed CUDA-Q
@@ -43,7 +68,7 @@ gates versus the measured CUDA-Q baseline on nine cases and leaves QFT-2 unchang
 T count never increases; `rc_adder_6` drops from 63 to 47 and `csla_mux_3` from
 64 to 62. Neither circuit depth nor T depth increases on these ten cases.
 
-| Case | CUDA-Q total | Qiskit 2.6.0 total | PBC total | Best proposed CUDA-Q total (reference study) | T count | Two-qubit count | Depth | Pass / independent verification |
+| Case | CUDA-Q total | Qiskit 2.6.0 total | Clifford+T optimization total | Best proposed CUDA-Q total (reference study) | T count | Two-qubit count | Depth | Pass / independent verification |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | adder_n4_transpiled | 24 | 25 | 22 | 22 | 8 → 8 | 10 → 10 | 12 → 11 | committed; equivalent |
 | adder_n10_transpiled | 140 | 142 | 106 | 127 | 32 → 32 | 57 → 53 | 113 → 95 | committed; equivalent_up_to_global_phase |
@@ -164,7 +189,7 @@ graph synthesis is one analysis view of these data, not the only representation.
 
 ### Supported contract
 
-The passes support single-block scalar `!quake.wire` ownership, scalar wire
+Under `semantics=release`, the passes support single-block scalar `!quake.wire` ownership, scalar wire
 arguments and `quake.null_wire` preparations, followed by terminal commuting
 measurements and explicit sink closure. No quantum output may escape. The
 preserved observable is the **ordered joint measurement distribution for every
@@ -181,17 +206,24 @@ X/Y measurement results must go directly to sinks. Recognized pure scalar
 arithmetic and classical results are retained; unknown operations or metadata
 are not silently discarded.
 
+Default `semantics=hold` additionally preserves the full quantum action and
+scalar phase, supports scalar SSA quantum returns, and retains the original
+terminal measurement instruments, including live X/Y measurement outputs.
+Its lossless normalization and network-changing synthesis are described in
+[the architecture](pbc_synthesis_architecture.md#hold-and-release-synthesis-contracts).
+
 ## 2. Compilation flow and failure behavior
 
 | Pass | Contract |
 |---|---|
-| `quake-verify-pbc` | Verify the entire function is in the supported measured PBC form |
-| `quake-to-pbc` | Strictly import supported Quake and absorb Cliffords into rotations and terminal observables |
-| `quake-optimize-pbc` | Require PBC input, run native strategies, normalize and emit checked PBC |
-| `quake-lower-pbc` | Strictly lower rotations and a shared terminal-readout network to primitive gates |
-| `quake-try-pbc` | Attempt a complete measured-function optimization transaction from supported primitive or PBC input |
+| `quake-verify-pbc` | Verify the actual operations and recorded hold/release interface |
+| `quake-to-pbc` | Retain a lossless rotation word and Clifford/phase frame by default; explicitly release the frame into terminal observables |
+| `quake-synthesize-pbc` | Rebuild a native network and complete either its full quantum frame or its release readouts, with the appropriate proof |
+| `quake-optimize-pbc` | Run native strategies and Pauli synthesis under the selected boundary contract |
+| `quake-lower-pbc` | Lower held rotations/frame with phase and quantum exits intact, or lower released rotations/readouts |
+| `quake-try-pbc` | Attempt a complete optimization transaction; hold permits supported scalar quantum returns |
 
-The optional wrapper imports the original native gate network directly; it does
+In the historical release workflow, the optional wrapper imports the original native gate network directly; it does
 not simply run the strict passes consecutively. Normally it normalizes the native
 winner back to PBC before lowering. The `preserve-clifford-network=true`
 option instead emits the checked native Clifford/rotation network and prepares
@@ -348,8 +380,9 @@ This adapts the rotation/frame subset of Paykin et al.,
 especially Figure 12 and Section V-C. Resource bounds, scalar-phase checking,
 ASAP scoring and portfolio acceptance are implementation choices. The pass does
 not reproduce the paper's full preparation/measurement graph machinery or claim
-its benchmark results. The unified native optimizer uses unitary hold semantics;
-there is no release-mode pass option.
+its benchmark results. The unified native optimizer uses unitary hold semantics
+internally; the pass's `semantics` option independently selects the final
+whole-program hold or release boundary.
 
 ### 3.7 Composition and selection
 
@@ -436,9 +469,10 @@ while the MLIR pass uses the permissive finite allowance listed below.
 | Pass | Purpose | Options |
 |---|---|---|
 | `quake-verify-pbc` | Check that the entire function satisfies the supported PBC contract | No pass-specific options |
-| `quake-to-pbc` | Convert supported Quake to rotations and terminal Pauli measurements | No pass-specific options |
-| `quake-optimize-pbc` | Optimize already-verified PBC form; emit PBC | All 38 shared options in A.2–A.6, including A.3a |
-| `quake-try-pbc` | Attempt conversion, optimization, and gate lowering as a per-function transaction | All 38 shared options, plus the three wrapper options in A.7 |
+| `quake-to-pbc` | Convert to lossless hold form or explicit released measurement form | `semantics=hold` by default; release-only `assume-measure-all` |
+| `quake-synthesize-pbc` | Reconstruct the native network under the selected quantum or measured contract | `semantics=hold` by default, native synthesis and resource controls |
+| `quake-optimize-pbc` | Optimize supported PBC under the selected contract | Shared options in A.2–A.6, including A.3a |
+| `quake-try-pbc` | Attempt conversion, optimization, and gate lowering as a per-function transaction | Shared options, plus the wrapper options in A.7 |
 | `quake-lower-pbc` | Lower verified PBC to primitive Quake | The angle-lowering option in A.8 |
 
 Options are space-separated inside the pass argument. For example, this requests
@@ -446,7 +480,7 @@ a T-only experiment with explicit final entangler/depth growth guards:
 
 ```sh
 cudaq-opt input.qke \
-  --quake-try-pbc='objective=t-count graph-synthesis=false max-two-qubit-growth=0 max-depth-growth=0 telemetry=pbc.jsonl' \
+  --quake-try-pbc='semantics=release objective=t-count graph-synthesis=false max-two-qubit-growth=0 max-depth-growth=0 telemetry=pbc.jsonl' \
   -o output.qke
 ```
 
@@ -464,6 +498,7 @@ including invalid nested controls for a disabled strategy.
 | `t-count` | `true` | Enable the T-reduction family: merging and commuting-block decoding. Disabling saves its search/proof work; graph preprocessing can still merge rotations. |
 | `graph-synthesis` | `true` | Enable checked graph-synthesis candidates and the temporary-growth/reconstruction branch. Disabling leaves the enabled T and total-gate strategies. This controls an internal candidate strategy, not an alternative final MLIR lowering route. Disabling all three strategy families leaves the function unchanged. |
 | `objective` | `total-gates` | Choose `t-count`, `t-depth`, `entanglers`, `depth`, or `total-gates`. Ranking is lexicographic: a later metric cannot compensate for a worse earlier metric. `total-gates` ranks total gates first and forbids a baseline T increase. Changing the objective does not retune graph scoring weights. |
+| `semantics` | `hold` | Preserve the complete unitary, scalar phase and scalar SSA quantum outputs. Explicit `release` permits terminal-measurement equivalence and requires no escaping quantum state. This choice is independent of retaining a native Clifford network. Historical result configurations in this report use `release`. |
 | `portfolio-rounds` | `2` | Positive maximum number of combined T/graph/total-gate composition rounds. More rounds can expose further opportunities, but consume the shared budget; convergence may stop earlier. Distinct from `rounds` inside each T search. |
 | `portfolio-beam-width` | `2` | Retain this many distinct combined candidates between rounds; valid range 1–64. One is greedy; larger values preserve alternatives at greater memory/work cost and may spend the budget before later rounds. |
 | `max-two-qubit-growth` | `4294967295` | Absolute final mechanical entangler allowance above the original input, not a percentage. Zero forbids net growth. The default is permissive but finite; a T improvement can otherwise come with many additional entanglers. |
@@ -555,8 +590,8 @@ the equivalence contract or final objective ordering.
 | `max-dependencies` | `1000000` | Positive DAG-edge cap. Dense graphs can hit it even with few candidate nodes. Exceeding it rejects the candidate; necessary dependencies are never omitted. The scoring horizon does not bound DAG construction. |
 | `synthesis-max-steps` | `1000000` | Entangling-action limit, including terminal-frame reconstruction. Zero permits no such actions; it does not mean unlimited. Exceeding it rejects the candidate. It counts neither all emitted gates nor full-circuit portfolio rounds. |
 
-The combined optimizer requires unitary hold semantics internally; there is no
-release-mode pass option. Native standalone controls such as `preferDepth` and
+The combined native optimizer requires unitary hold semantics internally;
+the pass's `semantics` option selects the whole-program boundary. Native standalone controls such as `preferDepth` and
 `acceptOnlyImprovement` are not additional MLIR knobs: the portfolio supplies its
 own ranking and acceptance. Graph controls affect candidate construction, not
 the final emission route. Strict optimization emits normalized PBC; the optional
@@ -711,7 +746,7 @@ source circuit or Qiskit's separate compilation.
 ## Appendix C. Closing the earlier reproduction gaps
 
 The earlier feasibility study supplied target counts, but its optimizer is not
-used to produce the measured PBC column. This comparison records the bridge from
+used to produce the measured Clifford+T optimization column. This comparison records the bridge from
 that study into the compiled pass. All ten final circuits are produced by
 `quake-try-pbc` with configuration **total-gates-v1** and the common downstream
 CUDA-Q cleanup from Appendix B. The original Quake inputs are preserved. The
@@ -770,7 +805,7 @@ cases; they are not a claim of global optimality or a full-suite comparison.
 This procedure reruns the **actual `quake-try-pbc` implementation** on the saved
 original Quake inputs. No Python code below optimizes a circuit. Python only
 checks input identity, counts/exports emitted gates, and invokes the independent
-checker. The procedure recreates the CUDA-Q and PBC columns; it does not rerun
+checker. The procedure recreates the CUDA-Q and Clifford+T optimization columns; it does not rerun
 the external proposal or the historical feasibility optimizer.
 
 ### D.1 Build and identify the inputs
@@ -803,7 +838,7 @@ corpus revision is a new experiment, even when its case name is unchanged.
 
 Create the exact ten-case selection. The first column is the artifact key, not
 a compiler flag; the case metadata retains the full cudaq-bench identifier.
-The final two columns are the expected CUDA-Q and PBC totals for this report.
+The final two columns are the expected CUDA-Q and Clifford+T optimization totals for this report.
 
 ```bash
 cat > "$pbc_run/cases.tsv" <<'CASES'
@@ -1037,7 +1072,7 @@ pipeline and common cleanup, starting from preserved original Quake inputs.
 The Qiskit 2.6.0 values are retained paired measurements on the identical saved
 QPY inputs, normalized to the main table's basis. The supplied Gate-count fixes
 study has no proposed CUDA-Q measurements for these cases, hence N/A.
-Measurements are excluded; T, two-qubit and depth entries show CUDA-Q → PBC.
+Measurements are excluded; T, two-qubit and depth entries show CUDA-Q → Clifford+T optimization.
 
 ### E.1 Exact configuration differences
 
@@ -1064,7 +1099,7 @@ together. These are execution bounds, not pass tuning parameters.
 
 ### E.2 Measured pass results
 
-| Case | CUDA-Q total | Qiskit 2.6.0 total | PBC total | Best proposed CUDA-Q total (reference study) | T count | Two-qubit count | Depth | Pass / independent verification |
+| Case | CUDA-Q total | Qiskit 2.6.0 total | Clifford+T optimization total | Best proposed CUDA-Q total (reference study) | T count | Two-qubit count | Depth | Pass / independent verification |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
 | hwb10 | 60169 | 69664 | 54614 | N/A | 16437 → 15891 | 31506 → 30007 | 38981 → 36910 | committed; equivalent_up_to_global_phase |
 | ising_n420_transpiled | 62351 | 133768 | 49951 | N/A | 23986 → 23680 | 838 → 838 | 291 → 238 | committed; equivalent |
@@ -1174,18 +1209,21 @@ never native candidate estimates.
 ## Appendix F. CI FTQC Clifford+T benchmark
 
 This run covers all **216 Clifford+T cases** in cudaq-bench's full CI
-profile: 203 corpus cases and 13 generated cases. Every case has a final
-outcome; none remain unstarted.
-CUDA-Q, Qiskit and the compiled PBC pass use the same input circuits, with one
+profile: 203 corpus cases and 13 generated cases. The original three-compiler
+run attempted every case. The Release continuation reuses its completed
+measurements, retries missing stages and unresolved Clifford+T optimization
+proofs, and adds an independently verified PBC synthesis branch.
+CUDA-Q, Qiskit and Clifford+T optimization use the same input circuits, with one
 replication per attempted case. Aggregates cover only the verified pairs below.
 
 ### F.1 Configuration
 
 The benchmark source is cudaq-bench commit
-`2f4d84d78b4eae13d4e479e9453f877f164a838b`; CUDA-Q is the local Debug build at
+`2f4d84d78b4eae13d4e479e9453f877f164a838b`; the original CUDA-Q measurements use the local Debug build at
 `b09ae4ad1d21a086417a8875bdf0648f6ad99c96`. The executable SHA-256 is
 `5dc022b783b0068021ac9b5bce1c4c1ed93cb0b50ebbbe6ae73a0b4c0133dcdd`.
-The corpus archive is checked against the snapshot's LFS lock.
+The corpus archive is checked against the snapshot's LFS lock. The separately
+identified Release continuation is described in F.4.
 
 The suite builds each Qiskit circuit, saves its QPY, imports it using
 `cudaq.contrib.from_qiskit`, performs the builder's AOT compilation, and writes
@@ -1195,9 +1233,10 @@ snapshot's complete Clifford+T target pipeline, and
 `jit-finalize-pipeline{lower-device-calls=true}`. The target includes one-qubit
 fusion and `normalize-1q-clifford-t`. A deterministic preflight matches the
 native runtime's gate totals and T depth on exact U3, Toffoli and Trotter inputs.
-Stock and PBC share the synthesized prefix through its last `dqe`; PBC inserts
+Stock and Clifford+T optimization share the synthesized prefix through its last
+`dqe`; Clifford+T optimization inserts
 `quake-try-pbc` before the common
-`func.func(regtomem),symbol-dce` suffix and standard JIT finalization. The PBC
+`func.func(regtomem),symbol-dce` suffix and standard JIT finalization. The optimization
 branch removes compiler-generated output annotations with the existing
 `func.func(erase-implicit-output)` pass before `quake-try-pbc`; stock retains
 those annotations. This pass removes no quantum gate or explicit measurement.
@@ -1206,7 +1245,7 @@ The per-case synthesis epsilon defaults to 0.001. CUDA-Q uses the target's seed
 0; sharing the prefix prevents synthesis
 variation between the paired outputs.
 
-PBC uses the 40 options in Appendix B with Appendix E's limits:
+Clifford+T optimization uses the 40 options in Appendix B with Appendix E's limits:
 `max-gates=262144`, `max-operations=1048576`, and `max-work=4000000000`.
 The work limit is `1000000000` for `hwb10` and
 `basis_trotter_n4_transpiled`. Graph synthesis remains disabled; total gates are
@@ -1222,14 +1261,16 @@ Four cases contain classical control flow unsupported by CUDA-Q's importer:
 `qasmbench:qasmbench_small_ipea_n2_ipea_n2`, and
 `qasmbench:qasmbench_small_ipea_n2_ipea_n2_transpiled`.
 An audit of the published CI results confirmed these four skips. For these
-cases, CUDA-Q is skipped, PBC is unavailable, and Qiskit is attempted
+cases, CUDA-Q is skipped, Clifford+T optimization is unavailable, and Qiskit is attempted
 independently. Qiskit's conditional-circuit metrics use the suite's worst-case
 branch resource bounds.
 
 ### F.2 Measurements
 
 Counts are taken from emitted final circuits, excluding measurements and scalar
-global phase. Triples below are CUDA-Q / Qiskit / PBC. PBC is checked against
+global phase. The five-way metric groups below are CUDA-Q / Qiskit /
+Clifford+T optimization / PBC synthesis (release) / PBC synthesis (hold),
+abbreviated **C/Q/O/R/H**. Clifford+T optimization is checked against
 stock with identical physical readout order and register names. Identical final
 gate sequences and physical readouts prove an unchanged circuit; otherwise
 MQT QCEC 3.11.0 checks
@@ -1238,248 +1279,340 @@ up to 15 qubits and ZX above that, with a 20-second limit; the Appendix E
 lookahead settings give hwb10 and QFT-160 180 seconds. Inconclusive checks are
 reported explicitly and excluded from verified-pair aggregates. A pass limit
 or unsupported-input fallback is distinguished from an optimized result.
-PBC's `committed` outcome denotes internal acceptance; the following verification
+Clifford+T optimization's `committed` outcome denotes internal acceptance; the following verification
 result is the independent check. For untranspiled QPE9, saved-output identity
 comparison permits gates after a measurement only on other qubits, preserving
 physical readout order and register names.
 
-Under the local limits in F.3, CUDA-Q encountered nine frontend and fourteen
+In the original local run under the limits in F.3, CUDA-Q encountered nine frontend and fourteen
 stock-compilation timeouts, in addition to the four control-flow skips.
-PBC timed out on `feynman:hwb11`. Independent verification remains unresolved
+Clifford+T optimization timed out on `feynman:hwb11`. Independent verification was unresolved
 for 45 compiled pairs: 44 checks were inconclusive, and QCEC returned
 `probably_not_equivalent` for `feynman:ham15_med`. These pairs are excluded from
-verified-pair aggregates.
+verified-pair aggregates. These are the historical outcomes; continuation
+results and their independent verification status appear in the table.
+
+Both synthesis modes start from the same Clifford+T prefix as the stock branch,
+after removing implicit output annotations. Neither consumes the separate
+Clifford+T optimization output. The original release continuation described
+next precedes the fresh release and hold profiles recorded below.
+Earlier release recipes run `quake-to-pbc` followed by
+`quake-synthesize-pbc`. Rows marked `native-v1` instead normalize privately
+inside `quake-synthesize-pbc`, retaining the original native circuit as a
+source-bound incumbent. Expected resource limits can retain that incoming
+circuit; its selection is labeled explicitly. Both recipes add terminal Z
+measurements on all wires only when no measurements exist, perform checked
+native refinement, and use the common finalization suffix before counting.
+The preserve-network optimization pass is not run in the synthesis branch.
+
+Each synthesized output is independently checked with MQT QCEC 3.11.0.
+The checker requires the same ordered physical readout wires and register names.
+It builds a coherent-copy oracle: execute the circuit, copy each measured Z
+value to its own ancilla, then undo the circuit. Oracle equivalence proves the
+ordered joint measurement probabilities for arbitrary input states, allowing
+the discarded final quantum state to differ. Simulation checking is disabled.
+The first attempt uses alternating decision diagrams through 15 input qubits
+and ZX above that, one thread and 120 seconds. An unsuccessful ZX attempt is
+retained and followed by an independent alternating/lookahead attempt with
+180 seconds. Remaining unresolved outputs receive a separate proof-only
+continuation with alternating/lookahead, 600 seconds, one thread and a 32 GiB
+address-space cap. The same continuation can retry unresolved Clifford+T optimization unitary
+checks. It reuses the collected final circuits and metrics, retains all earlier
+attempts, and binds its proof to the primary result and final artifact hashes.
+Only a completed equivalence proof or identical gate sequence
+counts as verified. Emitted metrics may remain visible with an explicit
+unverified status; they do not enter verified synthesis aggregates.
 
 <!-- BEGIN FULL SUITE RESULTS -->
-**Coverage: 216/216 cases processed; 143 CUDA-Q/PBC pairs verified.**
+**Release: 197/197 finished, 197 measured, 162 verified, 35 inconclusive, 0 failed. Hold: 197/197 finished, 166 measured, 148 verified, 18 inconclusive, 31 failed.**
 
-| Compiler | Compilation succeeded | Failed | Skipped / unavailable |
+Release data is retained. The current hold rerun covers all **197 cases with previous synthesis data**, including all previous hold failures. The previous hold measurements have been cleared from this dashboard. The other 19 cases are excluded. Only fresh measurements populate the release and hold columns; failed or pending cells remain blank. All 626 CUDA-Q, Qiskit and Clifford+T optimization metric sets remain unchanged.
+
+**Contracts:** **release** (`semantics=release`) preserves ordered joint terminal measurement probabilities for arbitrary inputs; the final quantum state and full unitary need not be preserved. **Hold** (`semantics=hold`) preserves the full unitary, scalar phase and physical-wire identities. Release and hold therefore have different semantic contracts. Hold uses unitary QCEC checks, with exact scalar phase covered by compiler source-bound proofs and independent dense checks on small spot checks and emitted suite outputs. Neither synthesis path invokes the preserve-network optimization pass.
+
+Quadruples from earlier snapshots are replaced here by **C/Q/O/R/H**: CUDA-Q / Qiskit / Clifford+T optimization / PBC synthesis (release) / PBC synthesis (hold). Every metric in a synthesis row comes from that mode's one emitted output. Bold marks the smallest reported value for each metric, including ties; verification status is separate.
+
+| Compiler / mode | Compilation succeeded | Failed | Excluded / unavailable / pending |
 |---|---:|---:|---:|
-| CUDA-Q | 189 | 23 | 4 |
+| CUDA-Q | 205 | 7 | 4 |
 | Qiskit 2.6.0 | 216 | 0 | 0 |
-| PBC | 188 | 1 | 27 |
+| Clifford+T optimization | 205 | 0 | 11 |
+| PBC synthesis (release), fresh-v1 | 197 | 0 | 19 |
+| PBC synthesis (hold), current hold | 166 | 31 | 19 |
 
-Among the 143 verified pairs, PBC reduces total gates on 106 and ties on 37; their combined gate count is 11,505,384 → 11,369,641 (1.18% reduction). This aggregate excludes unverified or unavailable pairs.
+Among the 202 verified CUDA-Q/Clifford+T optimization pairs, optimization reduces gates on 149 and ties on 53; their combined total is 39,546,152 → 38,752,667 (2.01%). The 162 verified release outputs contain 11,063,255 gates versus 11,137,033 in their matching stock references. The 148 verified hold outputs contain 3,691,079 gates versus 4,335,673 in their matching stock references. Inconclusive and pending checks are excluded from these synthesis aggregates.
 
-| Case | CUDA-Q total | Qiskit total | PBC total | T count (C/Q/P) | Two-qubit count (C/Q/P) | Depth (C/Q/P) | T depth (C/Q/P) | Outcome / verification |
-|---|---:|---:|---:|---|---|---|---|---|
-| feynman:adder | 122 | 138 | 106 | 32 / 48 / 32 | 57 / 65 / 53 | 103 / 99 / 95 | 32 / 32 / 32 | committed: verified admissible improvement; equivalent |
-| feynman:adder_8 | 727 | 875 | 621 | 215 / 361 / 173 | 347 / 409 / 320 | 228 / 246 / 205 | 74 / 90 / 66 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:barenco_tof_10 | 365 | 427 | 342 | 100 / 192 / 100 | 176 / 192 / 168 | 324 / 322 / 281 | 88 / 128 / 87 | committed: verified admissible improvement; equivalent |
-| feynman:barenco_tof_3 | 50 | 56 | 46 | 16 / 24 / 16 | 22 / 24 / 21 | 44 / 42 / 41 | 16 / 16 / 16 | committed: verified admissible improvement; equivalent |
-| feynman:barenco_tof_4 | 95 | 109 | 88 | 28 / 48 / 28 | 44 / 48 / 42 | 84 / 82 / 77 | 28 / 32 / 27 | committed: verified admissible improvement; equivalent |
-| feynman:barenco_tof_5 | 140 | 162 | 130 | 40 / 72 / 40 | 66 / 72 / 63 | 124 / 122 / 111 | 38 / 48 / 37 | committed: verified admissible improvement; equivalent |
-| feynman:bigadder | 242 | 274 | 209 | 64 / 96 / 64 | 114 / 130 / 106 | 160 / 152 / 144 | 48 / 48 / 48 | committed: verified admissible improvement; equivalent |
-| feynman:csla_mux_3 | 161 | 157 | 156 | 64 / 64 / 62 | 76 / 72 / 72 | 69 / 68 / 68 | 26 / 25 / 26 | committed: verified admissible improvement; equivalent |
-| feynman:csum_mux_9 | 392 | 420 | 308 | 140 / 196 / 84 | 168 / 168 / 168 | 61 / 60 / 54 | 23 / 24 / 16 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:gf2_10_mult | 1088 | 1257 | 1088 | 410 / 600 / 410 | 609 / 609 / 609 | 293 / 307 / 292 | 117 / 134 / 118 | committed: verified admissible improvement; equivalent |
-| feynman:gf2_128_mult | 165019 | 197499 | 165019 | 65664 / 98304 / 65664 | 98685 / 98685 / 98685 | 4073 / 4326 / 4073 | 1652 / 1905 / 1652 | skipped: no admissible improvement; identical gate sequence |
-| feynman:gf2_16_mult | 2703 | 3179 | 2703 | 1040 / 1536 / 1040 | 1581 / 1581 / 1581 | 491 / 520 / 491 | 196 / 225 / 196 | skipped: no admissible improvement; identical gate sequence |
-| feynman:gf2_256_mult | — | 788219 | — | — / 393216 / — | — / 393981 / — | — / 8671 / — | — / 3824 / — | failed; stock-prefix: timeout; not checked |
-| feynman:gf2_32_mult | 10562 | 12538 | 10562 | 4128 / 6144 / 4128 | 6268 / 6268 / 6268 | 1003 / 1064 / 1003 | 404 / 465 / 404 | skipped: no admissible improvement; identical gate sequence |
-| feynman:gf2_4_mult | 194 | 213 | 193 | 68 / 96 / 68 | 99 / 99 / 99 | 102 / 106 / 102 | 40 / 45 / 40 | committed: verified admissible improvement; equivalent |
-| feynman:gf2_5_mult | 304 | 332 | 302 | 115 / 155 / 115 | 154 / 154 / 154 | 132 / 138 / 131 | 53 / 59 / 53 | committed: verified admissible improvement; equivalent |
-| feynman:gf2_64_mult | 41547 | 49595 | 41547 | 16448 / 24576 / 16448 | 24765 / 24765 / 24765 | 2027 / 2152 / 2027 | 820 / 945 / 820 | skipped: no admissible improvement; identical gate sequence |
-| feynman:gf2_6_mult | 414 | 465 | 411 | 150 / 216 / 150 | 221 / 221 / 221 | 166 / 174 / 166 | 66 / 75 / 66 | committed: verified admissible improvement; equivalent |
-| feynman:gf2_7_mult | 553 | 627 | 550 | 217 / 301 / 217 | 300 / 300 / 300 | 198 / 208 / 198 | 80 / 90 / 80 | committed: verified admissible improvement; equivalent |
-| feynman:gf2_8_mult | 709 | 819 | 705 | 264 / 384 / 264 | 405 / 405 / 405 | 235 / 248 / 235 | 92 / 105 / 92 | committed: verified admissible improvement; equivalent |
-| feynman:gf2_9_mult | 889 | 1023 | 887 | 351 / 495 / 351 | 494 / 494 / 494 | 260 / 273 / 258 | 106 / 119 / 104 | committed: verified admissible improvement; equivalent |
-| feynman:grover_5 | 668 | 732 | 500 | 178 / 296 / 166 | 248 / 288 / 228 | 533 / 498 / 429 | 164 / 192 / 160 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:ham15_high | 3659 | 4789 | 3410 | 1021 / 2173 / 1019 | 1817 / 2149 / 1722 | 2993 / 3071 / 2659 | 871 / 1184 / 873 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:ham15_low | 375 | 427 | 364 | 97 / 147 / 97 | 220 / 236 / 216 | 270 / 273 / 256 | 77 / 85 / 76 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:ham15_med | 871 | 1156 | 771 | 242 / 504 / 211 | 428 / 534 / 393 | 692 / 758 / 574 | 195 / 283 / 169 | committed: verified admissible improvement; verification: probably_not_equivalent; probably_not_equivalent |
-| feynman:hwb10 | 60169 | 69664 | 54688 | 16437 / 26915 / 15891 | 31506 / 34828 / 30007 | 38981 / 38548 / 36910 | 11807 / 12863 / 11783 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:hwb11 | 166051 | 194163 | — | 45638 / 75372 / — | 87705 / 97615 / — | 117176 / 115613 / — | 33842 / 39133 / — | failed; pbc: timeout; not checked |
-| feynman:hwb12 | 326567 | 386733 | 326567 | 87493 / 152755 / 87493 | 170007 / 191205 / 170007 | 232046 / 225941 / 232046 | 65173 / 77375 / 65173 | skipped: native gate limit; identical gate sequence |
-| feynman:hwb6 | 229 | 249 | 212 | 75 / 97 / 75 | 108 / 116 / 105 | 166 / 163 / 152 | 57 / 59 / 55 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:hwb8 | 12546 | 14077 | 11583 | 3617 / 5437 / 3517 | 6585 / 7073 / 6305 | 8522 / 8231 / 8055 | 2594 / 2662 / 2607 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:inverseqft1 | — | 419 | — | — / 156 / — | — / 0 / — | — / 416 / — | — / 156 / — | unsupported classical control flow; not checked |
-| feynman:inverseqft2 | — | 116 | — | — / 40 / — | — / 0 / — | — / 108 / — | — / 39 / — | unsupported classical control flow; not checked |
-| feynman:mod5_4 | 57 | 60 | 37 | 16 / 22 / 7 | 28 / 28 / 19 | 50 / 48 / 30 | 14 / 16 / 6 | committed: verified admissible improvement; equivalent |
-| feynman:mod_adder_1024 | 3035 | 3859 | 2780 | 1011 / 1739 / 1011 | 1392 / 1702 / 1306 | 2472 / 2539 / 2115 | 746 / 989 / 758 | committed: verified admissible improvement; equivalent |
-| feynman:mod_mult_55 | 109 | 117 | 92 | 37 / 45 / 35 | 44 / 48 / 40 | 52 / 51 / 46 | 20 / 19 / 18 | committed: verified admissible improvement; equivalent |
-| feynman:mod_red_21 | 231 | 262 | 196 | 73 / 107 / 73 | 93 / 105 / 87 | 176 / 166 / 149 | 55 / 59 / 55 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:qcla_adder_10 | 440 | 481 | 419 | 162 / 212 / 162 | 205 / 215 / 200 | 72 / 75 / 66 | 26 / 29 / 25 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:qcla_com_7 | 335 | 406 | 298 | 95 / 169 / 95 | 152 / 174 / 144 | 77 / 85 / 72 | 26 / 34 / 26 | committed: verified admissible improvement; equivalent |
-| feynman:qcla_mod_7 | 742 | 827 | 678 | 249 / 351 / 237 | 348 / 366 / 324 | 211 / 211 / 194 | 74 / 83 / 73 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:qft | 496 | 1021 | 411 | 199 / 299 / 195 | 12 / 12 / 12 | 330 / 670 / 266 | 131 / 189 / 127 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:qft_4 | 171 | 484 | 157 | 67 / 146 / 67 | 46 / 45 / 46 | 146 / 445 / 130 | 52 / 127 / 52 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| feynman:rc_adder_6 | 191 | 185 | 147 | 63 / 67 / 47 | 91 / 83 / 76 | 111 / 103 / 91 | 40 / 39 / 31 | committed: verified admissible improvement; equivalent |
-| feynman:tof_10 | 215 | 247 | 183 | 71 / 103 / 71 | 86 / 102 / 78 | 180 / 171 / 157 | 62 / 68 / 62 | committed: verified admissible improvement; equivalent |
-| feynman:tof_3 | 40 | 44 | 36 | 15 / 19 / 15 | 16 / 18 / 15 | 33 / 31 / 31 | 13 / 12 / 13 | committed: verified admissible improvement; equivalent |
-| feynman:tof_4 | 65 | 73 | 57 | 23 / 31 / 23 | 26 / 30 / 24 | 54 / 51 / 49 | 20 / 20 / 20 | committed: verified admissible improvement; equivalent |
-| feynman:tof_5 | 90 | 102 | 78 | 31 / 43 / 31 | 36 / 42 / 33 | 75 / 71 / 67 | 27 / 28 / 27 | committed: verified admissible improvement; equivalent |
-| feynman:vbe_adder_3 | 101 | 128 | 97 | 24 / 56 / 24 | 54 / 58 / 52 | 66 / 76 / 61 | 16 / 30 / 16 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_large_adder_n118_adder_n118 | 1574 | 1782 | 1366 | 416 / 624 / 416 | 741 / 845 / 689 | 643 / 639 / 635 | 224 / 224 / 224 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_large_adder_n118_adder_n118_transpiled | 1809 | 1834 | 1366 | 416 / 624 / 416 | 741 / 845 / 689 | 762 / 679 / 635 | 224 / 224 / 224 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_adder_n28_adder_n28 | 364 | 412 | 316 | 96 / 144 / 96 | 171 / 195 / 159 | 193 / 189 / 185 | 64 / 64 / 64 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_large_adder_n28_adder_n28_transpiled | 419 | 424 | 316 | 96 / 144 / 96 | 171 / 195 / 159 | 222 / 199 / 185 | 64 / 64 / 64 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_adder_n433_adder_n433 | 5809 | 6577 | 5041 | 1536 / 2304 / 1536 | 2736 / 3120 / 2544 | 2218 / 2214 / 2210 | 784 / 784 / 784 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_large_adder_n433_adder_n433_transpiled | 6674 | 6769 | 5041 | 1536 / 2304 / 1536 | 2736 / 3120 / 2544 | 2652 / 2359 / 2210 | 784 / 784 / 784 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_large_adder_n64_adder_n64 | 848 | 960 | 736 | 224 / 336 / 224 | 399 / 455 / 371 | 373 / 369 / 365 | 128 / 128 / 128 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_large_adder_n64_adder_n64_transpiled | 975 | 988 | 736 | 224 / 336 / 224 | 399 / 455 / 371 | 438 / 391 / 365 | 128 / 128 / 128 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n34_ising_n34 | 4966 | 10636 | 4018 | 1914 / 2841 / 1906 | 66 / 66 / 66 | 309 / 561 / 255 | 124 / 142 / 124 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n34_ising_n34_transpiled | 4977 | 10515 | 4006 | 1914 / 2841 / 1900 | 66 / 66 / 66 | 317 / 563 / 254 | 124 / 142 / 123 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n42_ising_n42 | 6049 | 13102 | 4926 | 2348 / 3500 / 2328 | 82 / 82 / 82 | 324 / 570 / 256 | 122 / 143 / 122 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n420_ising_n420 | 62106 | 132380 | 49981 | 23986 / 36123 / 23684 | 838 / 838 / 838 | 301 / 585 / 242 | 116 / 150 / 116 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n420_ising_n420_transpiled | 62449 | 133768 | 49901 | 23986 / 36123 / 23684 | 838 / 838 / 838 | 293 / 620 / 239 | 116 / 150 / 116 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n66_ising_n66 | 9606 | 20394 | 7686 | 3712 / 5564 / 3646 | 130 / 130 / 130 | 306 / 557 / 248 | 120 / 146 / 118 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n66_ising_n66_transpiled | 9650 | 20373 | 7651 | 3712 / 5564 / 3644 | 130 / 130 / 129 | 301 / 561 / 246 | 120 / 146 / 120 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n98_ising_n98 | 14421 | 30133 | 11567 | 5565 / 8375 / 5483 | 194 / 194 / 194 | 312 / 574 / 249 | 120 / 146 / 118 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_ising_n98_ising_n98_transpiled | 14510 | 30263 | 11536 | 5563 / 8375 / 5481 | 194 / 194 / 194 | 315 / 570 / 245 | 120 / 146 / 118 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_multiplier_n350_multiplier_n350 | 166584 | 304183 | 161182 | 39202 / 136080 / 39062 | 92754 / 145880 / 92148 | 85210 / 141075 / 80334 | 21622 / 53489 / 21486 | committed: verified admissible improvement; verification: inconclusive; inconclusive |
-| qasmbench:qasmbench_large_multiplier_n350_multiplier_n350_transpiled | 176925 | 326475 | 161229 | 39202 / 136080 / 39062 | 92754 / 145880 / 92197 | 94856 / 160187 / 80315 | 21622 / 53489 / 21487 | committed: verified admissible improvement; verification: inconclusive; inconclusive |
-| qasmbench:qasmbench_large_multiplier_n400_multiplier_n400 | 217578 | 397635 | 217578 | 51202 / 177920 / 51202 | 121204 / 190720 / 121204 | 111400 / 184438 / 111400 | 28307 / 69929 / 28307 | skipped: search size/work/deadline limit; identical gate sequence |
-| qasmbench:qasmbench_large_multiplier_n400_multiplier_n400_transpiled | — | 426711 | — | — / 177920 / — | — / 190720 / — | — / 209467 / — | — / 69929 / — | failed; stock-prefix: timeout; not checked |
-| qasmbench:qasmbench_large_multiplier_n45_multiplier_n45 | 2756 | 4796 | 2599 | 650 / 2124 / 634 | 1500 / 2286 / 1428 | 1370 / 2224 / 1252 | 333 / 846 / 319 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_multiplier_n45_multiplier_n45_transpiled | 2985 | 5189 | 2611 | 650 / 2124 / 634 | 1500 / 2286 / 1430 | 1518 / 2502 / 1247 | 333 / 846 / 319 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_multiplier_n75_multiplier_n75 | 7651 | 13619 | 7307 | 1802 / 6060 / 1774 | 4206 / 6510 / 4082 | 3833 / 6304 / 3547 | 942 / 2394 / 916 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_multiplier_n75_multiplier_n75_transpiled | 8215 | 14681 | 7320 | 1802 / 6060 / 1774 | 4206 / 6510 / 4086 | 4257 / 7122 / 3533 | 942 / 2394 / 916 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_large_qft_n160_qft_n160 | 119613 | 380659 | 96773 | 46959 / 105786 / 46029 | 2790 / 5700 / 2790 | 26147 / 65327 / 21420 | 10551 / 17920 / 10392 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_qft_n160_qft_n160_transpiled | 106920 | 380702 | 87577 | 41873 / 105786 / 41247 | 2790 / 5700 / 2790 | 25485 / 65327 / 21369 | 10067 / 17919 / 10059 | committed: verified admissible improvement; verification: no_information; no_information |
-| qasmbench:qasmbench_large_qft_n29_qft_n29 | 18253 | 57351 | 15052 | 7266 / 15920 / 7122 | 432 / 722 / 432 | 4479 / 10962 / 3602 | 1774 / 2986 / 1746 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_qft_n29_qft_n29_transpiled | 16994 | 57394 | 13851 | 6634 / 15920 / 6528 | 432 / 722 / 432 | 4343 / 10962 / 3549 | 1683 / 2985 / 1674 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_large_qft_n320_qft_n320 | 239671 | 775539 | 239671 | 95439 / 215546 / 95439 | 5670 / 11780 / 5670 | 52701 / 131727 / 52701 | 21271 / 36160 / 21271 | skipped: search size/work/deadline limit; identical gate sequence |
-| qasmbench:qasmbench_large_qft_n320_qft_n320_transpiled | 216825 | 775582 | 216825 | 84913 / 215546 / 84913 | 5670 / 11780 / 5670 | 52650 / 131727 / 52650 | 20307 / 36159 / 20307 | skipped: search size/work/deadline limit; identical gate sequence |
-| qasmbench:qasmbench_large_qft_n63_qft_n63 | 44289 | 141263 | 36199 | 17568 / 39244 / 17220 | 1044 / 2014 / 1044 | 10041 / 25072 / 8228 | 4052 / 6862 / 3990 | committed: verified admissible improvement; verification: no_information; no_information |
-| qasmbench:qasmbench_large_qft_n63_qft_n63_transpiled | 40124 | 141306 | 32643 | 15780 / 39244 / 15424 | 1044 / 2014 / 1044 | 9561 / 25072 / 8175 | 3859 / 6861 / 3848 | committed: verified admissible improvement; verification: no_information; no_information |
-| qasmbench:qasmbench_medium_bigadder_n18_bigadder_n18 | 242 | 274 | 209 | 64 / 96 / 64 | 114 / 130 / 106 | 160 / 152 / 144 | 48 / 48 / 48 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_medium_bigadder_n18_bigadder_n18_transpiled | 278 | 282 | 209 | 64 / 96 / 64 | 114 / 130 / 106 | 171 / 157 / 142 | 48 / 48 / 48 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_medium_ising_n26_ising_n26 | 3785 | 7480 | 3045 | 1454 / 2132 / 1442 | 50 / 50 / 50 | 282 / 532 / 228 | 110 / 145 / 109 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_medium_ising_n26_ising_n26_transpiled | 3814 | 7489 | 3035 | 1454 / 2132 / 1444 | 50 / 50 / 50 | 284 / 531 / 225 | 110 / 145 / 110 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_medium_multiplier_n15_multiplier_n15 | 313 | 476 | 280 | 74 / 204 / 70 | 162 / 222 / 142 | 168 / 232 / 147 | 44 / 90 / 41 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_medium_multiplier_n15_multiplier_n15_transpiled | 351 | 524 | 281 | 74 / 204 / 70 | 162 / 222 / 142 | 186 / 258 / 145 | 44 / 90 / 42 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_medium_multiply_n13_multiply_n13 | 93 | 95 | 93 | 32 / 36 / 32 | 40 / 40 / 40 | 41 / 42 / 41 | 16 / 15 / 16 | skipped: no admissible improvement; identical gate sequence |
-| qasmbench:qasmbench_medium_multiply_n13_multiply_n13_transpiled | 105 | 95 | 91 | 32 / 36 / 32 | 40 / 40 / 40 | 40 / 42 / 39 | 15 / 15 / 15 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_medium_qft_n18_qft_n18 | 10017 | 30205 | 8104 | 3933 / 8374 / 3855 | 234 / 306 / 234 | 2607 / 6397 / 2108 | 1037 / 1732 / 1020 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_medium_qft_n18_qft_n18_transpiled | 9385 | 30248 | 7594 | 3675 / 8374 / 3589 | 234 / 306 / 234 | 2452 / 6397 / 2049 | 979 / 1731 / 967 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_adder_n10_adder_n10 | 122 | 138 | 106 | 32 / 48 / 32 | 57 / 65 / 53 | 103 / 99 / 95 | 32 / 32 / 32 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_small_adder_n10_adder_n10_transpiled | 141 | 142 | 106 | 32 / 48 / 32 | 57 / 65 / 53 | 114 / 103 / 95 | 32 / 32 / 32 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_adder_n4_adder_n4 | 23 | 23 | 22 | 8 / 8 / 8 | 10 / 10 / 10 | 11 / 11 / 11 | 2 / 2 / 2 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_small_adder_n4_adder_n4_transpiled | 24 | 25 | 22 | 8 / 8 / 8 | 10 / 10 / 10 | 12 / 13 / 11 | 2 / 2 / 2 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_small_basis_trotter_n4_basis_test_n4 | 800 | 1516 | 616 | 296 / 420 / 288 | 34 / 28 / 27 | 354 / 674 / 265 | 124 / 174 / 122 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_basis_trotter_n4_basis_test_n4_transpiled | 885 | 1579 | 654 | 314 / 424 / 310 | 46 / 38 / 30 | 542 / 825 / 396 | 188 / 212 / 187 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_basis_trotter_n4_basis_trotter_n4 | 19667 | 47122 | 14410 | 7136 / 12685 / 6886 | 462 / 303 / 304 | 8619 / 20053 / 6292 | 3047 / 5281 / 2988 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_basis_trotter_n4_basis_trotter_n4_transpiled | 20299 | 35930 | 14816 | 7190 / 9481 / 7108 | 582 / 351 / 331 | 10704 / 18209 / 7809 | 3766 / 4780 / 3738 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_ipea_n2_ipea_n2 | — | 2331 | — | — / 688 / — | — / 14 / — | — / 2320 / — | — / 686 / — | unsupported classical control flow; not checked |
-| qasmbench:qasmbench_small_ipea_n2_ipea_n2_transpiled | — | 2341 | — | — / 688 / — | — / 14 / — | — / 2323 / — | — / 686 / — | unsupported classical control flow; not checked |
-| qasmbench:qasmbench_small_ising_n10_ising_n10 | 9302 | 18655 | 7336 | 3644 / 5140 / 3578 | 72 / 90 / 72 | 1385 / 3040 / 1099 | 539 / 835 / 533 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_ising_n10_ising_n10_transpiled | 9314 | 18779 | 7381 | 3642 / 5108 / 3600 | 72 / 90 / 72 | 1390 / 3332 / 1092 | 539 / 926 / 533 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_pea_n5_pea_n5 | 671 | 2988 | 550 | 264 / 831 / 260 | 20 / 26 / 17 | 503 / 2706 / 344 | 197 / 751 / 163 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_small_pea_n5_pea_n5_transpiled | 709 | 2992 | 578 | 272 / 831 / 270 | 20 / 26 / 18 | 527 / 2708 / 361 | 204 / 751 / 170 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_small_qft_n4_qft_n4 | 504 | 1021 | 408 | 199 / 299 / 195 | 12 / 12 / 12 | 338 / 670 / 263 | 131 / 189 / 127 | committed: verified admissible improvement; equivalent |
-| qasmbench:qasmbench_small_qft_n4_qft_n4_transpiled | 531 | 756 | 430 | 207 / 226 / 205 | 12 / 12 / 12 | 303 / 620 / 244 | 119 / 185 / 117 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| qasmbench:qasmbench_small_qpe_n9_qpe_n9 | 1208 | 3022 | 1208 | 473 / 863 / 473 | 41 / 43 / 41 | 1192 / 1749 / 1192 | 472 / 506 / 472 | skipped: PBC rotations must precede all measurements and sinks; identical gate sequence |
-| qasmbench:qasmbench_small_qpe_n9_qpe_n9_transpiled | 1233 | 3046 | 998 | 467 / 863 / 461 | 41 / 43 / 40 | 855 / 1756 / 694 | 327 / 506 / 321 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| generated_qft:qft_n002 | 8 | 7 | 8 | 3 / 3 / 3 | 3 / 2 / 3 | 6 / 5 / 6 | 3 / 3 / 3 | skipped: no admissible improvement; identical gate sequence |
-| generated_qft:qft_n004 | 504 | 1019 | 416 | 199 / 299 / 195 | 14 / 12 / 14 | 338 / 669 / 267 | 131 / 189 / 127 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| generated_qft:qft_n008 | 2379 | 6256 | 1946 | 945 / 1706 / 919 | 60 / 56 / 60 | 930 / 2258 / 758 | 373 / 629 / 365 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| generated_qft:qft_n016 | 8469 | 25279 | 6820 | 3327 / 7002 / 3237 | 206 / 240 / 206 | 2240 / 5567 / 1839 | 903 / 1509 / 888 | committed: verified admissible improvement; equivalent |
-| generated_qft:qft_n032 | 20785 | 64755 | 16857 | 8175 / 17978 / 7957 | 502 / 836 / 502 | 4990 / 12207 / 4013 | 1975 / 3328 / 1944 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| generated_qft:qft_n064 | 45339 | 143731 | 36879 | 17871 / 39930 / 17397 | 1094 / 2052 / 1094 | 10212 / 25487 / 8365 | 4119 / 6976 / 4056 | committed: verified admissible improvement; verification: no_information; no_information |
-| generated_adder:cuccaro_n002 | 59 | 67 | 51 | 16 / 24 / 16 | 29 / 33 / 27 | 52 / 50 / 48 | 16 / 16 / 16 | committed: verified admissible improvement; equivalent |
-| generated_adder:cuccaro_n004 | 117 | 133 | 101 | 32 / 48 / 32 | 57 / 65 / 53 | 102 / 98 / 94 | 32 / 32 / 32 | committed: verified admissible improvement; equivalent |
-| generated_adder:cuccaro_n008 | 233 | 265 | 201 | 64 / 96 / 64 | 113 / 129 / 105 | 202 / 194 / 186 | 64 / 64 / 64 | committed: verified admissible improvement; equivalent |
-| generated_adder:cuccaro_n016 | 465 | 529 | 401 | 128 / 192 / 128 | 225 / 257 / 209 | 402 / 386 / 370 | 128 / 128 / 128 | committed: verified admissible improvement; equivalent |
-| generated_adder:cuccaro_n032 | 929 | 1057 | 801 | 256 / 384 / 256 | 449 / 513 / 417 | 802 / 770 / 738 | 256 / 256 / 256 | committed: verified admissible improvement; equivalent |
-| generated_adder:cuccaro_n064 | 1857 | 2113 | 1601 | 512 / 768 / 512 | 897 / 1025 / 833 | 1602 / 1538 / 1474 | 512 / 512 / 512 | committed: verified admissible improvement; equivalent |
-| generated_single_rotation:a00_eps1em03 | 0 | 0 | 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | skipped: no admissible improvement; identical gate sequence |
-| ftcircuitbench:adder_adder_10q | 122 | 138 | 106 | 32 / 48 / 32 | 57 / 65 / 53 | 103 / 99 / 95 | 32 / 32 / 32 | committed: verified admissible improvement; equivalent |
-| ftcircuitbench:adder_adder_28q | 364 | 412 | 316 | 96 / 144 / 96 | 171 / 195 / 159 | 193 / 189 / 185 | 64 / 64 / 64 | committed: verified admissible improvement; equivalent |
-| ftcircuitbench:adder_adder_4q | 23 | 23 | 22 | 8 / 8 / 8 | 10 / 10 / 10 | 11 / 11 / 11 | 2 / 2 / 2 | committed: verified admissible improvement; equivalent |
-| ftcircuitbench:adder_adder_64q | 848 | 960 | 736 | 224 / 336 / 224 | 399 / 455 / 371 | 373 / 369 / 365 | 128 / 128 / 128 | committed: verified admissible improvement; equivalent |
-| ftcircuitbench:hamiltonians_fermi_hubbard_1d_128q | — | 2535160 | — | — / 648850 / — | — / 59524 / — | — / 742210 / — | — / 195275 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hamiltonians_fermi_hubbard_1d_18q | 152636 | 358057 | 121693 | 55440 / 91315 / 54602 | 7640 / 8482 / 7172 | 144023 / 274510 / 115264 | 54320 / 70995 / 53542 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_fermi_hubbard_1d_72q | 605975 | 1420904 | 605975 | 221760 / 363390 / 221760 | 29640 / 34204 / 29640 | 496863 / 813050 / 496863 | 187600 / 213515 / 187600 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_fermi_hubbard_2d_128q | — | 4054614 | — | — / 1007308 / — | — / 190924 / — | — / 1475312 / — | — / 374224 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:hamiltonians_fermi_hubbard_2d_18q | 272850 | 554679 | 272850 | 95760 / 139484 / 95760 | 18840 / 19802 / 18840 | 231925 / 463692 / 231925 | 85120 / 119124 / 85120 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_fermi_hubbard_2d_72q | — | 2262974 | — | — / 560608 / — | — / 110248 / — | — / 1505532 / — | — / 381804 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hamiltonians_fermi_hubbard_2d_triangular_128q | — | 5552582 | — | — / 1365708 / — | — / 326140 / — | — / 2570632 / — | — / 645864 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:hamiltonians_fermi_hubbard_2d_triangular_18q | 390902 | 773194 | 390902 | 136080 / 194784 / 136080 | 29720 / 30562 / 29720 | 347254 / 664512 / 347254 | 126560 / 170964 / 126560 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_fermi_hubbard_2d_triangular_72q | — | 3100445 | — | — / 762208 / — | — / 181892 / — | — / 2366932 / — | — / 596004 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:hamiltonians_heisenberg_1d_100q | — | 1966352 | — | — / 558779 / — | — / 11883 / — | — / 921021 / — | — / 281938 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hamiltonians_heisenberg_1d_36q | 356435 | 700176 | 356435 | 129000 / 198715 / 129000 | 8600 / 4203 / 8600 | 349065 / 331133 / 349065 | 129000 / 100946 / 129000 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_heisenberg_1d_64q | 614331 | 1254128 | 614331 | 229800 / 356243 / 229800 | 15320 / 7563 / 15320 | 601305 / 589209 / 601305 | 229800 / 180130 / 229800 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_heisenberg_1d_9q | 85081 | 166008 | 65391 | 31800 / 46813 / 31136 | 2120 / 963 / 1762 | 83165 / 82274 / 64133 | 31800 / 24590 / 31129 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_heisenberg_2d_100q | — | 3820963 | — | — / 1096782 / — | — / 23403 / — | — / 406692 / — | — / 124383 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hamiltonians_heisenberg_2d_36q | 698075 | 1354995 | 698075 | 256200 / 390626 / 256200 | 17080 / 8283 / 17080 | 208785 / 235320 / 208785 | 78600 / 71563 / 78600 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_heisenberg_2d_64q | — | 2430759 | — | — / 698972 / — | — / 14883 / — | — / 321006 / — | — / 97973 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hamiltonians_heisenberg_2d_9q | 176401 | 330685 | 131867 | 63600 / 95786 / 62616 | 4240 / 1983 / 3563 | 95605 / 107391 / 71774 | 35400 / 32021 / 34848 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_100q | — | 5781095 | — | — / 1665708 / — | — / 35883 / — | — / 2374260 / — | — / 723452 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_36q | — | 2063107 | — | — / 596360 / — | — / 12843 / — | — / 869988 / — | — / 264924 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_64q | — | 3687773 | — | — / 1064074 / — | — / 22923 / — | — / 1529692 / — | — / 466092 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_9q | 263321 | 504599 | 263321 | 96600 / 145823 / 96600 | 6440 / 3123 / 6440 | 199185 / 227052 / 199185 | 75000 / 68532 / 75000 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_ising_1d_100q | 273560 | 817226 | 273560 | 107800 / 209316 / 107800 | 4200 / 7962 / 4200 | 123120 / 543986 / 123120 | 48400 / 140016 / 48400 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_ising_1d_36q | 97240 | 292426 | 79846 | 38808 / 74916 / 38766 | 1512 / 2842 / 1512 | 45402 / 195826 / 38505 | 17808 / 50416 / 17766 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_ising_1d_64q | 175064 | 522026 | 141972 | 68992 / 133716 / 68950 | 2688 / 5082 / 2688 | 79344 / 348146 / 67569 | 31192 / 89616 / 31150 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_ising_1d_9q | 24584 | 71026 | 19944 | 9702 / 18216 / 9660 | 378 / 682 / 378 | 12464 / 48946 / 10478 | 4902 / 12616 / 4860 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_ising_2d_100q | 391200 | 1358452 | 391200 | 155600 / 348632 / 155600 | 8400 / 15924 / 8400 | 39176 / 206706 / 39176 | 15420 / 53216 / 15420 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_ising_2d_36q | 140832 | 485492 | 117032 | 56016 / 124632 / 55850 | 3024 / 5684 / 3024 | 23976 / 119666 / 20293 | 9444 / 30816 / 9385 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_ising_2d_64q | 250920 | 867412 | 250920 | 99584 / 222632 / 99584 | 5376 / 10164 / 5376 | 31698 / 163186 / 31698 | 12432 / 42016 / 12432 | skipped: candidate operation limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_ising_2d_9q | 35392 | 117212 | 29243 | 14004 / 30132 / 13934 | 756 / 1364 / 756 | 12658 / 54386 / 10598 | 4962 / 14016 / 4925 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_ising_2d_triangular_100q | 519200 | 1899678 | 519200 | 203400 / 487948 / 203400 | 12600 / 23886 / 12600 | 160678 / 707186 / 160678 | 62740 / 182016 / 62740 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_ising_2d_triangular_36q | 185081 | 678558 | 154181 | 73224 / 174348 / 72914 | 4536 / 8526 / 4536 | 67400 / 293746 / 57038 | 26412 / 75616 / 26244 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_ising_2d_triangular_64q | 330712 | 1212798 | 330712 | 130176 / 311548 / 130176 | 8064 / 15246 / 8064 | 108566 / 478706 / 108566 | 42664 / 123216 / 42664 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_ising_2d_triangular_9q | 46301 | 163398 | 38529 | 18306 / 42048 / 18200 | 1134 / 2046 / 1134 | 23598 / 98178 / 19900 | 9264 / 25286 / 9197 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_128q | 141724 | 297312 | 116152 | 53200 / 80118 / 53056 | 4250 / 4250 / 4250 | 46977 / 111017 / 39039 | 18032 / 29482 / 17990 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_18q | 21210 | 43326 | 17405 | 8020 / 11669 / 7978 | 645 / 645 / 645 | 10791 / 24180 / 9004 | 4146 / 6432 / 4131 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_200q | 221837 | 467786 | 221837 | 83720 / 125948 / 83720 | 6795 / 6795 / 6795 | 108439 / 255954 / 108439 | 41552 / 67912 / 41552 | skipped: candidate operation limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_72q | 79456 | 168317 | 65396 | 29960 / 45188 / 29876 | 2505 / 2505 / 2505 | 33787 / 79614 / 28082 | 12880 / 21000 / 12851 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_128q | 280548 | 714216 | 280548 | 98700 / 184114 / 98700 | 19530 / 19530 / 19530 | 91005 / 228013 / 91005 | 33116 / 59039 / 33116 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_18q | 39236 | 92770 | 32419 | 14270 / 24182 / 14252 | 1915 / 1915 / 1915 | 21457 / 49508 / 17940 | 7966 / 12772 / 7967 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_200q | 467096 | 1142041 | 467096 | 163240 / 297945 / 163240 | 35375 / 35375 / 35375 | 222456 / 553007 / 222456 | 79392 / 142095 / 79392 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_72q | 160466 | 402286 | 132646 | 56440 / 104440 / 56360 | 11110 / 11110 / 11110 | 73346 / 180351 / 62181 | 26292 / 46114 / 26244 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_128q | 442226 | 1088904 | 442226 | 155020 / 277384 / 155020 | 34464 / 34464 / 34464 | 154372 / 370861 / 154372 | 55104 / 93128 / 55104 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_18q | 59559 | 141011 | 49225 | 21620 / 36757 / 21620 | 3115 / 3115 / 3115 | 34177 / 78597 / 28601 | 12648 / 20134 / 12654 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_200q | 721928 | 1753415 | 721928 | 251200 / 451109 / 251200 | 61100 / 61100 / 61100 | 370279 / 894781 / 370279 | 130240 / 224437 / 130240 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_72q | 248388 | 616970 | 248388 | 87120 / 158929 / 87120 | 18775 / 18775 / 18775 | 120330 / 294566 / 120330 | 42732 / 73754 / 42732 | skipped: candidate operation limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_100q | 106132 | 305858 | 85031 | 41580 / 81509 / 40584 | 1485 / 1485 / 1485 | 15391 / 50992 / 12505 | 5992 / 13598 / 5881 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_36q | 37617 | 108226 | 30028 | 14700 / 28837 / 14344 | 525 / 525 / 525 | 6188 / 19824 / 5016 | 2408 / 5278 / 2361 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_64q | 66911 | 194690 | 54109 | 26460 / 51881 / 25824 | 945 / 945 / 945 | 10075 / 33460 / 8292 | 3976 / 8918 / 3901 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_9q | 8494 | 24850 | 6861 | 3360 / 6616 / 3274 | 120 / 120 / 120 | 2264 / 6675 / 1857 | 896 / 1768 / 876 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_100q | 210698 | 644956 | 210698 | 85008 / 171208 / 85008 | 3000 / 3000 / 3000 | 23281 / 65489 / 23281 | 9352 / 17252 / 9352 | skipped: candidate operation limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_36q | 76475 | 230252 | 62502 | 30800 / 61064 / 29692 | 1080 / 1080 / 1080 | 13793 / 38201 / 11338 | 5544 / 10052 / 5340 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_64q | 137526 | 411396 | 110826 | 54544 / 109168 / 52644 | 1920 / 1920 / 1920 | 18989 / 51845 / 15289 | 7448 / 13652 / 7200 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_9q | 19584 | 56816 | 15754 | 7784 / 15038 / 7486 | 270 / 270 / 270 | 6894 / 17927 / 5547 | 2716 / 4692 / 2618 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_100q | 313130 | 968265 | 313130 | 126000 / 256636 / 126000 | 4500 / 4500 / 4500 | 145581 / 422554 / 145581 | 58800 / 110700 / 58800 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_36q | 112927 | 346709 | 91903 | 45360 / 91836 / 43626 | 1620 / 1620 / 1620 | 54168 / 158950 / 44534 | 21840 / 41668 / 21110 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_64q | 202402 | 618339 | 202402 | 80640 / 163848 / 80640 | 2880 / 2880 / 2880 | 94455 / 275152 / 94455 | 38080 / 72104 / 38080 | skipped: candidate operation limit; identical gate sequence |
-| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_9q | 27975 | 86069 | 22962 | 11340 / 22773 / 10896 | 405 / 405 / 405 | 14386 / 43147 / 11987 | 5880 / 11314 / 5684 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_1d_100q | 71000 | 118518 | 58069 | 28000 / 33500 / 27990 | 1000 / 1000 / 1000 | 35360 / 64563 / 29751 | 14140 / 16670 / 14126 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_1d_36q | 25560 | 42678 | 20885 | 10080 / 12060 / 10070 | 360 / 360 / 360 | 12960 / 23603 / 10871 | 5180 / 6110 / 5166 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_1d_64q | 44800 | 75858 | 37154 | 17920 / 21440 / 17910 | 640 / 640 / 640 | 22120 / 41523 / 18818 | 9100 / 10730 / 9090 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_1d_9q | 6300 | 10683 | 5199 | 2520 / 3015 / 2510 | 90 / 90 / 90 | 3420 / 6323 / 2868 | 1400 / 1655 / 1390 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_100q | 104000 | 182518 | 84905 | 42000 / 50000 / 41080 | 2000 / 2000 / 2000 | 11104 / 20769 / 9222 | 4564 / 5384 / 4448 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_36q | 37440 | 65718 | 30615 | 15120 / 18000 / 14800 | 720 / 720 / 720 | 6752 / 12577 / 5602 | 2772 / 3272 / 2700 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_64q | 67840 | 116818 | 54306 | 26880 / 32000 / 26300 | 1280 / 1280 / 1280 | 9180 / 16673 / 7434 | 3668 / 4328 / 3574 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_9q | 9360 | 16443 | 7661 | 3780 / 4500 / 3700 | 180 / 180 / 180 | 3488 / 6433 / 2883 | 1428 / 1688 / 1391 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_100q | 138000 | 246518 | 111326 | 56000 / 66500 / 54080 | 3000 / 3000 / 3000 | 44560 / 83763 / 35879 | 18340 / 21620 / 17495 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_36q | 49680 | 88758 | 40114 | 20160 / 23940 / 19480 | 1080 / 1080 / 1080 | 18720 / 35123 / 15173 | 7700 / 9080 / 7375 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_64q | 88320 | 157778 | 71280 | 35840 / 42560 / 34620 | 1920 / 1920 / 1920 | 30280 / 56883 / 24446 | 12460 / 14690 / 11905 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_9q | 12420 | 22203 | 10058 | 5040 / 5985 / 4870 | 270 / 270 / 270 | 6820 / 12705 / 5534 | 2800 / 3305 / 2680 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hhl_hhl_12q | 131555 | 257513 | 103534 | 51304 / 70263 / 50240 | 2692 / 3084 / 2690 | 102667 / 184988 / 80771 | 40122 / 50357 / 39230 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:hhl_hhl_21q | — | 2487067 | — | — / 682415 / — | — / 29813 / — | — / 1860311 / — | — / 508912 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:hhl_hhl_4q | 926 | 2316 | 734 | 354 / 630 / 352 | 22 / 22 / 18 | 839 / 1722 / 667 | 324 / 460 / 320 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| ftcircuitbench:hhl_hhl_7q | 15395 | 29791 | 12295 | 6059 / 8191 / 5999 | 257 / 317 / 249 | 11321 / 22027 / 9029 | 4458 / 6021 / 4413 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| ftcircuitbench:qft_qft_18q | 10021 | 30205 | 8103 | 3933 / 8374 / 3855 | 234 / 306 / 234 | 2607 / 6397 / 2108 | 1037 / 1732 / 1020 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| ftcircuitbench:qft_qft_29q | 18321 | 57351 | 14972 | 7266 / 15920 / 7122 | 432 / 722 / 432 | 4401 / 10962 / 3604 | 1774 / 2986 / 1746 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| ftcircuitbench:qft_qft_4q | 496 | 1021 | 411 | 199 / 299 / 195 | 12 / 12 / 12 | 330 / 670 / 263 | 131 / 189 / 127 | committed: verified admissible improvement; equivalent |
-| ftcircuitbench:qft_qft_63q | 44766 | 141263 | 36231 | 17568 / 39244 / 17102 | 1044 / 2014 / 1044 | 10267 / 25072 / 8228 | 4052 / 6862 / 3990 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:qpe_qpe_h2_0_6_12q | — | 20048891 | — | — / 5512786 / — | — / 232410 / — | — / 15321245 / — | — / 4204099 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:qpe_qpe_h2_0_74_12q | — | 20213908 | — | — / 5553262 / — | — / 232410 / — | — / 15391635 / — | — / 4217711 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:qpe_qpe_h2_1_0_12q | — | 20050898 | — | — / 5523746 / — | — / 232410 / — | — / 15329173 / — | — / 4204505 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:qpe_qpe_h2_1_5_12q | — | 20538805 | — | — / 5612948 / — | — / 232410 / — | — / 15795296 / — | — / 4293008 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:qpe_qpe_hubbard_10q | — | 4188598 | — | — / 1150956 / — | — / 55580 / — | — / 3200591 / — | — / 875817 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:qpe_qpe_hubbard_8q | 529667 | 999931 | 529667 | 205011 / 273889 / 205011 | 11813 / 13262 / 11813 | 427496 / 764444 / 427496 | 165332 / 208602 / 165332 | skipped: native gate limit; identical gate sequence |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_10q | — | 3205952 | — | — / 920421 / — | — / 71814 / — | — / 2779501 / — | — / 795045 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_11q | — | 6214073 | — | — / 1768042 / — | — / 139983 / — | — / 5381576 / — | — / 1521871 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_12q | — | 10979973 | — | — / 3125500 / — | — / 247336 / — | — / 9588277 / — | — / 2710002 / — | failed; stock-prefix: timeout; not checked |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_13q | — | 18449983 | — | — / 5249566 / — | — / 408753 / — | — / 16195524 / — | — / 4578992 / — | failed; frontend: timeout; not checked |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_6q | 80457 | 182235 | 63919 | 31644 / 53256 / 30814 | 1814 / 2002 / 1751 | 78718 / 153395 / 62576 | 31235 / 44969 / 30437 | committed: verified admissible improvement; equivalent_up_to_global_phase |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_7q | 147414 | 307752 | 118339 | 58735 / 90890 / 56729 | 4108 / 5164 / 3830 | 126577 / 258237 / 101462 | 50486 / 76124 / 48792 | committed: verified admissible improvement; verification: no_information; no_information |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_8q | 255293 | 550916 | 255293 | 101712 / 159028 / 101712 | 9502 / 12294 / 9502 | 220910 / 479608 / 220910 | 88163 / 137008 / 88163 | skipped: candidate operation limit; identical gate sequence |
-| ftcircuitbench:qsvt_qsvt_bandedcirculant_9q | 678748 | 1325141 | 678748 | 265604 / 375904 / 265604 | 25436 / 30987 / 25436 | 609336 / 1234179 / 609336 | 238259 / 347188 / 238259 | skipped: native gate limit; identical gate sequence |
+Release remains pinned to compiler SHA-256 `d358d40656d2ba8c7177080c8e54a5203144de2c6d6ee93c48b348d62b2b7486`, with one release/native-input configuration and `native-acceptance=gates-and-t`; secondary metrics may trade off. Hold uses the completed local-frame checkpoint implementation, `semantics=hold local-frames=true`, `synthesis-hold-checkpoints=true`, simplification enabled, one candidate node, lookahead 16, 22 discrepancy decisions, four algebraic candidates, and no commuting or joint-phase candidates. Suite capacities are rounded to 200,000,000 gates/steps, 1,000,000,000,000 logical dependencies, 536,870,912 dependency bytes and 100,000,000,000,000,000 work units, with a 300-second parent limit. The bounded local hold routes retain their compiled limits. Generated native words additionally receive a bounded, phase-exact three-wire four-T rewrite; equal-T candidates are ranked by the full requested objective. This rewrite consumes generated synthesis outputs only. Hold compiler SHA-256: `495fe6981ac350a9115f26bae4a9a1edc1568bdb611d55db472e58e6d4fbe7c2`. The updated compiler passed 6 spot checks with independent unitary verification; small cases also pass full scalar-phase checks. The generated Cuccaro-2 case matches the 58-gate, 16-T diagnostic target.
+
+Source files are not edited for collection. Release and hold use separate frozen executables, manifests and proof records on **10.117.10.135 only**. The hold-only rerun reserves at most 440 GiB across up to 72 single-thread jobs, retaining at least 48 GiB for the host. The detached remote supervisor restarts a failed controller and preserves completed current-run records. Exact inputs are checked against preserved hashes. Commands, all five metrics, resources and independent proof attempts are under `build/pbc-fresh-synthesis-197-2026-11-06/` and `build/pbc-hold-synthesis-197-2026-11-07/`. Spot checks use the same frozen suite inputs and compiler as the full rerun; their completed current-run measurements are reused. Remote completion is recorded in hold-current-20261107/completion.json.
+
+| Case | CUDA-Q total | Qiskit total | Clifford+T optimization total | PBC synthesis (release) total | PBC synthesis (hold) total | T count (C/Q/O/R/H) | Two-qubit count (C/Q/O/R/H) | Depth (C/Q/O/R/H) | T depth (C/Q/O/R/H) | Clifford+T optimization outcome / verification | PBC synthesis (release) outcome / verification | PBC synthesis (hold) outcome / verification |
+|---|---:|---:|---:|---:|---:|---|---|---|---|---|---|---|
+| feynman:adder | 122 | 138 | 106 | **102** | 117 | 32 / 48 / 32 / **31** / **31** | 57 / 65 / 53 / **52** / 61 | 103 / 99 / 95 / **85** / 87 | 32 / 32 / 32 / **27** / 28 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:adder_8 | 727 | 875 | 621 | **489** | 566 | 215 / 361 / **173** / **173** / **173** | 347 / 409 / 320 / **236** / 276 | 228 / 246 / 205 / **156** / 169 | 74 / 90 / 66 / **47** / 54 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:barenco_tof_10 | 365 | 427 | 342 | **268** | 289 | **100** / 192 / **100** / **100** / **100** | 176 / 192 / 168 / **134** / 145 | 324 / 322 / 281 / **207** / 212 | 88 / 128 / 87 / 76 / **69** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:barenco_tof_3 | 50 | 56 | 46 | **37** | 39 | **16** / 24 / **16** / **16** / **16** | 22 / 24 / 21 / **15** / 17 | 44 / 42 / 41 / 35 / **34** | 16 / 16 / 16 / 16 / **15** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:barenco_tof_4 | 95 | 109 | 88 | **69** | 75 | **28** / 48 / **28** / **28** / **28** | 44 / 48 / 42 / **31** / 36 | 84 / 82 / 77 / **59** / 60 | 28 / 32 / 27 / 23 / **22** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:barenco_tof_5 | 140 | 162 | 130 | **102** | 112 | **40** / 72 / **40** / **40** / **40** | 66 / 72 / 63 / **48** / 55 | 124 / 122 / 111 / **84** / 85 | 38 / 48 / 37 / 33 / **29** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:bigadder | 242 | 274 | **209** | **209** | 240 | 64 / 96 / 64 / 64 / **62** | 114 / 130 / 106 / **104** / 136 | 160 / 152 / 144 / **138** / 153 | 48 / 48 / 48 / **45** / 46 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:csla_mux_3 | 161 | 157 | 156 | **146** | 152 | 64 / 64 / **62** / **62** / **62** | 76 / 72 / 72 / **69** / 74 | 69 / 68 / 68 / **57** / 67 | 26 / 25 / 26 / **20** / 21 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:csum_mux_9 | 392 | 420 | 308 | 289 | **252** | 140 / 196 / **84** / **84** / **84** | 168 / 168 / 168 / 153 / **112** | 61 / 60 / 54 / 71 / **44** | 23 / 24 / **16** / 18 / **16** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:gf2_10_mult | **1088** | 1257 | **1088** | **1088** | **1088** | **410** / 600 / **410** / **410** / **410** | **609** / **609** / **609** / **609** / **609** | 293 / 307 / 292 / 293 / **221** | 117 / 134 / 118 / 117 / **82** | committed: verified admissible improvement; equivalent | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent; current hold |
+| feynman:gf2_128_mult | **165019** | 197499 | **165019** | **165019** | **165019** | **65664** / 98304 / **65664** / **65664** / **65664** | **98685** / **98685** / **98685** / **98685** / **98685** | 4073 / 4326 / 4073 / 4073 / **3074** | 1652 / 1905 / 1652 / 1652 / **1146** | skipped: no admissible improvement; identical gate sequence | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent; current hold |
+| feynman:gf2_16_mult | 2703 | 3179 | 2703 | 2690 | **2684** | **1040** / 1536 / **1040** / **1040** / **1040** | 1581 / 1581 / 1581 / **1568** / **1568** | 491 / 520 / 491 / 489 / **372** | 196 / 225 / 196 / 196 / **137** | skipped: no admissible improvement; identical gate sequence | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:gf2_256_mult | **657723** | 788219 | **657723** | **657723** | **657723** | **262400** / 393216 / **262400** / **262400** / **262400** | **393981** / **393981** / **393981** / **393981** / **393981** | 8162 / 8671 / 8162 / 8162 / **6138** | 3315 / 3824 / 3315 / 3315 / **2297** | skipped: native gate limit; identical gate sequence | verified; identical gate sequence; fresh-v1; incoming retained | unverified; auto: no_information; lookahead: no_information; current hold |
+| feynman:gf2_32_mult | 10562 | 12538 | 10562 | 10562 | **10552** | **4128** / 6144 / **4128** / **4128** / **4128** | **6268** / **6268** / **6268** / **6268** / **6268** | 1003 / 1064 / 1003 / 1003 / **765** | 404 / 465 / 404 / 404 / **281** | skipped: no admissible improvement; identical gate sequence | verified; identical gate sequence; fresh-v1; incoming retained | unverified; auto: no_information; lookahead: no_information; current hold |
+| feynman:gf2_4_mult | 194 | 213 | 193 | **184** | 185 | **68** / 96 / **68** / **68** / **68** | 99 / 99 / 99 / 103 / **98** | 102 / 106 / 102 / 97 / **85** | 40 / 45 / 40 / 30 / **28** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:gf2_5_mult | 304 | 332 | 302 | **289** | 300 | **115** / 155 / **115** / **115** / **115** | **154** / **154** / **154** / 159 / **154** | 132 / 138 / 131 / **113** / 125 | 53 / 59 / 53 / **34** / 47 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:gf2_64_mult | **41547** | 49595 | **41547** | **41547** | **41547** | **16448** / 24576 / **16448** / **16448** / **16448** | **24765** / **24765** / **24765** / **24765** / **24765** | 2027 / 2152 / 2027 / 2027 / **1526** | 820 / 945 / 820 / 820 / **569** | skipped: no admissible improvement; identical gate sequence | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent; current hold |
+| feynman:gf2_6_mult | 414 | 465 | 411 | **403** | 411 | **150** / 216 / **150** / **150** / **150** | **221** / **221** / **221** / 237 / **221** | 166 / 174 / 166 / 168 / **127** | 66 / 75 / 66 / **44** / 46 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:gf2_7_mult | 553 | 627 | 550 | 548 | **547** | **217** / 301 / **217** / **217** / **217** | **300** / **300** / **300** / **300** / 313 | **198** / 208 / **198** / **198** / 209 | 80 / 90 / 80 / 80 / **53** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:gf2_8_mult | 709 | 819 | 705 | 702 | **698** | **264** / 384 / **264** / **264** / **264** | 405 / 405 / 405 / **402** / 412 | **235** / 248 / **235** / **235** / 283 | 92 / 105 / 92 / 92 / **78** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:gf2_9_mult | 889 | 1023 | **887** | **887** | **887** | **351** / 495 / **351** / **351** / **351** | **494** / **494** / **494** / **494** / **494** | 260 / 273 / 258 / 258 / **250** | 106 / 119 / 104 / 104 / **92** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:grover_5 | 668 | 732 | **500** | 512 | 510 | 178 / 296 / **166** / **166** / **166** | 248 / 288 / **228** / 233 / **228** | 533 / 498 / 429 / **380** / 395 | 164 / 192 / 160 / **116** / 146 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:ham15_high | 3659 | 4789 | 3410 | 3653 | **3194** | 1021 / 2173 / **1019** / **1019** / **1019** | 1817 / 2149 / 1722 / 1812 / **1688** | 2993 / 3071 / 2659 / 2982 / **2441** | 871 / 1184 / 873 / 870 / **832** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:ham15_low | 375 | 427 | 364 | **362** | 364 | **97** / 147 / **97** / **97** / **97** | 220 / 236 / 216 / 222 / **215** | 270 / 273 / 256 / 235 / **234** | 77 / 85 / 76 / 73 / **65** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:ham15_med | 871 | 1156 | 771 | 686 | **670** | 242 / 504 / **211** / 212 / 212 | 428 / 534 / 393 / 355 / **340** | 692 / 758 / 574 / 449 / **416** | 195 / 283 / 169 / 130 / **119** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:hwb10 | 60169 | 69664 | **54688** | 59250 | — | 16437 / 26915 / **15891** / 16437 / — | 31506 / 34828 / **30007** / 30967 / — | 38981 / 38548 / **36910** / 38786 / — | 11807 / 12863 / **11783** / 11803 / — | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| feynman:hwb11 | 166051 | 194163 | **152364** | 165483 | — | 45638 / 75372 / **44500** / 45638 / — | 87705 / 97615 / **83271** / 87336 / — | 117176 / 115613 / **106212** / 116749 / — | 33842 / 39133 / 33932 / **33840** / — | committed: verified admissible improvement; verification: no_information; no_information | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| feynman:hwb12 | 326567 | 386733 | 326567 | **326190** | — | **87493** / 152755 / **87493** / **87493** / — | 170007 / 191205 / 170007 / **169750** / — | 232046 / **225941** / 232046 / 231794 / — | 65173 / 77375 / 65173 / **65171** / — | skipped: native gate limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| feynman:hwb6 | 229 | 249 | 212 | 207 | **203** | 75 / 97 / 75 / 75 / **72** | 108 / 116 / 105 / 102 / **98** | 166 / 163 / 152 / 142 / **131** | 57 / 59 / 55 / 47 / **44** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:hwb8 | 12546 | 14077 | 11583 | 12231 | **11286** | 3617 / 5437 / **3517** / **3517** / **3517** | 6585 / 7073 / 6305 / 6330 / **6129** | 8522 / 8231 / 8055 / 8334 / **7321** | 2594 / 2662 / 2607 / 2566 / **2140** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:inverseqft1 | — | **419** | — | — | — | — / **156** / — / — / — | — / **0** / — / — / — | — / **416** / — / — / — | — / **156** / — / — / — | unsupported classical control flow; not checked | not rerun: no previous synthesis metrics; prior unsupported control flow | not queued: no previous synthesis metrics |
+| feynman:inverseqft2 | — | **116** | — | — | — | — / **40** / — / — / — | — / **0** / — / — / — | — / **108** / — / — / — | — / **39** / — / — / — | unsupported classical control flow; not checked | not rerun: no previous synthesis metrics; prior unsupported control flow | not queued: no previous synthesis metrics |
+| feynman:mod5_4 | 57 | 60 | 37 | **18** | 33 | 16 / 22 / **7** / **7** / 8 | 28 / 28 / 19 / **9** / 17 | 50 / 48 / 30 / **10** / 22 | 14 / 16 / 6 / **3** / 5 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:mod_adder_1024 | 3035 | 3859 | **2780** | 2945 | 2782 | 1011 / 1739 / 1011 / 1011 / **1004** | 1392 / 1702 / 1306 / 1463 / **1304** | 2472 / 2539 / 2115 / 2141 / **1919** | 746 / 989 / 758 / 701 / **687** | committed: verified admissible improvement; equivalent | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent; current hold |
+| feynman:mod_mult_55 | 109 | 117 | 92 | **85** | 90 | 37 / 45 / **35** / **35** / **35** | 44 / 48 / 40 / **38** / 40 | 52 / 51 / 46 / **42** / 43 | 20 / 19 / 18 / 16 / **14** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:mod_red_21 | 231 | 262 | 196 | 195 | **191** | **73** / 107 / **73** / **73** / **73** | 93 / 105 / 87 / 85 / **84** | 176 / 166 / 149 / **123** / 129 | 55 / 59 / 55 / **46** / 48 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:qcla_adder_10 | 440 | 481 | 419 | **388** | 419 | **162** / 212 / **162** / **162** / **162** | 205 / 215 / 200 / **169** / 188 | 72 / 75 / 66 / 62 / **61** | 26 / 29 / 25 / 24 / **23** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:qcla_com_7 | 335 | 406 | 298 | **279** | 295 | **95** / 169 / **95** / **95** / **95** | 152 / 174 / 144 / **136** / 139 | 77 / 85 / 72 / **64** / 67 | 26 / 34 / 26 / 23 / **22** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:qcla_mod_7 | 742 | 827 | 678 | **652** | 672 | 249 / 351 / **237** / **237** / **237** | 348 / 366 / 324 / **307** / 317 | 211 / 211 / 194 / **159** / 174 | 74 / 83 / 73 / **50** / 61 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent; current hold |
+| feynman:qft | 496 | 1021 | 411 | **405** | 408 | 199 / 299 / **195** / **195** / **195** | 12 / 12 / 12 / **11** / 12 | 330 / 670 / 266 / **265** / 268 | 131 / 189 / **127** / 128 / 129 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:qft_4 | 171 | 484 | 157 | **146** | 148 | **67** / 146 / **67** / **67** / **67** | 46 / 45 / 46 / **35** / 36 | 146 / 445 / 130 / **114** / 122 | **52** / 127 / **52** / **52** / **52** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| feynman:rc_adder_6 | 191 | 185 | **147** | 151 | 157 | 63 / 67 / **47** / **47** / **47** | 91 / 83 / **76** / 78 / 88 | 111 / 103 / 91 / 92 / **87** | 40 / 39 / 31 / 33 / **30** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:tof_10 | 215 | 247 | 183 | **166** | 183 | **71** / 103 / **71** / **71** / **71** | 86 / 102 / 78 / **61** / 78 | 180 / 171 / 157 / **130** / 153 | 62 / 68 / 62 / **53** / 61 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:tof_3 | 40 | 44 | 36 | **33** | 36 | **15** / 19 / **15** / **15** / **15** | 16 / 18 / 15 / **12** / 15 | 33 / 31 / 31 / 29 / **26** | 13 / 12 / 13 / 13 / **11** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:tof_4 | 65 | 73 | 57 | **52** | 57 | **23** / 31 / **23** / **23** / **23** | 26 / 30 / 24 / **19** / 24 | 54 / 51 / 49 / **40** / 45 | 20 / 20 / 20 / **17** / 19 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:tof_5 | 90 | 102 | 78 | **71** | 78 | **31** / 43 / **31** / **31** / **31** | 36 / 42 / 33 / **26** / 33 | 75 / 71 / 67 / **55** / 63 | 27 / 28 / 27 / **23** / 26 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| feynman:vbe_adder_3 | 101 | 128 | 97 | **86** | 92 | **24** / 56 / **24** / **24** / **24** | 54 / 58 / 52 / **46** / 47 | 66 / 76 / 61 / **46** / 56 | 16 / 30 / 16 / **11** / 16 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_large_adder_n118_adder_n118 | 1574 | 1782 | 1366 | **1363** | 1510 | 416 / 624 / 416 / 416 / **403** | 741 / 845 / 689 / **672** / 794 | 643 / 639 / **635** / 672 / 722 | 224 / 224 / 224 / **221** / 243 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | unverified; auto: probably_not_equivalent; lookahead: no_information; current hold |
+| qasmbench:qasmbench_large_adder_n118_adder_n118_transpiled | 1809 | 1834 | **1366** | **1366** | 1511 | **416** / 624 / **416** / **416** / **416** | 741 / 845 / **689** / **689** / 804 | 762 / 679 / 635 / 635 / **500** | 224 / 224 / 224 / 224 / **151** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_adder_n28_adder_n28 | 364 | 412 | 316 | **306** | 350 | 96 / 144 / 96 / 96 / **93** | 171 / 195 / 159 / **146** / 184 | 193 / 189 / 185 / **181** / 192 | 64 / 64 / 64 / **60** / 63 | committed: verified admissible improvement; equivalent | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_large_adder_n28_adder_n28_transpiled | 419 | 424 | 316 | **306** | 370 | **96** / 144 / **96** / **96** / **96** | 171 / 195 / 159 / **146** / 192 | 222 / 199 / 185 / 181 / **180** | 64 / 64 / 64 / 60 / **52** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_adder_n433_adder_n433 | 5809 | 6577 | **5041** | **5041** | 5762 | **1536** / 2304 / **1536** / **1536** / **1536** | 2736 / 3120 / **2544** / **2544** / 2689 | 2218 / 2214 / **2210** / **2210** / 2251 | 784 / 784 / 784 / 784 / **779** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_adder_n433_adder_n433_transpiled | 6674 | 6769 | **5041** | **5041** | 6042 | **1536** / 2304 / **1536** / **1536** / **1536** | 2736 / 3120 / **2544** / **2544** / 2769 | 2652 / 2359 / 2210 / 2210 / **2060** | 784 / 784 / 784 / 784 / **620** | committed: verified admissible improvement; equivalent | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_large_adder_n64_adder_n64 | 848 | 960 | 736 | **733** | 814 | 224 / 336 / 224 / 224 / **217** | 399 / 455 / 371 / **360** / 428 | 373 / 369 / **365** / 378 / 404 | 128 / 128 / 128 / **125** / 135 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_large_adder_n64_adder_n64_transpiled | 975 | 988 | 736 | **733** | 828 | **224** / 336 / **224** / **224** / **224** | 399 / 455 / 371 / **360** / 437 | 438 / 391 / 365 / 378 / **327** | 128 / 128 / 128 / 125 / **98** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n34_ising_n34 | 4966 | 10636 | 4018 | **3985** | 4022 | 1914 / 2841 / **1906** / **1906** / **1906** | **66** / **66** / **66** / 92 / 67 | 309 / 561 / 255 / **248** / 251 | 124 / 142 / 124 / **122** / **122** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n34_ising_n34_transpiled | 4977 | 10515 | 4006 | **3985** | 4001 | 1914 / 2841 / **1900** / **1900** / **1900** | **66** / **66** / **66** / 95 / 72 | 317 / 563 / 254 / **250** / 252 | 124 / 142 / 123 / **122** / **122** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n42_ising_n42 | 6049 | 13102 | 4926 | **4895** | 4925 | 2348 / 3500 / **2328** / **2328** / **2328** | **82** / **82** / **82** / 119 / 86 | 324 / 570 / **256** / 258 / 258 | **122** / 143 / **122** / **122** / **122** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n420_ising_n420 | 62106 | 132380 | **49981** | 62064 | 51655 | 23986 / 36123 / **23684** / 23986 / 23866 | **838** / **838** / **838** / **838** / 856 | 301 / 585 / **242** / 301 / 257 | **116** / 150 / **116** / **116** / **116** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n420_ising_n420_transpiled | 62449 | 133768 | **49901** | 62449 | 51684 | 23986 / 36123 / **23684** / 23986 / 23852 | **838** / **838** / **838** / **838** / 1029 | 293 / 620 / **239** / 293 / 247 | **116** / 150 / **116** / **116** / **116** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n66_ising_n66 | 9606 | 20394 | **7686** | 7744 | 7705 | 3712 / 5564 / **3646** / **3646** / **3646** | **130** / **130** / **130** / 202 / 132 | 306 / 557 / 248 / 251 / **246** | 120 / 146 / **118** / **118** / **118** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n66_ising_n66_transpiled | 9650 | 20373 | **7651** | 7697 | 7668 | 3712 / 5564 / **3644** / **3644** / **3644** | 130 / 130 / **129** / 212 / 158 | 301 / 561 / 246 / 247 / **245** | 120 / 146 / 120 / **119** / 120 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n98_ising_n98 | 14421 | 30133 | **11567** | 11723 | 11586 | 5565 / 8375 / **5483** / **5483** / **5483** | **194** / **194** / **194** / 306 / 200 | 312 / 574 / **249** / 257 / 251 | 120 / 146 / **118** / **118** / **118** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_ising_n98_ising_n98_transpiled | 14510 | 30263 | **11536** | 11708 | 11555 | 5563 / 8375 / **5481** / **5481** / **5481** | **194** / **194** / **194** / 295 / 238 | 315 / 570 / **245** / 254 / **245** | 120 / 146 / **118** / **118** / **118** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_large_multiplier_n350_multiplier_n350 | 166584 | 304183 | **161182** | 166483 | — | 39202 / 136080 / **39062** / 39202 / — | 92754 / 145880 / **92148** / 92652 / — | 85210 / 141075 / **80334** / 85175 / — | 21622 / 53489 / **21486** / 21622 / — | committed: verified admissible improvement; verification: inconclusive; inconclusive | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| qasmbench:qasmbench_large_multiplier_n350_multiplier_n350_transpiled | 176925 | 326475 | **161229** | 176841 | — | 39202 / 136080 / **39062** / 39202 / — | 92754 / 145880 / **92197** / 92673 / — | 94856 / 160187 / **80315** / 94840 / — | 21622 / 53489 / **21487** / 21622 / — | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| qasmbench:qasmbench_large_multiplier_n400_multiplier_n400 | 217578 | 397635 | 217578 | **217503** | — | **51202** / 177920 / **51202** / **51202** / — | 121204 / 190720 / 121204 / **121129** / — | 111400 / 184438 / 111400 / **111382** / — | **28307** / 69929 / **28307** / **28307** / — | skipped: search size/work/deadline limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; Pauli graph synthesis shared search budget exhausted; current hold |
+| qasmbench:qasmbench_large_multiplier_n400_multiplier_n400_transpiled | 230996 | 426711 | 230996 | **230939** | — | **51202** / 177920 / **51202** / **51202** / — | 121204 / 190720 / 121204 / **121150** / — | 124021 / 209467 / 124021 / **124014** / — | **28307** / 69929 / **28307** / **28307** / — | skipped: search size/work/deadline limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| qasmbench:qasmbench_large_multiplier_n45_multiplier_n45 | 2756 | 4796 | 2599 | **2273** | 2453 | 650 / 2124 / **634** / **634** / **634** | 1500 / 2286 / 1428 / **1288** / 1291 | 1370 / 2224 / 1252 / 1203 / **1123** | 333 / 846 / 319 / **307** / 312 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_multiplier_n45_multiplier_n45_transpiled | 2985 | 5189 | 2611 | **2337** | 2457 | 650 / 2124 / **634** / **634** / **634** | 1500 / 2286 / 1430 / 1335 / **1288** | 1518 / 2502 / 1247 / 1286 / **1165** | 333 / 846 / 319 / 321 / **304** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_multiplier_n75_multiplier_n75 | 7651 | 13619 | 7307 | **6637** | 6878 | 1802 / 6060 / **1774** / **1774** / **1774** | 4206 / 6510 / 4082 / 3798 / **3673** | 3833 / 6304 / 3547 / 3816 / **3265** | 942 / 2394 / 916 / 963 / **903** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_multiplier_n75_multiplier_n75_transpiled | 8215 | 14681 | 7320 | **6735** | 6879 | 1802 / 6060 / **1774** / **1774** / **1774** | 4206 / 6510 / 4086 / 3869 / **3667** | 4257 / 7122 / 3533 / 3900 / **3422** | 942 / 2394 / 916 / 957 / **901** | committed: verified admissible improvement; equivalent | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n160_qft_n160 | 119613 | 380659 | **96773** | 119531 | 101219 | 46959 / 105786 / **46029** / 46959 / 46653 | **2790** / 5700 / **2790** / **2790** / **2790** | 26147 / 65327 / **21420** / 26126 / 22062 | 10551 / 17920 / **10392** / 10551 / 10550 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n160_qft_n160_transpiled | 106920 | 380702 | **87577** | 106843 | 92257 | 41873 / 105786 / **41247** / 41873 / 41869 | **2790** / 5700 / **2790** / **2790** / 2793 | 25485 / 65327 / **21369** / 25390 / 21864 | 10067 / 17919 / 10059 / 10031 / **10004** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n29_qft_n29 | 18253 | 57351 | **15052** | 15091 | 15120 | 7266 / 15920 / **7122** / **7122** / **7122** | **432** / 722 / **432** / 545 / **432** | 4479 / 10962 / **3602** / 5000 / 3634 | 1774 / 2986 / **1746** / 2296 / **1746** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n29_qft_n29_transpiled | 16994 | 57394 | **13851** | 13937 | 13973 | 6634 / 15920 / **6528** / **6528** / **6528** | **432** / 722 / **432** / 436 / 435 | 4343 / 10962 / 3549 / 3679 / **3539** | 1683 / 2985 / **1674** / 1685 / 1675 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n320_qft_n320 | 239671 | 775539 | 239671 | 239650 | **206617** | 95439 / 215546 / 95439 / 95439 / **94809** | **5670** / 11780 / **5670** / **5670** / **5670** | 52701 / 131727 / 52701 / 52701 / **45390** | 21271 / 36160 / 21271 / 21271 / **21269** | skipped: search size/work/deadline limit; identical gate sequence | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n320_qft_n320_transpiled | 216825 | 775582 | 216825 | 216804 | **187105** | 84913 / 215546 / 84913 / 84913 / **84903** | **5670** / 11780 / **5670** / **5670** / 5672 | 52650 / 131727 / 52650 / 52648 / **44394** | 20307 / 36159 / 20307 / 20307 / **20301** | skipped: search size/work/deadline limit; identical gate sequence | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n63_qft_n63 | 44289 | 141263 | **36199** | 43994 | 38140 | 17568 / 39244 / **17220** / 17568 / 17454 | **1044** / 2014 / **1044** / **1044** / **1044** | 10041 / 25072 / **8228** / 9979 / 8586 | 4052 / 6862 / **3990** / 4052 / 4050 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_large_qft_n63_qft_n63_transpiled | 40124 | 141306 | **32643** | 32934 | 34121 | 15780 / 39244 / **15424** / **15424** / **15424** | 1044 / 2014 / 1044 / **969** / 1045 | 9561 / 25072 / 8175 / **8054** / 8239 | 3859 / 6861 / 3848 / **3779** / 3819 | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_bigadder_n18_bigadder_n18 | 242 | 274 | **209** | **209** | 240 | 64 / 96 / 64 / 64 / **62** | 114 / 130 / 106 / **104** / 136 | 160 / 152 / 144 / **138** / 153 | 48 / 48 / 48 / **45** / 46 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_medium_bigadder_n18_bigadder_n18_transpiled | 278 | 282 | **209** | **209** | 245 | **64** / 96 / **64** / **64** / **64** | 114 / 130 / 106 / **104** / 119 | 171 / 157 / 142 / **138** / 139 | 48 / 48 / 48 / 45 / **41** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_ising_n26_ising_n26 | 3785 | 7480 | 3045 | **3026** | 3042 | 1454 / 2132 / **1442** / **1442** / **1442** | **50** / **50** / **50** / 69 / **50** | 282 / 532 / 228 / **222** / 227 | 110 / 145 / 109 / **108** / 109 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_ising_n26_ising_n26_transpiled | 3814 | 7489 | 3035 | **3019** | 3032 | 1454 / 2132 / **1444** / **1444** / **1444** | **50** / **50** / **50** / 67 / 54 | 284 / 531 / 225 / **224** / 225 | 110 / 145 / 110 / **109** / **109** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_multiplier_n15_multiplier_n15 | 313 | 476 | 280 | **212** | 239 | 74 / 204 / **70** / **70** / **70** | 162 / 222 / 142 / **113** / 130 | 168 / 232 / 147 / **98** / 99 | 44 / 90 / 41 / 32 / **29** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_multiplier_n15_multiplier_n15_transpiled | 351 | 524 | 281 | **209** | 252 | 74 / 204 / **70** / **70** / **70** | 162 / 222 / 142 / **108** / 134 | 186 / 258 / 145 / **115** / 116 | 44 / 90 / 42 / 35 / **26** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_multiply_n13_multiply_n13 | 93 | 95 | 93 | **73** | 91 | **32** / 36 / **32** / **32** / **32** | 40 / 40 / 40 / **29** / 40 | 41 / 42 / 41 / **19** / 32 | 16 / 15 / 16 / **6** / 13 | skipped: no admissible improvement; identical gate sequence | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_multiply_n13_multiply_n13_transpiled | 105 | 95 | 91 | **73** | 93 | **32** / 36 / **32** / **32** / **32** | 40 / 40 / 40 / **29** / 40 | 40 / 42 / 39 / **19** / 32 | 15 / 15 / 15 / **6** / 12 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_medium_qft_n18_qft_n18 | 10017 | 30205 | **8104** | 8159 | 8168 | 3933 / 8374 / **3855** / **3855** / **3855** | **234** / 306 / **234** / 303 / **234** | 2607 / 6397 / **2108** / 2573 / 2130 | 1037 / 1732 / **1020** / 1182 / **1020** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_medium_qft_n18_qft_n18_transpiled | 9385 | 30248 | **7594** | 7642 | 7643 | 3675 / 8374 / **3589** / **3589** / **3589** | **234** / 306 / **234** / 258 / 235 | 2452 / 6397 / 2049 / **1972** / 1987 | 979 / 1731 / 967 / **902** / 940 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_adder_n10_adder_n10 | 122 | 138 | 106 | **102** | 117 | 32 / 48 / 32 / **31** / **31** | 57 / 65 / 53 / **52** / 61 | 103 / 99 / 95 / **85** / 87 | 32 / 32 / 32 / **27** / 28 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_small_adder_n10_adder_n10_transpiled | 141 | 142 | 106 | **102** | 126 | 32 / 48 / 32 / **31** / 32 | 57 / 65 / 53 / **52** / 61 | 114 / 103 / 95 / **85** / 87 | 32 / 32 / 32 / 27 / **24** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_adder_n4_adder_n4 | 23 | 23 | 22 | **20** | 22 | 8 / 8 / 8 / **7** / 8 | **10** / **10** / **10** / **10** / **10** | **11** / **11** / **11** / 12 / **11** | **2** / **2** / **2** / 3 / **2** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_small_adder_n4_adder_n4_transpiled | 24 | 25 | 22 | **20** | **20** | 8 / 8 / 8 / **7** / 8 | 10 / 10 / 10 / 10 / **8** | 12 / 13 / **11** / 12 / 14 | **2** / **2** / **2** / 3 / 5 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_basis_trotter_n4_basis_test_n4 | 800 | 1516 | 616 | **606** | 608 | 296 / 420 / **288** / **288** / **288** | 34 / 28 / 27 / **22** / 25 | 354 / 674 / 265 / 271 / **263** | 124 / 174 / **122** / 124 / 124 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_basis_trotter_n4_basis_test_n4_transpiled | 885 | 1579 | 654 | 651 | **648** | 314 / 424 / **310** / **310** / **310** | 46 / 38 / 30 / 27 / **26** | 542 / 825 / **396** / 398 / 480 | 188 / 212 / **187** / 188 / 228 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| qasmbench:qasmbench_small_basis_trotter_n4_basis_trotter_n4 | 19667 | 47122 | 14410 | **14249** | 14573 | 7136 / 12685 / **6886** / **6886** / 6958 | 462 / **303** / 304 / 332 / 342 | 8619 / 20053 / **6292** / 6599 / 6542 | 3047 / 5281 / **2988** / 3136 / 3095 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_basis_trotter_n4_basis_trotter_n4_transpiled | 20299 | 35930 | 14816 | **14706** | 14888 | 7190 / 9481 / **7108** / **7108** / 7110 | 582 / 351 / **331** / 385 / 378 | 10704 / 18209 / 7809 / **7625** / 8060 | 3766 / 4780 / 3738 / **3660** / 3865 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_ipea_n2_ipea_n2 | — | **2331** | — | — | — | — / **688** / — / — / — | — / **14** / — / — / — | — / **2320** / — / — / — | — / **686** / — / — / — | unsupported classical control flow; not checked | not rerun: no previous synthesis metrics; prior unsupported control flow | not queued: no previous synthesis metrics |
+| qasmbench:qasmbench_small_ipea_n2_ipea_n2_transpiled | — | **2341** | — | — | — | — / **688** / — / — / — | — / **14** / — / — / — | — / **2323** / — / — / — | — / **686** / — / — / — | unsupported classical control flow; not checked | not rerun: no previous synthesis metrics; prior unsupported control flow | not queued: no previous synthesis metrics |
+| qasmbench:qasmbench_small_ising_n10_ising_n10 | 9302 | 18655 | 7336 | **7308** | 7354 | 3644 / 5140 / **3578** / **3578** / **3578** | **72** / 90 / **72** / 96 / 77 | 1385 / 3040 / 1099 / **1092** / 1099 | 539 / 835 / 533 / **532** / **532** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_ising_n10_ising_n10_transpiled | 9314 | 18779 | 7381 | **7343** | 7377 | 3642 / 5108 / **3600** / **3600** / **3600** | **72** / 90 / **72** / 99 / 80 | 1390 / 3332 / 1092 / **1089** / 1092 | 539 / 926 / 533 / **532** / **532** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_pea_n5_pea_n5 | 671 | 2988 | 550 | **544** | 548 | 264 / 831 / **260** / **260** / **260** | 20 / 26 / **17** / 19 / 19 | 503 / 2706 / 344 / **340** / 341 | 197 / 751 / 163 / **162** / **162** | committed: verified admissible improvement; equivalent | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_pea_n5_pea_n5_transpiled | 709 | 2992 | 578 | **569** | 571 | 272 / 831 / **270** / **270** / **270** | 20 / 26 / **18** / 21 / 23 | 527 / 2708 / 361 / **356** / 361 | 204 / 751 / 170 / **169** / **169** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_qft_n4_qft_n4 | 504 | 1021 | 408 | **402** | 404 | 199 / 299 / **195** / **195** / **195** | 12 / 12 / 12 / **11** / 12 | 338 / 670 / **263** / **263** / 265 | 131 / 189 / **127** / 128 / 129 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_qft_n4_qft_n4_transpiled | 531 | 756 | 430 | **429** | 430 | 207 / 226 / **205** / **205** / **205** | **12** / **12** / **12** / 14 / 13 | 303 / 620 / 244 / **201** / 247 | 119 / 185 / 117 / **96** / 118 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| qasmbench:qasmbench_small_qpe_n9_qpe_n9 | **1208** | 3022 | **1208** | — | — | **473** / 863 / **473** / — / — | **41** / 43 / **41** / — / — | **1192** / 1749 / **1192** / — / — | **472** / 506 / **472** / — / — | skipped: PBC rotations must precede all measurements and sinks; identical gate sequence | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| qasmbench:qasmbench_small_qpe_n9_qpe_n9_transpiled | 1233 | 3046 | 998 | **975** | 982 | 467 / 863 / 461 / **459** / 461 | 41 / 43 / 40 / **36** / 40 | 855 / 1756 / 694 / 322 / **317** | 327 / 506 / 321 / **149** / 150 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| generated_qft:qft_n002 | 8 | **7** | 8 | **7** | 8 | **3** / **3** / **3** / **3** / **3** | 3 / **2** / 3 / **2** / 3 | 6 / **5** / 6 / **5** / 6 | 3 / 3 / 3 / **2** / 3 | skipped: no admissible improvement; identical gate sequence | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| generated_qft:qft_n004 | 504 | 1019 | 416 | **411** | 412 | 199 / 299 / **195** / **195** / **195** | 14 / **12** / 14 / 13 / 16 | 338 / 669 / **267** / 270 / **267** | 131 / 189 / **127** / 128 / 128 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| generated_qft:qft_n008 | 2379 | 6256 | 1946 | **1942** | 1957 | 945 / 1706 / **919** / **919** / **919** | 60 / **56** / 60 / 72 / 82 | 930 / 2258 / **758** / 881 / 791 | 373 / 629 / **365** / 415 / 371 | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| generated_qft:qft_n016 | 8469 | 25279 | 6820 | 6863 | **6791** | 3327 / 7002 / **3237** / **3237** / **3237** | **206** / 240 / **206** / 260 / 226 | 2240 / 5567 / **1839** / 2232 / 1853 | 903 / 1509 / **888** / 1031 / **888** | committed: verified admissible improvement; equivalent | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| generated_qft:qft_n032 | 20785 | 64755 | 16857 | 16857 | **16814** | 8175 / 17978 / **7957** / **7957** / **7957** | **502** / 836 / **502** / **502** / 603 | 4990 / 12207 / **4013** / **4013** / 4148 | 1975 / 3328 / **1944** / **1944** / 1965 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| generated_qft:qft_n064 | 45339 | 143731 | **36879** | 45038 | 37802 | 17871 / 39930 / **17397** / 17871 / 17429 | **1094** / 2052 / **1094** / **1094** / 1313 | 10212 / 25487 / **8365** / 10211 / 8851 | 4119 / 6976 / **4056** / 4119 / 4105 | committed: verified admissible improvement; verification: no_information; no_information | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: exit 1; current hold |
+| generated_adder:cuccaro_n002 | 59 | 67 | 51 | **49** | 58 | 16 / 24 / 16 / **15** / 16 | 29 / 33 / 27 / **25** / 28 | 52 / 50 / 48 / **39** / 48 | 16 / 16 / 16 / **13** / 15 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| generated_adder:cuccaro_n004 | 117 | 133 | 101 | **97** | 112 | 32 / 48 / 32 / **31** / **31** | 57 / 65 / 53 / **49** / 61 | 102 / 98 / 94 / **79** / 86 | 32 / 32 / 32 / **27** / 28 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| generated_adder:cuccaro_n008 | 233 | 265 | 201 | **193** | 220 | 64 / 96 / 64 / **63** / **63** | 113 / 129 / 105 / **97** / 121 | 202 / 194 / 186 / **159** / 174 | 64 / 64 / 64 / **55** / 56 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| generated_adder:cuccaro_n016 | 465 | 529 | **401** | **401** | 436 | 128 / 192 / 128 / 128 / **127** | 225 / 257 / **209** / **209** / 241 | 402 / 386 / 370 / 370 / **350** | 128 / 128 / 128 / 128 / **112** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| generated_adder:cuccaro_n032 | 929 | 1057 | **801** | **801** | 868 | 256 / 384 / 256 / 256 / **255** | 449 / 513 / **417** / **417** / 481 | 802 / 770 / 738 / 738 / **702** | 256 / 256 / 256 / 256 / **224** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| generated_adder:cuccaro_n064 | 1857 | 2113 | **1601** | **1601** | 1732 | 512 / 768 / 512 / 512 / **511** | 897 / 1025 / **833** / **833** / 961 | 1602 / 1538 / 1474 / 1474 / **1406** | 512 / 512 / 512 / 512 / **448** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| generated_single_rotation:a00_eps1em03 | **0** | **0** | **0** | **0** | **0** | **0** / **0** / **0** / **0** / **0** | **0** / **0** / **0** / **0** / **0** | **0** / **0** / **0** / **0** / **0** | **0** / **0** / **0** / **0** / **0** | skipped: no admissible improvement; identical gate sequence | verified; identical gate sequence; fresh-v1; incoming retained | verified; identical gate sequence; current hold |
+| ftcircuitbench:adder_adder_10q | 122 | 138 | 106 | **102** | 117 | 32 / 48 / 32 / **31** / **31** | 57 / 65 / 53 / **52** / 61 | 103 / 99 / 95 / **85** / 87 | 32 / 32 / 32 / **27** / 28 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:adder_adder_28q | 364 | 412 | 316 | **306** | 350 | 96 / 144 / 96 / 96 / **93** | 171 / 195 / 159 / **146** / 184 | 193 / 189 / 185 / **181** / 192 | 64 / 64 / 64 / **60** / 63 | committed: verified admissible improvement; equivalent | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:adder_adder_4q | 23 | 23 | 22 | **20** | 22 | 8 / 8 / 8 / **7** / 8 | **10** / **10** / **10** / **10** / **10** | **11** / **11** / **11** / 12 / **11** | **2** / **2** / **2** / 3 / **2** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:adder_adder_64q | 848 | 960 | 736 | **733** | 814 | 224 / 336 / 224 / 224 / **217** | 399 / 455 / 371 / **360** / 428 | 373 / 369 / **365** / 378 / 404 | 128 / 128 / 128 / **125** / 135 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:hamiltonians_fermi_hubbard_1d_128q | 1072958 | 2535160 | 1072958 | **1070875** | — | **394240** / 648850 / **394240** / **394240** / — | 50920 / 59524 / 50920 / **50109** / — | 459503 / 742210 / 459503 / **458759** / — | **173600** / 195275 / **173600** / **173600** / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; Pauli graph synthesis input or shared work limit exceeded; current hold |
+| ftcircuitbench:hamiltonians_fermi_hubbard_1d_18q | 152636 | 358057 | **121693** | 151928 | 128030 | 55440 / 91315 / **54602** / 55440 / 55242 | 7640 / 8482 / **7172** / 7188 / 7375 | 144023 / 274510 / **115264** / 143511 / 116368 | 54320 / 70995 / 53542 / 54320 / **52902** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_fermi_hubbard_1d_72q | **605975** | 1420904 | **605975** | — | — | **221760** / 363390 / **221760** / — / — | **29640** / 34204 / **29640** / — / — | **496863** / 813050 / **496863** / — / — | **187600** / 213515 / **187600** / — / — | skipped: native gate limit; identical gate sequence | not rerun: no previous synthesis metrics; prior stopped | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_fermi_hubbard_2d_128q | **1994738** | 4054614 | **1994738** | — | — | **680960** / 1007308 / **680960** / — / — | **182440** / 190924 / **182440** / — / — | **824962** / 1475312 / **824962** / — / — | **292320** / 374224 / **292320** / — / — | skipped: function operation limit; identical gate sequence | not rerun: no previous synthesis metrics; prior stopped | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_fermi_hubbard_2d_18q | 272850 | 554679 | 272850 | **272138** | — | **95760** / 139484 / **95760** / **95760** / — | 18840 / 19802 / 18840 / **18282** / — | 231925 / 463692 / 231925 / **231656** / — | **85120** / 119124 / **85120** / **85120** / — | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_fermi_hubbard_2d_72q | **1127903** | 2262974 | **1127903** | — | — | **383040** / 560608 / **383040** / — / — | **105404** / 110248 / **105404** / — / — | **830661** / 1505532 / **830661** / — / — | **294000** / 381804 / **294000** / — / — | skipped: function operation limit; identical gate sequence | not rerun: no previous synthesis metrics; prior stopped | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_fermi_hubbard_2d_triangular_128q | — | **5552582** | — | — | — | — / **1365708** / — / — / — | — / **326140** / — / — / — | — / **2570632** / — / — / — | — / **645864** / — / — / — | unavailable: Release stock compilation did not complete; stock-prefix: timeout; not checked | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_fermi_hubbard_2d_triangular_18q | 390902 | 773194 | 390902 | **390398** | — | **136080** / 194784 / **136080** / **136080** / — | 29720 / 30562 / 29720 / **29334** / — | 347254 / 664512 / 347254 / **347073** / — | **126560** / 170964 / **126560** / **126560** / — | skipped: native gate limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_fermi_hubbard_2d_triangular_72q | **1634014** | 3100445 | **1634014** | — | — | **544320** / 762208 / **544320** / — / — | **177088** / 181892 / **177088** / — / — | **1329436** / 2366932 / **1329436** / — / — | **463120** / 596004 / **463120** / — / — | skipped: function operation limit; identical gate sequence | not rerun: no previous synthesis metrics; prior stopped | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_heisenberg_1d_100q | 960723 | 1966352 | 960723 | **960647** | — | **359400** / 558779 / **359400** / **359400** / — | 23960 / **11883** / 23960 / 23922 / — | 940425 / **921021** / 940425 / 940349 / — | 359400 / **281938** / 359400 / 359400 / — | skipped: native gate limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_1d_36q | 356435 | 700176 | 356435 | **355968** | — | **129000** / 198715 / **129000** / **129000** / — | 8600 / **4203** / 8600 / 8562 / — | 349065 / **331133** / 349065 / 348711 / — | 129000 / **100946** / 129000 / 129000 / — | skipped: native gate limit; identical gate sequence | verified; equivalent_up_to_global_phase; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_1d_64q | 614331 | 1254128 | 614331 | **614255** | — | **229800** / 356243 / **229800** / **229800** / — | 15320 / **7563** / 15320 / 15282 / — | 601305 / **589209** / 601305 / 601229 / — | 229800 / **180130** / 229800 / 229800 / — | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_1d_9q | 85081 | 166008 | **65391** | 83813 | 68841 | 31800 / 46813 / **31136** / 31800 / 31480 | 2120 / **963** / 1762 / 2077 / 1824 | 83165 / 82274 / **64133** / 82279 / 66262 | 31800 / **24590** / 31129 / 31800 / 31348 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_100q | 1915643 | 3820963 | 1915643 | **1915567** | — | **714600** / 1096782 / **714600** / **714600** / — | 47640 / **23403** / 47640 / 47602 / — | 355745 / 406692 / 355745 / **355669** / — | 136200 / **124383** / 136200 / 136200 / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; Pauli graph synthesis input or shared work limit exceeded; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_36q | 698075 | 1354995 | 698075 | **698036** | — | **256200** / 390626 / **256200** / **256200** / — | 17080 / **8283** / 17080 / 17042 / — | 208785 / 235320 / 208785 / **208746** / — | 78600 / **71563** / 78600 / 78600 / — | skipped: native gate limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; Pauli graph synthesis input or shared work limit exceeded; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_64q | 1223411 | 2430759 | 1223411 | **1223335** | — | **456600** / 698972 / **456600** / **456600** / — | 30440 / **14883** / 30440 / 30402 / — | 280505 / 321006 / 280505 / **280429** / — | 107400 / **97973** / 107400 / 107400 / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; Pauli graph synthesis shared search budget exhausted; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_9q | 176401 | 330685 | **131867** | 175648 | 139037 | 63600 / 95786 / **62616** / 63600 / 63084 | 4240 / **1983** / 3563 / 4199 / 3804 | 95605 / 107391 / **71774** / 95282 / 78628 | 35400 / **32021** / 34848 / 35400 / 36841 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_100q | 2892723 | 5781095 | 2892723 | **2892647** | — | **1079400** / 1665708 / **1079400** / **1079400** / — | 71960 / **35883** / 71960 / 71922 / — | 1971165 / 2374260 / 1971165 / **1971089** / — | 755400 / **723452** / 755400 / 755400 / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; Pauli graph synthesis shared search budget exhausted; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_36q | 1040395 | 2063107 | 1040395 | **1040318** | — | **388200** / 596360 / **388200** / **388200** / — | 25880 / **12843** / 25880 / 25842 / — | 731285 / 869988 / 731285 / **731208** / — | 280200 / **264924** / 280200 / 280200 / — | skipped: native gate limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_64q | 1850811 | 3687773 | 1850811 | **1850735** | — | **690600** / 1064074 / **690600** / **690600** / — | 46040 / **22923** / 46040 / 46002 / — | 1276125 / 1529692 / 1276125 / **1276049** / — | 489000 / **466092** / 489000 / 489000 / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; Pauli graph synthesis shared search budget exhausted; current hold |
+| ftcircuitbench:hamiltonians_heisenberg_2d_triangular_9q | 263321 | 504599 | 263321 | 262891 | **212610** | 96600 / 145823 / 96600 / 96600 / **96522** | 6440 / **3123** / 6440 / 6375 / 6684 | 199185 / 227052 / 199185 / 198884 / **159763** | 75000 / **68532** / 75000 / 75000 / 75004 | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_ising_1d_100q | 273560 | 817226 | 273560 | 273452 | **229880** | 107800 / 209316 / 107800 / 107800 / **107798** | **4200** / 7962 / **4200** / **4200** / 4313 | 123120 / 543986 / 123120 / 123120 / **105049** | 48400 / 140016 / 48400 / 48400 / **46474** | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:hamiltonians_ising_1d_36q | 97240 | 292426 | **79846** | 97240 | 82667 | 38808 / 74916 / **38766** / 38808 / 38806 | **1512** / 2842 / **1512** / **1512** / 1575 | 45402 / 195826 / 38505 / 45402 / **38496** | 17808 / 50416 / 17766 / 17808 / **17113** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_ising_1d_64q | 175064 | 522026 | **141972** | 174904 | 147293 | 68992 / 133716 / **68950** / 68992 / 68992 | **2688** / 5082 / **2688** / **2688** / 2760 | 79344 / 348146 / 67569 / 79342 / **67530** | 31192 / 89616 / 31150 / 31192 / **29949** | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_ising_1d_9q | 24584 | 71026 | **19944** | 20077 | 20044 | 9702 / 18216 / **9660** / **9660** / **9660** | **378** / 682 / **378** / 391 / 389 | 12464 / 48946 / 10478 / 10264 / **10232** | 4902 / 12616 / 4860 / 4841 / **4758** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_100q | 391200 | 1358452 | 391200 | **391132** | — | **155600** / 348632 / **155600** / **155600** / — | **8400** / 15924 / **8400** / **8400** / — | **39176** / 206706 / **39176** / **39176** / — | **15420** / 53216 / **15420** / **15420** / — | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; Pauli graph synthesis shared search budget exhausted; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_36q | 140832 | 485492 | **117032** | 140832 | 120371 | 56016 / 124632 / **55850** / 56016 / 55988 | **3024** / 5684 / **3024** / **3024** / **3024** | 23976 / 119666 / **20293** / 23976 / 30666 | 9444 / 30816 / **9385** / 9444 / 13496 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_64q | 250920 | 867412 | 250920 | 250816 | **214066** | 99584 / 222632 / 99584 / 99584 / **99544** | **5376** / 10164 / **5376** / **5376** / 5377 | **31698** / 163186 / **31698** / **31698** / 54589 | **12432** / 42016 / **12432** / **12432** / 24102 | skipped: candidate operation limit; identical gate sequence | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_9q | 35392 | 117212 | 29243 | **29193** | 29225 | 14004 / 30132 / **13934** / **13934** / **13934** | **756** / 1364 / **756** / 958 / **756** | 12658 / 54386 / 10598 / 10806 / **10431** | 4962 / 14016 / 4925 / 5083 / **4919** | committed: verified admissible improvement; equivalent | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_triangular_100q | 519200 | 1899678 | 519200 | **519166** | — | **203400** / 487948 / **203400** / **203400** / — | **12600** / 23886 / **12600** / **12600** / — | 160678 / 707186 / 160678 / **160662** / — | **62740** / 182016 / **62740** / **62740** / — | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_triangular_36q | 185081 | 678558 | **154181** | 185081 | 159765 | 73224 / 174348 / **72914** / 73224 / 73180 | **4536** / 8526 / **4536** / **4536** / 4650 | 67400 / 293746 / 57038 / 67400 / **46481** | 26412 / 75616 / 26244 / 26412 / **20842** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_triangular_64q | 330712 | 1212798 | 330712 | **330636** | — | **130176** / 311548 / **130176** / **130176** / — | **8064** / 15246 / **8064** / **8064** / — | **108566** / 478706 / **108566** / **108566** / — | **42664** / 123216 / **42664** / **42664** / — | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; Pauli graph synthesis shared search budget exhausted; current hold |
+| ftcircuitbench:hamiltonians_ising_2d_triangular_9q | 46301 | 163398 | **38529** | 38575 | 39765 | 18306 / 42048 / **18200** / 18306 / 18296 | **1134** / 2046 / **1134** / 1230 / 1171 | 23598 / 98178 / 19900 / 17090 / **16139** | 9264 / 25286 / 9197 / 7911 / **7322** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_128q | 141724 | 297312 | **116152** | 141724 | 118608 | 53200 / 80118 / **53056** / 53200 / **53056** | **4250** / **4250** / **4250** / **4250** / 5149 | 46977 / 111017 / **39039** / 46977 / 39865 | 18032 / 29482 / **17990** / 18032 / 18301 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_18q | 21210 | 43326 | 17405 | 20985 | **17337** | 8020 / 11669 / **7978** / **7978** / **7978** | 645 / 645 / 645 / **641** / 713 | 10791 / 24180 / **9004** / 10716 / 9118 | 4146 / 6432 / **4131** / 4135 / 4244 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_200q | 221837 | 467786 | 221837 | 221833 | **186228** | 83720 / 125948 / 83720 / 83720 / **83476** | 6795 / 6795 / 6795 / **6791** / 7907 | 108439 / 255954 / 108439 / 108439 / **91330** | **41552** / 67912 / **41552** / **41552** / 41901 | skipped: candidate operation limit; identical gate sequence | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_1d_72q | 79456 | 168317 | **65396** | 79452 | 66936 | 29960 / 45188 / **29876** / 29960 / **29876** | 2505 / 2505 / 2505 / **2501** / 2931 | 33787 / 79614 / **28082** / 33787 / 29001 | 12880 / 21000 / **12851** / 12880 / 13187 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_128q | **280548** | 714216 | **280548** | **280548** | — | **98700** / 184114 / **98700** / **98700** / — | **19530** / **19530** / **19530** / **19530** / — | **91005** / 228013 / **91005** / **91005** / — | **33116** / 59039 / **33116** / **33116** / — | skipped: native gate limit; identical gate sequence | verified; identical gate sequence; fresh-v1; incoming retained | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_18q | 39236 | 92770 | **32419** | 38651 | 33462 | 14270 / 24182 / **14252** / 14270 / **14252** | 1915 / 1915 / 1915 / **1905** / 2028 | 21457 / 49508 / **17940** / 21260 / 17962 | 7966 / 12772 / 7967 / 7966 / **7947** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_200q | **467096** | 1142041 | **467096** | — | — | **163240** / 297945 / **163240** / — / — | **35375** / **35375** / **35375** / — / — | **222456** / 553007 / **222456** / — / — | **79392** / 142095 / **79392** / — / — | skipped: native gate limit; identical gate sequence | not rerun: no previous synthesis metrics; prior stopped | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_72q | 160466 | 402286 | **132646** | 160451 | 136733 | 56440 / 104440 / **56360** / 56440 / **56360** | 11110 / 11110 / 11110 / **11095** / 11651 | 73346 / 180351 / **62181** / 73336 / 62659 | 26292 / 46114 / **26244** / 26292 / 26358 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_128q | **442226** | 1088904 | **442226** | — | — | **155020** / 277384 / **155020** / — / — | **34464** / **34464** / **34464** / — / — | **154372** / 370861 / **154372** / — / — | **55104** / 93128 / **55104** / — / — | skipped: native gate limit; identical gate sequence | not rerun: no previous synthesis metrics; prior stopped | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_18q | 59559 | 141011 | **49225** | 59078 | 50916 | **21620** / 36757 / **21620** / **21620** / **21620** | 3115 / 3115 / 3115 / **3105** / 3366 | 34177 / 78597 / **28601** / 34001 / 28718 | 12648 / 20134 / 12654 / 12648 / **12643** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_200q | **721928** | 1753415 | **721928** | — | — | **251200** / 451109 / **251200** / — / — | **61100** / **61100** / **61100** / — / — | **370279** / 894781 / **370279** / — / — | **130240** / 224437 / **130240** / — / — | skipped: native gate limit; identical gate sequence | not rerun: no previous synthesis metrics; prior stopped | not queued: no previous synthesis metrics |
+| ftcircuitbench:hamiltonians_5trotter_fermi_hubbard_2d_triangular_72q | 248388 | 616970 | 248388 | **248365** | — | **87120** / 158929 / **87120** / **87120** / — | 18775 / 18775 / 18775 / **18752** / — | 120330 / 294566 / 120330 / **120301** / — | **42732** / 73754 / **42732** / **42732** / — | skipped: candidate operation limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_100q | 106132 | 305858 | **85031** | 106132 | 89771 | 41580 / 81509 / **40584** / 41580 / 40974 | **1485** / **1485** / **1485** / **1485** / 2956 | 15391 / 50992 / **12505** / 15391 / 14494 | 5992 / 13598 / **5881** / 5992 / 6594 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_36q | 37617 | 108226 | **30028** | 30614 | 30453 | 14700 / 28837 / **14344** / **14344** / **14344** | **525** / **525** / **525** / 865 / 966 | 6188 / 19824 / **5016** / 5342 / 5573 | 2408 / 5278 / **2361** / 2427 / 2597 | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_64q | 66911 | 194690 | **54109** | 66911 | 56328 | 26460 / 51881 / **25824** / 26460 / 25912 | **945** / **945** / **945** / **945** / 1775 | 10075 / 33460 / **8292** / 10075 / 9522 | 3976 / 8918 / **3901** / 3976 / 4398 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_1d_9q | 8494 | 24850 | 6861 | **6818** | 6947 | 3360 / 6616 / **3274** / **3274** / **3274** | **120** / **120** / **120** / 205 / 214 | 2264 / 6675 / **1857** / 1899 / 2016 | 896 / 1768 / **876** / 881 / 938 | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_100q | 210698 | 644956 | 210698 | 210552 | **179802** | 85008 / 171208 / 85008 / 85008 / **83378** | **3000** / **3000** / **3000** / **3000** / 3987 | 23281 / 65489 / 23281 / 23209 / **22691** | **9352** / 17252 / **9352** / **9352** / 10413 | skipped: candidate operation limit; identical gate sequence | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_36q | 76475 | 230252 | **62502** | 76475 | 65030 | 30800 / 61064 / **29692** / 30800 / 30172 | **1080** / **1080** / **1080** / **1080** / 1463 | 13793 / 38201 / **11338** / 13793 / 12721 | 5544 / 10052 / **5340** / 5544 / 5820 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_64q | 137526 | 411396 | **110826** | 137304 | 116083 | 54544 / 109168 / **52644** / 54544 / 53532 | **1920** / **1920** / **1920** / **1920** / 2583 | 18989 / 51845 / **15289** / 18908 / 18016 | 7448 / 13652 / **7200** / 7447 / 8169 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_9q | 19584 | 56816 | **15754** | 16184 | 15805 | 7784 / 15038 / **7486** / 7490 / **7486** | **270** / **270** / **270** / 557 / 379 | 6894 / 17927 / **5547** / 6071 / 5613 | 2716 / 4692 / **2618** / 2747 / 2619 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_100q | 313130 | 968265 | 313130 | **313031** | — | **126000** / 256636 / **126000** / **126000** / — | **4500** / **4500** / **4500** / **4500** / — | 145581 / 422554 / 145581 / **145563** / — | **58800** / 110700 / **58800** / **58800** / — | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_36q | 112927 | 346709 | **91903** | 112927 | 95678 | 45360 / 91836 / **43626** / 45360 / 44492 | **1620** / **1620** / **1620** / **1620** / 2162 | 54168 / 158950 / **44534** / 54168 / 51046 | 21840 / 41668 / **21110** / 21840 / 23536 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; identical gate sequence; fresh-v1; incoming retained | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_64q | 202402 | 618339 | 202402 | 202256 | **170681** | 80640 / 163848 / 80640 / 80640 / **79058** | **2880** / **2880** / **2880** / **2880** / 3972 | 94455 / 275152 / 94455 / **94397** / 95434 | **38080** / 72104 / **38080** / **38080** / 43855 | skipped: candidate operation limit; identical gate sequence | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hamiltonians_5trotter_heisenberg_2d_triangular_9q | 27975 | 86069 | **22962** | 23452 | 22964 | 11340 / 22773 / **10896** / **10896** / **10896** | **405** / **405** / **405** / 814 / 535 | 14386 / 43147 / **11987** / 13064 / 12065 | 5880 / 11314 / **5684** / 6001 / 5686 | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_1d_100q | 71000 | 118518 | 58069 | **58006** | 59762 | 28000 / 33500 / **27990** / 28000 / 28000 | **1000** / **1000** / **1000** / 1002 / **1000** | 35360 / 64563 / 29751 / **28803** / 29632 | 14140 / 16670 / 14126 / **13646** / 13676 | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no completed proof; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_1d_36q | 25560 | 42678 | 20885 | **20696** | 20930 | 10080 / 12060 / **10070** / **10070** / **10070** | **360** / **360** / **360** / 362 / **360** | 12960 / 23603 / 10871 / **10368** / 10621 | 5180 / 6110 / 5166 / **4996** / 5006 | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_1d_64q | 44800 | 75858 | **37154** | 44378 | 38158 | 17920 / 21440 / **17910** / 17920 / 17920 | **640** / **640** / **640** / **640** / **640** | 22120 / 41523 / **18818** / 21696 / 19039 | 9100 / 10730 / 9090 / 9100 / **8806** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_1d_9q | 6300 | 10683 | 5199 | **5167** | 5214 | 2520 / 3015 / **2510** / **2510** / **2510** | **90** / **90** / **90** / 102 / **90** | 3420 / 6323 / 2868 / **2822** / 2840 | 1400 / 1655 / 1390 / 1357 / **1352** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_100q | 104000 | 182518 | **84905** | 103809 | 89272 | 42000 / 50000 / **41080** / 42000 / 41926 | **2000** / **2000** / **2000** / **2000** / **2000** | 11104 / 20769 / **9222** / 11068 / 14311 | 4564 / 5384 / **4448** / 4564 / 6629 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_36q | 37440 | 65718 | **30615** | 36240 | 30878 | 15120 / 18000 / **14800** / **14800** / **14800** | **720** / **720** / **720** / **720** / **720** | 6752 / 12577 / **5602** / 6528 / 6651 | 2772 / 3272 / **2700** / **2700** / 3161 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_64q | 67840 | 116818 | **54306** | 67590 | 57230 | 26880 / 32000 / **26300** / 26880 / 26810 | **1280** / **1280** / **1280** / **1280** / **1280** | 9180 / 16673 / **7434** / 9178 / 10407 | 3668 / 4328 / **3574** / 3668 / 4820 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_9q | 9360 | 16443 | **7661** | 7700 | 7723 | 3780 / 4500 / **3700** / **3700** / **3700** | **180** / **180** / **180** / 219 / **180** | 3488 / 6433 / **2883** / 2963 / 2892 | 1428 / 1688 / 1391 / 1401 / **1375** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_100q | 138000 | 246518 | **111326** | 137861 | 119762 | 56000 / 66500 / **54080** / 56000 / 55958 | **3000** / **3000** / **3000** / **3000** / **3000** | 44560 / 83763 / 35879 / 44486 / **33695** | 18340 / 21620 / 17495 / 18340 / **15521** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_36q | 49680 | 88758 | **40114** | 49108 | 43066 | 20160 / 23940 / **19480** / 20160 / 20142 | **1080** / **1080** / **1080** / **1080** / **1080** | 18720 / 35123 / 15173 / 18383 / **13369** | 7700 / 9080 / 7375 / 7700 / **6189** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_64q | 88320 | 157778 | **71280** | 88114 | 76611 | 35840 / 42560 / **34620** / 35840 / 35814 | **1920** / **1920** / **1920** / **1920** / **1920** | 30280 / 56883 / 24446 / 30158 / **21960** | 12460 / 14690 / 11905 / 12460 / **10115** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent; current hold |
+| ftcircuitbench:hamiltonians_5trotter_ising_2d_triangular_9q | 12420 | 22203 | **10058** | 10268 | 10193 | 5040 / 5985 / **4870** / **4870** / **4870** | **270** / **270** / **270** / 391 / **270** | 6820 / 12705 / 5534 / 4766 / **4687** | 2800 / 3305 / 2680 / 2233 / **2226** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hhl_hhl_12q | 131555 | 257513 | **103534** | 130978 | 106806 | 51304 / 70263 / **50240** / 51304 / 50528 | 2692 / 3084 / 2690 / 2668 / **2652** | 102667 / 184988 / **80771** / 102247 / 82459 | 40122 / 50357 / 39230 / 40122 / **39208** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:hhl_hhl_21q | 1275633 | 2487067 | 1275633 | **1273553** | — | **497107** / 682415 / **497107** / **497107** / — | 26117 / 29813 / 26117 / **26085** / — | 1012668 / 1860311 / 1012668 / **1011070** / — | **393092** / 508912 / **393092** / **393092** / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; Pauli graph synthesis input or shared work limit exceeded; current hold |
+| ftcircuitbench:hhl_hhl_4q | 926 | 2316 | 734 | **721** | 727 | 354 / 630 / **352** / **352** / **352** | 22 / 22 / 18 / **17** / 18 | 839 / 1722 / 667 / **593** / 596 | 324 / 460 / 320 / **288** / **288** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:hhl_hhl_7q | 15395 | 29791 | 12295 | 12305 | **12283** | 6059 / 8191 / **5999** / **5999** / **5999** | 257 / 317 / **249** / 312 / 253 | 11321 / 22027 / 9029 / 10020 / **8948** | 4458 / 6021 / 4413 / 4880 / **4383** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:qft_qft_18q | 10021 | 30205 | **8103** | 8118 | 8177 | 3933 / 8374 / **3855** / **3855** / **3855** | **234** / 306 / **234** / 279 / **234** | 2607 / 6397 / **2108** / 2294 / 2129 | 1037 / 1732 / **1020** / 1050 / **1020** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent_up_to_global_phase; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:qft_qft_29q | 18321 | 57351 | **14972** | 15219 | 15115 | 7266 / 15920 / **7122** / **7122** / **7122** | **432** / 722 / **432** / 556 / **432** | 4401 / 10962 / **3604** / 4478 / 3640 | 1774 / 2986 / **1746** / 2017 / **1746** | committed: verified admissible improvement; equivalent_up_to_global_phase | unverified; no_information; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:qft_qft_4q | 496 | 1021 | 411 | 408 | **407** | 199 / 299 / **195** / **195** / **195** | 12 / 12 / 12 / **11** / 13 | 330 / 670 / **263** / 267 / 265 | 131 / 189 / **127** / 128 / 129 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:qft_qft_63q | 44766 | 141263 | **36231** | 44527 | 38297 | 17568 / 39244 / **17102** / 17568 / 17452 | **1044** / 2014 / **1044** / **1044** / **1044** | 10267 / 25072 / **8228** / 10259 / 8589 | 4052 / 6862 / **3990** / 4052 / 4050 | committed: verified admissible improvement; equivalent | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:qpe_qpe_h2_0_6_12q | — | **20048891** | — | — | — | — / **5512786** / — / — / — | — / **232410** / — / — / — | — / **15321245** / — / — / — | — / **4204099** / — / — / — | unavailable: Release stock compilation did not complete; stock-prefix: timeout; not checked | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| ftcircuitbench:qpe_qpe_h2_0_74_12q | — | **20213908** | — | — | — | — / **5553262** / — / — / — | — / **232410** / — / — / — | — / **15391635** / — / — / — | — / **4217711** / — / — / — | unavailable: Release stock compilation did not complete; stock-prefix: timeout; not checked | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| ftcircuitbench:qpe_qpe_h2_1_0_12q | — | **20050898** | — | — | — | — / **5523746** / — / — / — | — / **232410** / — / — / — | — / **15329173** / — / — / — | — / **4204505** / — / — / — | unavailable: Release stock compilation did not complete; stock-prefix: timeout; not checked | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| ftcircuitbench:qpe_qpe_h2_1_5_12q | — | **20538805** | — | — | — | — / **5612948** / — / — / — | — / **232410** / — / — / — | — / **15795296** / — / — / — | — / **4293008** / — / — / — | unavailable: Release stock compilation did not complete; stock-prefix: timeout; not checked | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| ftcircuitbench:qpe_qpe_hubbard_10q | 2222706 | 4188598 | 2222706 | **2220658** | — | **859207** / 1150956 / **859207** / **859207** / — | **49559** / 55580 / **49559** / **49559** / — | 1795350 / 3200591 / 1795350 / **1793798** / — | **693815** / 875817 / **693815** / **693815** / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:qpe_qpe_hubbard_8q | 529667 | 999931 | 529667 | **529507** | — | **205011** / 273889 / **205011** / **205011** / — | 11813 / 13262 / 11813 / **11807** / — | 427496 / 764444 / 427496 / **427284** / — | 165332 / 208602 / 165332 / **165298** / — | skipped: native gate limit; identical gate sequence | verified; equivalent; fresh-v1 | failed; Pauli graph synthesis input or shared work limit exceeded; current hold |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_10q | 1550034 | 3205952 | 1550034 | **1547986** | — | **612042** / 920421 / **612042** / **612042** / — | **58358** / 71814 / **58358** / **58358** / — | 1371630 / 2779501 / 1371630 / **1369846** / — | **540678** / 795045 / **540678** / **540678** / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_11q | 2843663 | 6214073 | 2843663 | **2841615** | — | **1125726** / 1768042 / **1125726** / **1125726** / — | 113104 / 139983 / 113104 / **113094** / — | 2543455 / 5381576 / 2543455 / **2541685** / — | **1007365** / 1521871 / **1007365** / **1007365** / — | skipped: function operation limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; synthesis: exit 137; current hold |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_12q | — | **10979973** | — | — | — | — / **3125500** / — / — / — | — / **247336** / — / — / — | — / **9588277** / — / — / — | — / **2710002** / — / — / — | unavailable: Release stock compilation did not complete; stock-prefix: timeout; not checked | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_13q | — | **18449983** | — | — | — | — / **5249566** / — / — / — | — / **408753** / — / — / — | — / **16195524** / — / — / — | — / **4578992** / — / — / — | unavailable: Release stock compilation did not complete; stock-prefix: timeout; not checked | not rerun: no previous synthesis metrics; prior failed | not queued: no previous synthesis metrics |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_6q | 80457 | 182235 | **63919** | 79593 | 66157 | 31644 / 53256 / **30814** / 31644 / 31024 | 1814 / 2002 / **1751** / 1765 / 1813 | 78718 / 153395 / **62576** / 77879 / 64279 | 31235 / 44969 / **30437** / 31235 / 30585 | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_7q | 147414 | 307752 | **118339** | 146847 | 122099 | 58735 / 90890 / **56729** / 58735 / 57251 | 4108 / 5164 / **3830** / 4097 / 3892 | 126577 / 258237 / **101462** / 126045 / 101482 | 50486 / 76124 / 48792 / 50482 / **48008** | committed: verified admissible improvement; equivalent_up_to_global_phase | verified; equivalent; fresh-v1 | verified; equivalent_up_to_global_phase; current hold |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_8q | 255293 | 550916 | 255293 | 255010 | **209952** | 101712 / 159028 / 101712 / 101712 / **98550** | 9502 / 12294 / 9502 / 9498 / **9100** | 220910 / 479608 / 220910 / 220671 / **179163** | 88163 / 137008 / 88163 / 88162 / **84636** | skipped: candidate operation limit; identical gate sequence | verified; equivalent; fresh-v1 | unverified; auto: no_information; lookahead: no_information; current hold |
+| ftcircuitbench:qsvt_qsvt_bandedcirculant_9q | 678748 | 1325141 | 678748 | **678618** | — | **265604** / 375904 / **265604** / **265604** / — | 25436 / 30987 / 25436 / **25434** / — | 609336 / 1234179 / 609336 / **609208** / — | 238259 / 347188 / 238259 / **238258** / — | skipped: native gate limit; identical gate sequence | unverified; no_information; fresh-v1 | failed; hold checkpoint lifting work limit; current hold |
 <!-- END FULL SUITE RESULTS -->
+
+### F.2a Release continuation outcomes
+
+This records the earlier reconciliation run. The current F.2 table also
+includes the later capacity continuation and post-refactor updates.
+
+The two-machine continuation finished all queued work: **212 synthesis
+attempts, 45 retries of unresolved historical Clifford+T optimization proofs, and 30 additional
+proof-only continuations**. The four unsupported classical-control cases remain
+explicit skips. No cases remain queued or running.
+
+All **593 previously collected CUDA-Q, Qiskit and Clifford+T optimization metric sets** are
+unchanged. Release compilation completed 16 of the 23 previously timed-out
+stock cases, and Clifford+T optimization completed its previously timed-out
+`hwb11` case. Stock and Clifford+T optimization now each have 205 compiled
+outputs. Of those optimization outputs, **202 are
+independently verified**, compared with 143 before this continuation. The
+alternating/lookahead retries resolved 43 of the 45 earlier inconclusive or
+probable-mismatch checks, including the historical `ham15_med` result, using
+its unchanged saved output. The remaining Clifford+T optimization checks are `feynman:hwb11`,
+`qasmbench:qasmbench_large_multiplier_n350_multiplier_n350`, and
+`generated_qft:qft_n064`; their emitted counts remain explicitly unverified.
+
+PBC synthesis emitted **125 native circuits**. The independent checker
+ran on every emitted output; **108 passed** and **17 remain unverified** after
+the recorded proof attempts. Of the successful checks, 107 are QCEC equivalence
+results and one is an identical gate-sequence/readout check. The 17 unresolved
+outputs comprise 13 `no_information` results and four attempts without a
+completed proof result. Their measured metrics are visible but excluded from
+verified aggregates. Synthesis never used a preserve-network output as a seed
+or fallback.
+
+The other 87 synthesis attempts produced no completed output: 40 exceeded the
+64-million logical dependency cap; 20 exhausted the measured synthesis budget
+or found no T-admissible completion; 15 reported invalid input or the gate cap;
+one rejected rotations after measurements/sinks; four reached the per-process
+address-space allowance; and seven could not complete the prerequisite stock
+prefix within its one-hour CPU cap. The original nine frontend timeouts were
+resumed from their saved imported raw Quake, so the seven remaining stock
+failures are recorded at the current stock-prefix stage. These are bounded-run
+outcomes, not zero-gate circuits or estimates of an unavailable synthesis result.
+
+The final audit re-counted all five metrics in all 125 final synthesis outputs,
+checked the T-nonincreasing guard, matched every accepted proof to its final
+output hash and ordered physical readouts, and confirmed the 593 retained
+historical metric sets. The matrix, worker identities, commands, proof attempts,
+resource records and raw logs are under `build/pbc-remote-2026-11-06/`;
+`merged/summary.json` and `audit.json` give the coverage and consistency checks.
 
 ### F.3 Reproduction
 
@@ -1487,12 +1620,12 @@ The local evidence bundle is `build/pbc-ci-runtime-2026-11-04`. It contains the
 216-case inventory, frozen source snapshot and corpus cache, expanded target
 pipeline, scripts, package versions, configuration manifest, complete result
 matrix and per-case commands, inputs, outputs, telemetry and diagnostics.
-The attempted CUDA-Q/PBC cases use the complete runtime pipeline above.
+The attempted CUDA-Q/Clifford+T optimization cases use the complete runtime pipeline above.
 Previously measured Qiskit results are reused only when saved QPY hashes match;
 `inherited-qiskit.json` records their provenance. `summary.json` audits coverage,
 configuration hashes and the inputs and outputs supporting each result;
 `status.json` records completion. The compiler executable and options are
-unchanged. `continuation-single.json` and `continuation-importer.json` record
+unchanged in that original run. `continuation-single.json` and `continuation-importer.json` record
 the one-worker continuation; `matrix.partial-145.json` preserves the preceding
 results, which the final audit confirms are unchanged. The continuation and
 audit commands were:
@@ -1515,7 +1648,7 @@ The driver sets `PYTHONPATH=build/python:build/pauli-ir/verification-deps`,
 the corpus-cache path, and unsets `CUDAQ_PBC_TELEMETRY`. The first 145 cases used
 at most three workers; the final 71 used **one worker**, with sequential cases
 and stages. Each frontend, stock or Qiskit stage has 600 CPU / 605 wall seconds;
-PBC has 1200 CPU / 1250 wall seconds.
+Clifford+T optimization has 1200 CPU / 1250 wall seconds.
 QCEC has 30 CPU / 35 wall seconds, or 200 CPU / 210 wall seconds for the two
 lookahead cases. These are local per-stage limits, not CI timing measurements.
 
@@ -1528,9 +1661,810 @@ The QPE9 accounting correction only parses saved outputs and compares identical
 gate sequences; it executes neither compilation nor QCEC. Reproduction needs
 the local evidence bundle and a fresh output directory after compiler changes
 to preserve the executable identity of these measurements.
+
+### F.4 Release continuation and PBC synthesis reproduction
+
+The benchmark helpers are maintained outside the source checkout in
+`~/pbc-benchmark-tools/`. Set `pbc_tools` to that directory locally, or to the
+external copy on a benchmark host. The continuation inputs and original result
+rows are frozen by `python3 "$pbc_tools/run.py" prepare`. The bundle is
+`build/pbc-remote-2026-11-06/evidence`; its manifest records each reused QPY,
+compiler input, final reference and outstanding Clifford+T optimization output
+with SHA-256 hashes. Successful stock, Qiskit and Clifford+T optimization measurements are retained without recompiling
+them. A changed compiler receives a new worker manifest and result directory.
+The fifteen-case tuning study has a different input boundary; its counts are
+not substituted for measurements of these full-runtime inputs.
+
+The compiler source is commit
+`247a051f0d471e65d793b26dd5cd271cedca28a0` on `pbc-opt`. Both remote hosts build
+it in Release mode. LLVM is the repository's pinned submodule commit
+`def143a6c624dc9b991ebfdfec5c36a7084171eb`, with
+`tpls/customizations/llvm/mlir-ssi.diff` applied. Unpatched distribution MLIR
+is insufficient. The compiler executable, relevant source files, LLVM commit,
+patch, CMake cache and runner hashes are recorded per worker. Each worker
+snapshots its executable before launching cases. Package versions are pinned to
+Qiskit 2.6.0 and MQT QCEC 3.11.0 in an isolated environment.
+The two ARM64 Release executables have the same SHA-256:
+`c085bfdffd33044d3be02635c3880086f9f7bcdd7b52684b600f54467303a0cb`.
+The native preflights reproduced all five metrics for Adder-10
+`(102,31,52,85,27)` and QFT-2 `(7,3,2,5,2)` and passed independent QCEC.
+
+The machines are `thiennguyen@10.117.10.135` (80 ARM64 cores) and
+`thiennguyen@10.117.6.255` (128 ARM64 cores), each with approximately 498 GiB
+physical RAM. Work lives under
+`/localhome/thiennguyen/pbc-benchmark-20261106`, on local disks rather than the
+full shared home filesystem. The build script caps compilation at 76 and 96
+jobs respectively, with two simultaneous LLVM link jobs.
+
+For Ubuntu, install CMake, Ninja, Clang/LLD 22 and `libclang-22-dev`, the development headers for zlib,
+libedit, libffi, ncurses, GMP, MPFR and MPC, GNU `time`, and Python venv/pip support. Then:
+
+```bash
+pbc_root=/localhome/thiennguyen/pbc-benchmark-20261106
+pbc_tools="$pbc_root/tools"
+# Transfer ~/pbc-benchmark-tools/ to "$pbc_tools" on the benchmark host.
+git clone --depth 1 --branch pbc-opt \
+  https://github.com/1tnguyen/cuda-quantum.git cuda-quantum
+cd cuda-quantum
+git fetch --depth 1 origin 247a051f0d471e65d793b26dd5cd271cedca28a0
+git checkout --detach 247a051f0d471e65d793b26dd5cd271cedca28a0
+bash "$pbc_tools/build_release.sh" "$PWD" "$pbc_root"
+```
+
+On the machine holding the original evidence, prepare one immutable input
+bundle, then transfer that bundle and the external helper directory to both hosts:
+
+```bash
+pbc_tools="$HOME/pbc-benchmark-tools"
+python3 "$pbc_tools/run.py" prepare \
+  --configuration "$pbc_tools/synthesis-reconciliation-v1.json" \
+  --source build/pbc-ci-runtime-2026-11-04 \
+  --output build/pbc-remote-2026-11-06/evidence --shards 2
+```
+
+The queue contains 212 synthesis attempts and 45 proof-only retries; four
+unsupported control-flow cases remain explicit skips. Twenty-three synthesis
+tasks first resume the missing stock compilation stage, and the timed-out optimization
+case retries that branch separately. Missing frontend compilation resumes from
+the saved imported raw Quake using
+`builtin.module(aot-prep-pipeline)`, the same pipeline called by the builder's
+`compile()`. Missing stock prefixes use the exact expanded target pipeline
+stored in the evidence manifest, including each case's epsilon. Existing
+successful prefix inputs are reused byte for byte. The Clifford+T optimization retry retains
+Appendix F.1's options and per-case work overrides.
+
+The expanded stock prefix, before the shared native-gate boundary, is:
+
+```bash
+pbc_prefix='canonicalize,hw-jit-prep-pipeline{allow-early-exit=false},jit-deploy-pipeline,func.func(add-dealloc,combine-quantum-alloc,canonicalize,dqe),convert-to-linear-values,unitary-synthesis,apply-op-specialization,func.func(constant-propagation),decomposition{basis=h,s,t,rx,ry,rz,x,y,z,swap,mx,my,mz,x(1),y(1),z(1)},func.func(fuse-1q-chains-for-clifford-t{epsilon=0.001},canonicalize,quake-simplify{threshold=0.001 rotations-to-clifford-t=true clifford-t-epsilon=0.001},normalize-phase-placement,lower-phase,canonicalize,dqe,phase-folding,canonicalize),decomposition{enable-patterns=RxToRz,RyToRz},clifford-t-synthesis{epsilon=0.001 seed=0 skip-below=0 fail-on-controlled-rotation=true},inline,func.func(quake-simplify,normalize-1q-clifford-t,phase-folding,normalize-phase-placement,lower-phase,canonicalize,dqe)'
+pbc_root=/localhome/thiennguyen/pbc-benchmark-20261106
+pbc_tools="$pbc_root/tools"
+pbc_opt="$pbc_root/release-pinned/bin/cudaq-opt"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1 RAYON_NUM_THREADS=1 QISKIT_NUM_PROCS=1
+unset CUDAQ_PBC_TELEMETRY
+"$pbc_opt" input.mlir "--pass-pipeline=builtin.module($pbc_prefix)" \
+  --mlir-disable-threading -o baseline.qke
+"$pbc_opt" baseline.qke \
+  --pass-pipeline='builtin.module(func.func(regtomem),symbol-dce,jit-finalize-pipeline{lower-device-calls=true})' \
+  --mlir-disable-threading -o stock.qke
+"$pbc_opt" baseline.qke \
+  --pass-pipeline='builtin.module(func.func(erase-implicit-output))' \
+  --mlir-disable-threading -o pbc-input.qke
+```
+
+For a case with a different recorded epsilon, substitute its value for every
+`epsilon=0.001` and `threshold=0.001` in this prefix. A saved raw frontend input
+first runs `--pass-pipeline='builtin.module(aot-prep-pipeline)'`. These stages
+are skipped when their successful frozen outputs already exist.
+
+The **uniform final synthesis configuration**, stored in
+`$pbc_tools/synthesis-reconciliation-v1.json`, expands to this complete invocation.
+These are the settings used for the measured table; later capacity studies use
+separately identified configurations rather than changing these measurements.
+
+```bash
+pbc_synthesis_options=(
+  objective=total-gates
+  synthesis-native-entanglers=cx,cz,swap
+  synthesis-swap-cost=1
+  synthesis-simplify=false
+  synthesis-prune-unobserved=false
+  synthesis-discrepancy-steps=22
+  max-work=1000000000000
+  timeout-ms=300000
+  max-gates=262144
+  max-dependencies=64000000
+  synthesis-legacy-max-work=100000000000
+  synthesis-legacy-portfolio-timeout-ms=180000
+  synthesis-representation-steps=32
+  synthesis-readout-candidates=8
+  synthesis-commuting-candidates=8
+  synthesis-algebraic-candidates=4
+  synthesis-indexed-representation-steps=64
+  synthesis-joint-phase-candidates=4
+  synthesis-joint-phase-acceptance=gates-and-t
+  synthesis-joint-phase-planner-work=3000000000
+  synthesis-joint-phase-max-work=100000000000
+  synthesis-joint-phase-timeout-ms=120000
+  synthesis-joint-phase-wide-search=true
+)
+"$pbc_opt" pbc-input.qke --convert-to-linear-values \
+  --mlir-disable-threading -o linear.qke
+"$pbc_opt" linear.qke --quake-to-pbc='semantics=release assume-measure-all=true' \
+  --quake-verify-pbc --mlir-disable-threading -o normalized.qke
+prlimit --as=8589934592 --cpu=360 --stack=67108864 --core=0 -- \
+  "$pbc_opt" normalized.qke \
+  "--quake-synthesize-pbc=${pbc_synthesis_options[*]}" \
+  --mlir-disable-threading -o synthesized.qke
+"$pbc_opt" synthesized.qke \
+  --pass-pipeline='builtin.module(func.func(regtomem),symbol-dce,jit-finalize-pipeline{lower-device-calls=true})' \
+  --mlir-disable-threading -o output.qke
+"$pbc_root/venv/bin/python" "$pbc_tools/verify.py" stock.qke output.qke \
+  --contract measured --checker auto --timeout 120 --output verification.json
+```
+
+The runner imposes a separate 375-second synthesis process timeout, records the
+complete argument vector and environment, and retains synthesis work/exhaustion
+attributes. Existing search receives up to 180 seconds and the two independent
+joint profiles share up to 120 seconds under the 300-second parent deadline.
+All cases use the same options. Finite deadlines can affect which checked
+candidate completes; the configuration does not promise identical quality
+across different CPUs or system loads. Native CX, CZ and SWAP each count once.
+The worker manifest resolves every omitted public synthesis option from that
+build's `Passes.td` and records the complete effective parameter map before
+launching a case. The option reference is in `pbc_synthesis_tuning.md`.
+
+Run shard 0 on `.135` and shard 1 on `.255`:
+
+```bash
+pbc_root=/localhome/thiennguyen/pbc-benchmark-20261106
+pbc_tools="$pbc_root/tools"
+"$pbc_root/venv/bin/python" "$pbc_tools/run.py" run \
+  --source "$pbc_root/cuda-quantum" \
+  --binary "$pbc_root/release-pinned/bin/cudaq-opt" \
+  --evidence "$pbc_root/evidence" --output "$pbc_root/results" \
+  --shard 0 --reserve-gib 48 --memory-budget-gib 440
+```
+
+The deterministic two-shard allocation balances estimated work, starts the
+longest synthesis/preparation cases first, and schedules proof-only retries
+after synthesis launches. Each machine can run up to 55 eight-GiB jobs, limited
+by its available RAM and CPU affinity. Missing stock stages reserve 32 GiB per
+active case and have 3600 CPU / 3615 wall seconds per stage; ordinary synthesis
+and initial verification reserve 8 GiB. Proof-only continuations reserve 32 GiB
+and have 630 CPU / 645 wall seconds around QCEC's 600-second limit.
+The scheduler reserves at least 48 GiB for the
+OS, controller and unexpected usage, checks current available memory before
+each launch, and limits total reservations to 440 GiB. Each child has an
+address-space cap, a CPU cap, a wall timeout, a 64 MiB stack and disabled core
+dumps. All runtime/verification thread counts are one, MLIR threading is
+disabled and `CUDAQ_PBC_TELEMETRY` is unset. A timed-out process group is
+terminated before its reservation is released. Case failures are recorded
+without stopping independent queued cases.
+
+Once the primary queue has launched all jobs (`status.json` has no pending
+cases), start the proof-only continuation on each host:
+
+```bash
+"$pbc_root/venv/bin/python" "$pbc_tools/retry_proofs.py" \
+  --evidence "$pbc_root/evidence" --results "$pbc_root/results"
+```
+
+It selects only completed outputs whose first proof attempts were unresolved.
+It never reruns synthesis, stock compilation or counting. Admission subtracts
+the remaining primary reservations and all active continuation reservations
+from the same 440 GiB envelope, also checking live available memory. After the
+primary queue has no pending jobs its reservations can only decrease. At most
+thirteen 32 GiB proof jobs run concurrently, subject to that shared allowance.
+`verification-continuation-status.json` records this additional queue and its
+reservations. Each attempt keeps separate commands, proof output, CPU/RSS data,
+verifier hash and primary-result hash; the merge validates those bindings before
+changing a verification status. Drain both services before restarting the primary
+queue so that this admission condition remains true.
+
+`status.json` exposes the active queue and reserved memory. Create
+`results/STOP_AFTER_ACTIVE` to drain a worker; remove it before resuming. The
+same command resumes without repeating completed tasks and rejects changed
+compiler/input identity. Interrupted tasks are archived before retry. New
+execution/proof limits require a separate recorded run, rather than silently
+turning a failed attempt into a verified result.
+
+Copy both result directories back to `host-135` and `host-255` beneath the local
+continuation directory, including final circuits and proof files. Merge without
+overwriting historical measured metrics:
+
+```bash
+pbc_tools="$HOME/pbc-benchmark-tools"
+python3 "$pbc_tools/run.py" merge \
+  --evidence build/pbc-remote-2026-11-06/evidence \
+  --results build/pbc-remote-2026-11-06/host-135 \
+            build/pbc-remote-2026-11-06/host-255 \
+  --output build/pbc-remote-2026-11-06/merged \
+  --report docs/pbc-optimization-report.md
+```
+
+The merged matrix records worker/compiler identity for newly completed cells;
+retained measurements keep their original identity. It includes all five
+native metrics, proof hashes, full commands, environments, elapsed time,
+per-process peak RSS and explicit failures. Inconclusive proof retries retain
+the previous unresolved status. Structural-limit failures remain failures;
+there is no preserve-network fallback counted as a synthesis success.
 <!-- END FULL CI LIVE RUN -->
+
+### F.5 Suite-capacity investigation (2026-11-06)
+
+The capacity investigation uses a separate configuration,
+`$HOME/pbc-benchmark-tools/synthesis.json`
+(`pbc-synthesis-suite-capacity-v3`). The table above retains the measured F.4
+values; new entries identify the capacity recipe. Capacity diagnostics retain their own
+compiler, configuration, commands, resources and proof files beneath
+`build/pbc-synthesis-scale-2026-11-06/` and the remote
+`/localhome/thiennguyen/pbc-benchmark-20261106/scale-20261106/` directories.
+
+The rounded limits cover the saved suite's largest normalized input
+(1,125,726 rotations) and largest mechanical bootstrap prefix (134,857,624
+gates before terminal readout):
+
+| Option | Capacity configuration |
+|---|---:|
+| `max-gates` | 200,000,000 |
+| `max-dependencies` | 1,000,000,000,000 |
+| `synthesis-max-steps` | 200,000,000 |
+| `max-work` | 100,000,000,000,000,000 |
+| `synthesis-legacy-max-work` | 1,000,000,000,000,000 |
+
+All other search and native-gate settings remain those listed in F.4.
+Dependency limits and reported logical dependency counts use 64-bit storage.
+The enlarged work allowances fund the conservative whole-word replay charge;
+the existing search deadlines still apply. Mandatory bootstrap, proof,
+emission and compiler lowering also have an external process limit. Optional
+joint completion retains its separately bounded storage and gate allowance.
+
+The Release diagnostic build uses the same pinned LLVM installation as F.4,
+Clang 22, and the source patch recorded with each compiler. Its final small-case
+checks passed 329 native tests. Independent QCEC checks passed for Adder and
+QFT-2; their synthesis metrics `(gates, T, two-qubit, depth, T-depth)` were
+`(102, 31, 52, 85, 27)` and `(7, 3, 2, 5, 2)` respectively. Adder retains the
+F.4 result after separating optional completion storage from whole-program
+capacity.
+
+All 12 existing PBC lit tests also passed against that Release compiler. Its
+SHA-256 is
+`2a8d2c0e70ad6e9424ef1fd2ac2686ef462631b76499acf840dac87d9f5f910b`;
+`source-final.patch` records the code changes relative to the recorded branch
+base.
+
+For a fresh source checkout at
+`247a051f0d471e65d793b26dd5cd271cedca28a0`, apply `source-final.patch` and
+reuse F.4's pinned LLVM installation. The capacity build configuration is:
+
+```bash
+pbc_root=/localhome/thiennguyen/pbc-benchmark-20261106
+pbc_scale="$pbc_root/scale-20261106"
+cmake --fresh -G Ninja -S "$pbc_scale/source" -B "$pbc_scale/release" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=/usr/bin/clang-22 \
+  -DCMAKE_CXX_COMPILER=/usr/bin/clang++-22 \
+  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
+  -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld \
+  -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=lld \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DLLVM_DIR="$pbc_root/llvm/lib/cmake/llvm" \
+  -DMLIR_DIR="$pbc_root/llvm/lib/cmake/mlir" \
+  -DCLANG_INCLUDE_DIRS=/usr/lib/llvm-22/include \
+  -DLLVM_EXTERNAL_LIT="$pbc_scale/source/tpls/llvm/llvm/utils/lit/lit.py" \
+  -DGIT_SUBMODULE=OFF -DCUDAQ_ENABLE_PROJECTS=cudaq \
+  -DCUDAQ_ENABLE_PYTHON_BINDINGS=OFF -DCUDAQ_BUILD_TESTS=OFF \
+  -DCUDAQ_DISABLE_CPP_FRONTEND=ON -DCMAKE_DISABLE_FIND_PACKAGE_Clang=ON \
+  -DCUDAQ_ENABLE_ALL_BACKEND=OFF -DCUDAQ_ENABLE_REST=OFF \
+  -DCUDAQ_ENABLE_ENSMALLEN=OFF -DCUDAQ_ENABLE_NLOPT=OFF \
+  -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF -DCUDAQ_SKIP_MPI=ON
+cmake --build "$pbc_scale/release" --target cudaq-opt -j 32
+```
+
+The pinned installation includes the branch's MLIR SSI customization. System
+MLIR is not substituted for it. `final-build-manifest.json`, the CMake cache,
+compile commands and source patch retain the full build provenance.
+
+The largest **successful CUDA-Q CI output** in the saved November 4 scheduled
+run is `qasmbench:qasmbench_large_qft_n320_qft_n320`: 4,944,141 output gates,
+1,975,647 T gates, and 578.28 seconds elapsed under the 600-second compile
+limit. CI pipeline `78852944`, job `525761227`, records it as passed and
+supported. The branch's existing stock result for that same source case has
+239,671 gates; these compiler configurations have separate provenance. The
+capacity run reuses that saved branch input and stock output.
+
+The 20,538,805-gate Qiskit case,
+`ftcircuitbench:qpe_qpe_h2_1_5_12q`, is also selected by CI's full profile,
+with an empty skip list. Its CUDA-Q CI attempt failed with a compile timeout
+after 606.03 seconds. The branch's stock-prefix retry sampled
+`RotationCombine<RzOp>` commutation search before PBC normalization. The next
+capacity target is therefore the successful QFT-320 CI case; the superseded
+QPE profile is retained with an explicit stop record.
+
+QFT-320 completed synthesis and final lowering in **803.89 seconds**, with
+**20.18 GiB** peak resident memory. Its final circuit contains 16,044,539 gates;
+the independent verifier counted the following native metrics before starting
+its equivalence check:
+
+| Circuit | Gates | T | Two-qubit | Depth | T-depth |
+|---|---:|---:|---:|---:|---:|
+| Saved stock CUDA-Q | **239,671** | **95,439** | **5,670** | **52,701** | **21,271** |
+| Capacity-v3 PBC synthesis | 16,044,539 | **95,439** | 15,301,148 | 15,194,144 | 95,336 |
+
+The independent QFT-320 attempts did not establish equivalence. Earlier
+automatic and lookahead attempts were stopped to release benchmark resources;
+the final native-QASM attempt returned `no_information` at its 600-second
+checker limit. The circuit
+remains **unverified**, with output SHA-256
+`a612ec2593d551780d4211b217e2ef698d447c3629184aa908447cc983c1e7cd`.
+These counts establish a quality
+gap even though the capacity failure is resolved: the synthesized circuit has
+about 67 times as many gates as the saved stock circuit. The normalized-source
+entry point retains its own synthesized incumbents, rather than the incoming
+stock network. Keeping the stock circuit as a verified incumbent before PBC
+normalization would address this baseline-quality gap without invoking the
+separate Clifford+T optimization pass. That architectural change requires its
+own implementation and validation.
+
+The optional joint route has further global admission limits. Both its planner
+and completion service reject sources above 32,768 rotations, which excludes
+this 95,439-rotation case before regional planning. Raising that cap alone
+would still leave the planner's memory preflight: it reserves
+`16 * min(max-dependencies, rotations * rotations / 2)` bytes for dependencies,
+plus row storage. With this case and the capacity configuration, that term and
+its row allowance total approximately **67.9 GiB**, against the configured
+**128 MiB** planner allowance. The preflight uses a worst-case logical-edge
+bound rather than the compressed index's actual stored conflicts. These are
+remaining joint-route scaling gaps; successful outer synthesis currently
+comes from the existing routes for this case.
+
+The earlier QSVT-11 probe completed synthesis in 308.23 seconds and final
+lowering in 1056.38 seconds. Its independent alternating checker returned
+`no_information` at the 600-second checker limit, so it remains **unverified**.
+The Fermi–Hubbard-128 probe emitted its internally checked candidate in 861.84
+seconds, but subsequent final lowering reached the 3600-CPU-second process
+limit. Samples identify repeated MLIR verification, greedy rewriting and
+serialization as further costs of large materialized native words. Its
+unfinished final circuit is not submitted for independent verification.
+
+For a capacity diagnostic, reuse the successful normalized input and combine
+synthesis and final lowering in one compiler invocation. This avoids writing
+and reparsing the potentially very large intermediate wire circuit:
+
+```bash
+pbc_root=/localhome/thiennguyen/pbc-benchmark-20261106
+pbc_scale="$pbc_root/scale-20261106"
+pbc_opt="$pbc_scale/tools/cudaq-opt-final"
+pbc_tools="$HOME/pbc-benchmark-tools"
+mapfile -t pbc_synthesis_options < <(python3 - "$pbc_tools/synthesis.json" <<'PY'
+import json
+import sys
+for key, value in json.load(open(sys.argv[1]))['options'].items():
+    print(key + '=' + str(value))
+PY
+)
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1 RAYON_NUM_THREADS=1 QISKIT_NUM_PROCS=1
+unset CUDAQ_PBC_TELEMETRY
+timeout --kill-after=15s 3660s \
+  prlimit --as=343597383680 --cpu=3600 --stack=67108864 --core=0 -- \
+  "$pbc_opt" normalized.qke \
+  "--pass-pipeline=builtin.module(func.func(quake-synthesize-pbc{semantics=release ${pbc_synthesis_options[*]}},regtomem),symbol-dce,jit-finalize-pipeline{lower-device-calls=true})" \
+  --mlir-disable-threading --mlir-print-op-on-diagnostic=false -o final.qke
+timeout --kill-after=15s 3660s \
+  prlimit --as=343597383680 --cpu=3600 --stack=67108864 --core=0 -- \
+  "$pbc_root/venv/bin/python" "$pbc_tools/verify.py" stock.qke final.qke \
+  --contract measured --checker auto --timeout 600 --output verification.json
+```
+
+A proof-only lookahead attempt reuses the same stock and final circuit files,
+changes `--checker auto` to `--checker lookahead`, and writes a separate
+`verification-lookahead.json`. It keeps the same measured contract, 600-second
+checker limit and outer process limits. Record both input hashes before
+launching it. The parallel QFT-320 attempt reserves 320 GiB on the second host;
+its frozen verifier, command, resources and proof are stored separately under
+`qft320-proof-lookahead/`. Neither proof attempt reruns compilation.
+
+Additional proof-only diagnostics use
+`$pbc_tools/pbc-scale-verify-progress.py --native-qasm` with the same arguments.
+This writes the exact `U; coherent-copy; U^-1` oracle as OpenQASM and gives the
+files directly to MQT, avoiding Qiskit circuit conversion inside its loader.
+Three measurement-contract tests passed for both input routes. Positive and
+negative fixtures covering every supported gate gave the same checker outcomes,
+and the native oracle's full small-circuit matrix matched the original Qiskit
+construction. `--no-preprocessing` additionally disables QCEC's optional
+operation reordering, SWAP reconstruction, one-qubit fusion and permutation
+elision; that configuration also passed the three contract tests. Every attempt
+records its own verifier hash, input format, oracle hashes, options and result.
+These are verifier diagnostics; the synthesized circuit and its five metrics
+are identical across the attempts.
+
+The Fermi–Hubbard and QSVT probes reserve 320 GiB for their active compiler or
+verifier. QFT-320 has a 30,593,319-gate mechanical prefix and uses a 120 GiB
+compiler and verification slot, which fits alongside the existing 320 GiB
+verification slot within the 440 GiB host budget. Admission also checks live available memory and retains at least
+48 GiB for the host. Command records override the generic JSON's F.4 process
+defaults with 3600 CPU / 3660 wall seconds and the recorded 120 or 320 GiB
+address-space limit. Use this dedicated queue for the
+capacity investigation; F.4's many-worker queue still reserves eight GiB per
+ordinary synthesis task. A completed compiler output receives independent
+verification before it can be labeled verified.
+
+### F.6 Parallel continuation and capacity regression fix (2026-11-06)
+
+The continuation retains all **626** previously collected CUDA-Q, Qiskit and
+Clifford+T optimization metric sets and all **125** previous synthesis metric
+sets. It collects missing synthesis entries from saved normalized inputs and
+stock references. The synthesis pipeline does not run the network-preserving
+optimization pass. Results and commands are recorded under
+`build/pbc-capacity-continuation-2026-11-06/` and each host's
+`/localhome/thiennguyen/pbc-benchmark-20261106/capacity-continuation-20261106/`.
+Each entry records its own compiler, configuration and artifact hashes;
+`capacity-v3` alone is not a compiler identity.
+
+Spot checks found two quality regressions after raising the global gate cap.
+Cap-only ablations reproduced both; raising only work or dependency limits did
+not. Native refinement used the global ceiling as temporary search capacity,
+admitting additional work before linear cleanup. Clifford-window admission
+also estimated local memory from that ceiling and could reject small circuits
+under its unchanged local memory bound.
+
+The fix derives native, Four-wire, Clifford-window and algebraic continuation
+limits from the actual native source size, retaining the established
+262,144-gate local allowance for smaller sources and respecting a smaller
+explicit global cap. Larger sources can still be admitted up to the global
+200,000,000-gate capacity. The separate joint-completion storage bound remains
+unchanged. These are resource controls; they do not add a preserve-network
+optimization stage.
+
+Both affected cases restore **all five** previous metrics:
+
+| Case | Gates | T | Two-qubit | Depth | T-depth |
+|---|---:|---:|---:|---:|---:|
+| `feynman:gf2_32_mult` | 47,673 | 4,128 | 43,448 | 34,932 | 1,813 |
+| `ftcircuitbench:hamiltonians_ising_1d_36q` | 176,045 | 38,808 | 76,246 | 147,896 | 32,760 |
+
+The independent verification tool returned `identical gate sequence` for each
+fixed capacity output against its reconciliation-cap output. This establishes
+the regression comparison; it does not upgrade an unresolved stock-equivalence
+result in the table. The fixed build passed **331 native tests** and all **12
+PBC lit tests**. The two real-circuit checks and proofs are archived in
+`regression-fixed-v2/` beneath the local continuation evidence directory.
+
+The fixed Release compiler SHA-256 is
+`6785d49faf1caffec2a2babcfaca0e5fee9a11fa336e374230a87916683fdca1`.
+Its complete source patch relative to branch base
+`247a051f0d471e65d793b26dd5cd271cedca28a0` is
+`pbc-regression-fix-source-v2.patch`, SHA-256
+`b29f52ee23d8b351796674158b34c6a96520be2d58087a1d33b696e5b607364c`.
+Apply that patch to a fresh base checkout and use F.5's Release build command.
+Earlier capacity results retain their earlier compiler identity; active jobs
+were allowed to finish with their frozen executable.
+
+Helpers remain outside the source tree in `$HOME/pbc-benchmark-tools/`.
+The frozen queue controller and compiler are installed under each remote
+continuation root:
+
+```bash
+pbc_root=/localhome/thiennguyen/pbc-benchmark-20261106
+pbc_run="$pbc_root/capacity-continuation-20261106"
+"$pbc_root/venv/bin/python" \
+  "$pbc_run/tools/pbc-capacity-suite-6785d49faf1c.py" run --root "$pbc_run"
+```
+
+The controller reuses its recorded plan and completed results. It schedules
+larger missing synthesis cases first, reserves memory for active jobs, and
+admits work only within a **440 GiB combined reservation per host**, with at
+least **48 GiB** of live available memory retained for the host. Reservations
+range from 8 to 400 GiB according to circuit size. Compiler CPU limits are
+3600 seconds for ordinary capacity jobs and 7200 for jobs reserving at least
+128 GiB, with 60 additional wall seconds. Resumed final lowering of the
+already synthesized Fermi–Hubbard-128 candidate has a recorded 14,400-second
+CPU allowance. Each subprocess is single threaded and independently limited.
+
+Synthesis and final lowering share one invocation using F.5's pipeline and
+`--verify-each=false` to avoid repeated whole-module verification between
+passes. Internal synthesis certificates remain enabled. The final emitted
+artifact must then pass a separate compiler parser/verifier invocation:
+
+```bash
+"$pbc_run/compiler/cudaq-opt-6785d49faf1c" output.qke \
+  '--pass-pipeline=builtin.module()' --emit-bytecode \
+  --mlir-disable-threading -o /dev/null
+"$pbc_root/venv/bin/python" "$pbc_run/tools/count.py" output.qke \
+  --output metrics.json
+"$pbc_root/venv/bin/python" "$pbc_run/tools/verify.py" stock.qke output.qke \
+  --contract measured --checker auto --timeout 120 \
+  --native-qasm --no-preprocessing --output verification.json
+```
+
+The controller supplies the recorded address-space and process limits to these
+commands. Independent proof jobs have a 600-second CPU / 630-second wall
+process allowance in addition to the 120-second checker limit. Metrics use the
+same native gate, T, two-qubit, depth and T-depth definitions as F.4. The proof
+uses the same arbitrary-input, ordered terminal-measurement contract through
+the exact coherent-readout oracle. A timeout or `no_information` remains
+explicitly unverified and is excluded from verified aggregates.
+
+### F.7 Final snapshot after the requested stop (2026-11-06)
+
+This is the frozen stop-time snapshot. The current F.2 table reports the
+fresh 197-case synthesis rerun; the original snapshot and its hashes remain
+preserved.
+
+The run was stopped at the user's request at **05:29 UTC on November 6**.
+Both remote queue controllers, active compiler and proof processes, and the
+local automatic collector are stopped. Completed artifacts and commands remain
+preserved on the benchmark machines; the final metadata snapshot is in
+`build/pbc-capacity-continuation-2026-11-06/`.
+
+At the stop, the table contained **197 synthesis metric sets**, including **72 new cases**
+and all **125** previously collected synthesis results. All **626** previously
+collected CUDA-Q, Qiskit and Clifford+T optimization metric sets are unchanged.
+Of the synthesis outputs, **108 are independently verified** and **89 remain
+unverified**. Five active proof jobs were interrupted by the requested stop;
+their completed circuit metrics are retained with that explicit proof status.
+
+Seven synthesis cases are marked **stopped**: one active compilation was
+interrupted and six queued cases were not started. These are separate from the
+eight recorded failures: seven upstream stock-prefix timeouts and one PBC
+measurement-order validation failure. Four cases have unsupported control
+flow. These outcomes account for all 216 cases without treating an interrupted
+job as a completed measurement or a synthesis failure.
+
+Each host's `user-stop.json` records the terminated process trees and affected
+tasks. The local `user-stop-summary.json` records the final counts, matrix hash,
+preservation checks and both stop records. The procedure and earlier queue
+snapshots above remain reproduction records for the collected data.
+
+## Appendix G. Hold-contract synthesis: fifteen key cases
+
+Default `semantics=hold` reconstructs the original full unitary and scalar
+phase with a newly synthesized network. Appendix F now reports the fresh
+release and hold runs separately. This historical table uses the separate fifteen-case
+frozen-input study, not the full-runtime corpus in Appendix F. The original ten
+cases appear first. Hold uses the fixed `hold-v1-120s` configuration; release
+retains the previous reconciliation configuration for these same inputs.
+
+| Circuit | Release gates / T | Hold gates / T | Hold status |
+|---|---:|---:|---|
+| adder4 | 20 / 7 | 20 / 8 | verified |
+| adder10 | 102 / 31 | 145 / 32 | verified |
+| adder28 | 306 / 96 | 434 / 96 | verified |
+| adder64 | 709 / 224 | 1031 / 224 | verified |
+| adder118 | 1361 / 416 | 2216 / 416 | verified |
+| adder433 | 6344 / 1536 | — (120 s limit) | 120 s limit |
+| multiply13 | 73 / 32 | 91 / 32 | verified |
+| rc_adder_6 | 151 / 47 | 163 / 47 | verified |
+| csla_mux_3 | 146 / 62 | 177 / 62 | verified |
+| qft_n002 | 7 / 3 | 8 / 3 | verified |
+| mod5_4 | 18 / 7 | 29 / 8 | verified |
+| basis_trotter_n4_transpiled | 14702 / 7108 | 17964 / 7190 | verified |
+| basis_trotter_n4 | 14233 / 6886 | 17769 / 7136 | verified |
+| basis_test_n4_transpiled | 651 / 310 | 650 / 310 | verified |
+| grover_5 | 512 / 166 | 493 / 166 | verified |
+
+All fourteen emitted hold networks passed independent unitary verification;
+`adder433` produced no complete candidate before its 120-second limit. The
+full metrics, exact-phase checks, fixed options, compiler hash and reproduction
+commands are in [the hold synthesis results](pbc_synthesis_tuning.md#hold-contract-measurements-2026-11-06).
+The pre/post-change release checks on adder4, QFT-2 and mod5_4 have identical
+gate sequences, readout identities and five-metric vectors, and pass independent
+ordered-measurement verification. The updated implementation passes 366 native
+tests and all 14 PBC lit tests.
+
+## Appendix H. Post-refactor release quality fix (2026-11-06)
+
+Initial focused validation on **10.117.10.135**, after the hold-contract
+refactor, checked seven native-input cases. Those spot checks preceded the
+fresh 197-case rerun now shown in [the main F.2 table](#f2-measurements).
+The current table uses only that fresh batch for synthesis; CUDA-Q, Qiskit and
+Clifford+T optimization retain their collected measurements. The spot-check
+results and frozen pre-fix matrix remain preserved for provenance.
+
+The fix retains an explicitly imported native source across private release
+normalization, verifies its binding, and uses it as an immutable incumbent.
+`native-acceptance=all-metrics` requires gates, T, two-qubit gates, depth and
+T-depth to stay within that source's costs, plus strict rank improvement.
+Expected resource limits retain a checked complete candidate; proof mismatches
+remain errors. The preserve-network optimization pass is not run. Shared
+parity reconstruction, compressed dependency storage checks and bounded
+Clifford cleanup address the diagnosed reconstruction and admission costs.
+The global source cap replaces the hidden 32,768-rotation cutoffs; local
+scratch and deadline limits remain effective.
+
+### Verification and table selection
+
+All seven native-input all-metrics outputs pass independent arbitrary-input,
+ordered joint measurement checks. Adder uses the alternating checker; gf2_32_mult
+and ising_1d_36q retain identical gate sequences and readouts. The four other
+outputs initially returned `no_information` with ZX at 120 seconds, then passed
+the same verifier with `--checker lookahead`, with simulation checking and
+preprocessing still disabled. Both attempts and unchanged output hashes are
+retained. These initial checks validate the implementation; the current
+main table obtains its synthesis measurements from the fresh batch.
+
+The initial Ising-100 G/T check reproduced the previous result: **58,006 gates,
+28,000 T gates, 1,002 entanglers, depth 28,803 and T-depth 13,646**. Its gate word
+and ordered readouts are identical to the previously independently verified
+output. The current verifier confirms that identity, and the saved proof chain
+binds both outputs and the stock reference by hash. The fresh strict ZX attempt
+is inconclusive; the redundant strict lookahead retry was stopped after this
+proof chain was established. The all-metrics alternative has 70,682 gates and
+1,000 entanglers. The fresh rerun uniformly uses G/T acceptance. Adder reproduces every previous metric through both the
+native-input and normalized-input entry points.
+
+Normalized-input checks isolate reconstruction from the native quality floor.
+Ising-64 emits 247,773 gates (previously 264,625); triangular Ising-36 emits
+640,784 (previously 761,830). Their full metrics and proof outcomes are retained
+in the evidence. These are still much larger than stock: sharing adjacent
+gadgets alone does not recover a lost global Clifford network. Normalized input
+cannot infer the original native incumbent. The native-input recipe below is
+required to enforce the stock-quality floor.
+Both normalized-only large-circuit checks remain independently unverified
+after `no_information` at the saved checker limit.
+
+Route diagnostics establish that the 38,808-rotation Ising source now enters
+joint planning with 21,301,444 logical dependencies represented by 2,316 stored
+class conflicts. Triangular Ising-36 also reaches planning, with 47,906,560
+logical dependencies and 536,266 stored conflicts. Neither route completes a
+better joint plan within its local allowance. Heisenberg-64 still exhausts
+dependency construction under the planner's bounded resources and returns its
+checked incumbent. These outcomes are distinct from the removed global cap.
+The large-buffer cleanup path is additionally exercised by a bounded native
+unit test; the native benchmark incumbents here fit the existing owned path.
+
+### Reproduction and evidence
+
+Release compiler SHA-256:
+`d358d40656d2ba8c7177080c8e54a5203144de2c6d6ee93c48b348d62b2b7486`.
+The build uses branch head `247a051f0d471e65d793b26dd5cd271cedca28a0`,
+the saved uncommitted refactor overlay and the implementation overlay
+SHA-256 `8648846064d24cea8b61ff93428faf906f0b4b9c7708b32f973d3d1a5adf6f63`.
+It reuses the pinned LLVM installation and Release build procedure in F.5.
+**375 native tests and all 15 PBC lit tests pass**, including the existing
+hold tests and new arbitrary-input measurement-effect checks. Small regression
+controls retain the previous Adder and G/T Ising-100 metric vectors.
+
+Use the saved **pre-normalization** scalar-wire `pbc-input.qke`, which includes
+the common stock prefix, as input. Do not first run `quake-to-pbc` in this mode:
+
+```sh
+OPTIONS='semantics=release native-input=true assume-measure-all=true
+  native-acceptance=all-metrics objective=total-gates
+  max-gates=200000000 max-dependencies=1000000000000
+  max-work=100000000000000000 timeout-ms=300000
+  synthesis-dependency-bytes=536870912 synthesis-max-steps=200000000
+  synthesis-native-entanglers=cx,cz,swap synthesis-swap-cost=1
+  synthesis-simplify=false synthesis-prune-unobserved=false
+  synthesis-discrepancy-steps=22 synthesis-representation-steps=32
+  synthesis-readout-candidates=8 synthesis-commuting-candidates=8
+  synthesis-algebraic-candidates=4 synthesis-indexed-representation-steps=64
+  synthesis-legacy-max-work=1000000000000000
+  synthesis-legacy-portfolio-timeout-ms=180000
+  synthesis-joint-phase-candidates=4
+  synthesis-joint-phase-acceptance=gates-and-t
+  synthesis-joint-phase-planner-work=3000000000
+  synthesis-joint-phase-max-work=100000000000
+  synthesis-joint-phase-timeout-ms=120000
+  synthesis-joint-phase-wide-search=true'
+
+cudaq-opt pbc-input.qke \
+  --pass-pipeline="builtin.module(func.func(quake-synthesize-pbc{$OPTIONS},regtomem),symbol-dce,jit-finalize-pipeline{lower-device-calls=true})" \
+  --verify-each=false --mlir-disable-threading \
+  --mlir-print-op-on-diagnostic=false -o output.qke
+cudaq-opt output.qke --pass-pipeline='builtin.module()' \
+  --emit-bytecode --mlir-disable-threading -o /dev/null
+python count.py output.qke --output metrics.json
+python verify.py stock.qke output.qke --contract measured --checker auto \
+  --timeout 120 --native-qasm --no-preprocessing --output verification.json
+# If inconclusive, retain the first attempt and retry the unchanged output:
+python verify.py stock.qke output.qke --contract measured --checker lookahead \
+  --timeout 120 --native-qasm --no-preprocessing --output verification-lookahead.json
+```
+
+`assume-measure-all=true` adds terminal Z readouts only when the input has none,
+matching the historical benchmark assumption. Explicit ordered readouts and
+names remain intact. Native all-metrics admission also constrains joint
+selection to all five metrics, regardless of the historical joint-policy
+option above. Set `native-acceptance=gates-and-t` explicitly to permit that
+tradeoff. A normalized-only reproduction instead uses
+`quake-to-pbc='semantics=release assume-measure-all=true'`, verifies PBC, and
+omits `native-input`, `assume-measure-all` and `native-acceptance` from synthesis.
+
+Scripts remain outside the source tree. Remote artifacts are under
+`/localhome/thiennguyen/pbc-benchmark-20261106/fix-post-refactor-20261106/`:
+the immutable compiler is in `compiler/<sha256>/cudaq-opt`, and cases are in
+`spots/d358d40656d2/<case-key>/<mode>/`. Local commands, hashes, test logs,
+resource records and all independent checker attempts are preserved in
+`build/pbc-post-refactor-fix-2026-11-06/`. Its `table-update.json` binds the
+seven selected results to the frozen matrix and records the recomputed
+aggregates. Workers use one math thread,
+32 GiB address-space caps, at most eight concurrent jobs, 900/930-second
+compiler CPU/wall caps and 600/630-second proof CPU/wall caps. Checker timeouts
+and `no_information` are retained as unverified unless a separate saved check
+proves that exact output. The stopped full-suite matrix hash remains
+`2a09dc276228c8b495da37cc44aa8f689463ba228e2c250276f7ee3fae31be8f`.
+
+## Integrated hold checkpoint benchmark (2026-11-06)
+
+The local-frame checkpoint fix is now implemented: hold conversion retains
+local Clifford witnesses, and synthesis rebuilds each block's Pauli graph and
+full Clifford frame before optional wider/global routes. Native cleanup applies
+only to generated circuits. These measurements preserve the entire unitary,
+scalar phase and physical wire interface; they are separate from the release
+results in the main CI table. All fifteen outputs pass independent unitary
+verification. The exact profile, scalar-phase validation and reproduction
+recipe are in [the tuning report](pbc_synthesis_tuning.md#integrated-hold-checkpoints-fifteen-case-validation-2026-11-06).
+
+| Circuit | Stock gates | Native C+T gates | Earlier hold gates | Checkpoint hold gates | T | Two-qubit | Depth | T-depth | Compile wall (s) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| adder4 | 24 | 22 | 20 | **20** | 8 | 8 | 14 | 5 | 0.30 |
+| adder10 | 140 | 106 | 145 | **128** | 32 | 63 | 87 | 22 | 0.86 |
+| adder28 | 418 | 316 | 434 | **370** | 96 | 192 | 180 | 52 | 2.70 |
+| adder64 | 974 | 736 | 1031 | **828** | 224 | 437 | 327 | 98 | 6.94 |
+| adder118 | 1808 | 1366 | 2216 | **1506** | 416 | 804 | 497 | 151 | 14.57 |
+| adder433 | 6673 | 5041 | 120 s limit | **5715** | 1536 | 2995 | 2092 | 628 | 40.62 |
+| multiply13 | 105 | 91 | 91 | **93** | 32 | 40 | 32 | 12 | 0.77 |
+| rc_adder_6 | 191 | 147 | 163 | **157** | 47 | 88 | 87 | 30 | 1.35 |
+| csla_mux_3 | 161 | 156 | 177 | **152** | 62 | 74 | 67 | 21 | 0.96 |
+| qft_n002 | 8 | 8 | 8 | **8** | 3 | 3 | 6 | 3 | 0.19 |
+| mod5_4 | 57 | 37 | 29 | **33** | 8 | 17 | 22 | 5 | 0.34 |
+| basis_trotter_n4_transpiled | 20299 | 14816 | 17964 | **14888** | 7110 | 378 | 8060 | 3865 | 25.24 |
+| basis_trotter_n4 | 19667 | 14410 | 17769 | **14573** | 6958 | 342 | 6542 | 3095 | 25.56 |
+| basis_test_n4_transpiled | 885 | 654 | 650 | **648** | 310 | 26 | 480 | 228 | 1.37 |
+| grover_5 | 668 | 500 | 493 | **510** | 166 | 228 | 395 | 146 | 5.96 |
+
+The profile is fixed across all fifteen inputs: hold semantics, local frames,
+checkpoint portfolio, total-gates objective, candidate frontier 1, scoring
+horizon 16, discrepancy decisions 22, simplification enabled and four algebraic
+candidates; regional/joint providers are disabled. Parent limits are 1T work,
+120 seconds and 262,144 gates, with one compiler worker. Compile wall times
+exclude independent verification. The paired stock/native references were
+retained rather than rerun; these are observations on the fifteen frozen
+original inputs, not a new full-suite run.
+
+The first ten exactly reproduce the isolated portfolio, with nine strict wins
+over both stock CUDA-Q and paired Qiskit. QFT-2's fixed-wire minimum is eight;
+the seven-gate Qiskit/study result carries an elided output swap. Three earlier
+hold totals regress: multiply13 91 -> 93, mod5_4 29 -> 33 and Grover 493 -> 510.
+The native Clifford+T reference still has fewer gates on ten cases. Total-gate
+improvements may increase entanglers or depth; all five output metrics are
+shown. Aggregate hold gates are 39,629 versus 52,078 stock and 38,406 native.
+
+All **380 native tests and 15 PBC lit tests pass**. Release spot checks on
+adder4, QFT-2 and mod5_4 produce identical before/after native gate words,
+physical readouts and metrics, with independent ordered-outcome proofs.
+Final compiler SHA-256 is
+`5405c7f8351e4eab7051c45c12991c97e0162e77a21b47ba3877fca6971d565e`;
+full evidence is in `build/pbc-hold-checkpoints-2026-11-06/benchmark-final/results.json`.
 
 ## Changelog
 
-- **2026-11-05:** Completed all 216 CI FTQC cases in Appendix F, with 143 verified CUDA-Q/PBC pairs and one-worker continuation details.
-- **2026-11-04:** Extended Appendix F to 145/216 CI FTQC cases with 117 verified CUDA-Q/PBC pairs and reproduction details; corrected the default objective to `total-gates`.
+- **2026-11-07:** Added the phase-exact three-wire equal-T hold rewrite and
+  restarted all 197 previously measured synthesis cases on 10.117.10.135.
+  The main table tracks only the current hold run; pending cells replace the
+  previous hold values. CUDA-Q, Qiskit, Clifford+T and release data are retained.
+
+- **2026-11-07:** Retrieved both completed 197-case synthesis batches from
+  10.117.10.135 and updated every metric and verification outcome in the main
+  table. Release has 197 outputs (162 verified); hold has 166 outputs (146
+  verified) and 31 compilation failures. Preserved all prior comparison data
+  and recomputed bold minima, including ties.
+
+- **2026-11-06:** Added the integrated hold checkpoint implementation and fifteen-case fixed-profile measurements, including full metric tradeoffs and release regression checks.
+
+- **2026-11-06:** Updated the main CI benchmark table with seven verified post-refactor synthesis results, recomputed aggregates and bold minima, and consolidated the separate spot-check table into recipe/proof notes.
+
+- **2026-11-06:** Added the post-refactor release native-incumbent floor, shared parity reconstruction, compressed admission and bounded cleanup, with focused validation and a separate reproduction recipe.
+
+- **2026-11-06:** Implemented default unitary/phase-preserving hold synthesis and added the fifteen-key-case comparison plus unchanged release spot checks.
+
+- **2026-11-06:** Stopped the run at the user's request and froze 197 synthesis measurements, including 72 new cases, with verification and stopped-job statuses preserved.
+- **2026-11-06:** Added missing synthesis measurements, documented the parallel capacity queue, and fixed gate-cap coupling that regressed two spot-checked synthesis outputs.
+- **2026-11-06:** Documented rounded full-suite synthesis capacities, 64-bit dependency accounting, streamed cost and replay scaling, optional completion storage isolation, and the largest successful CI target.
+- **2026-11-06:** Added the Release continuation, PBC synthesis metric columns, fixed final synthesis recipe, memory-bounded two-machine queue, and mandatory independent proof procedure. Labeled the native network-preserving path Clifford+T optimization.
+- **2026-11-05:** Completed all 216 CI FTQC cases in Appendix F, with 143 verified CUDA-Q/Clifford+T optimization pairs and one-worker continuation details.
+- **2026-11-04:** Extended Appendix F to 145/216 CI FTQC cases with 117 verified CUDA-Q/Clifford+T optimization pairs and reproduction details; corrected the default objective to `total-gates`.

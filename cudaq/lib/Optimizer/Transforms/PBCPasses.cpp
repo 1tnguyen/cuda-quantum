@@ -47,6 +47,11 @@ namespace {
 // Exact coefficients are stored separately from the floating-point exponent
 // operand so a PBC round trip does not lose rational-angle information.
 constexpr StringLiteral exactAngleAttr = "quake.pbc_angle";
+constexpr StringLiteral semanticsAttr = "quake.pbc_semantics";
+bool holds(func::FuncOp function) {
+  auto attr = function->getAttrOfType<StringAttr>(semanticsAttr);
+  return attr && attr.getValue() == "hold";
+}
 /// Opaque native angle backed by a scaled MLIR value.
 struct Symbol {
   /// Original SSA angle operand, preserved without guessing an exact rational.
@@ -65,6 +70,7 @@ struct Measurement {
   /// Physical readout identity. In PBC this is the first MPP operand, which
   /// may carry I when frame absorption moves the observable to other wires.
   unsigned readout;
+  SmallVector<unsigned> wires = {};
 };
 /// Complete validated import and rewrite bookkeeping, built before IR mutation.
 struct Plan {
@@ -76,6 +82,8 @@ struct Plan {
   SmallVector<Operation *> erase;
   /// Terminal sink operations paired with the native wire index to reconnect.
   SmallVector<std::pair<Operation *, unsigned>> sinks;
+  /// Returned quantum owners: function return operand, native wire index.
+  SmallVector<std::pair<unsigned, unsigned>> returns;
   /// Original measurements in outcome order, aligned with observables.
   SmallVector<Measurement> measurements;
   /// Imported unitary operations in native circuit order.
@@ -138,14 +146,33 @@ LogicalResult checkFunctionAttributes(func::FuncOp function,
                                       ImportResult &result) {
   if (function->hasAttr("quake.noOptimization"))
     return result.reject(function, "PBC respects quake.noOptimization");
-  if (failed(checkAttributes(
-          function,
-          {"sym_name", "function_type", "sym_visibility", "arg_attrs",
-           "res_attrs", "cudaq-entrypoint", "cudaq-kernel", "quake.pbc",
-           "pbc.t_before", "pbc.t_after", "pbc.two_qubit_before",
-           "pbc.two_qubit_after", "pbc.depth_before", "pbc.depth_after",
-           "pbc.work", "pbc.budget_exhaustions"},
-          result)))
+  if (failed(checkAttributes(function,
+                             {"sym_name",
+                              "function_type",
+                              "sym_visibility",
+                              "arg_attrs",
+                              "res_attrs",
+                              "cudaq-entrypoint",
+                              "cudaq-kernel",
+                              "quake.pbc",
+                              semanticsAttr,
+                              "pbc.t_before",
+                              "pbc.t_after",
+                              "pbc.two_qubit_before",
+                              "pbc.two_qubit_after",
+                              "pbc.depth_before",
+                              "pbc.depth_after",
+                              "pbc.work",
+                              "pbc.budget_exhaustions",
+                              "pbc.synthesis_work",
+                              "pbc.synthesis_budget_exhausted",
+                              "pbc.synthesis_selected",
+                              "pbc.synthesis_reason",
+                              "pbc.synthesis_routes",
+                              "pbc.synthesis_routes_dropped",
+                              "pbc.synthesis_cost_before",
+                              "pbc.synthesis_cost_after"},
+                             result)))
     return failure();
   // Argument/result contracts also require explicit support. Empty dictionaries
   // carry no additional semantics and are retained with the function.
@@ -196,9 +223,20 @@ cudaq::pauli::Angle symbol(Plan &plan, Value value, double scale,
 /// Both modes check the whole function, including SSA ownership and terminal
 /// measurement ordering. A partially built plan must be discarded on failure.
 LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
-                            ImportResult &result) {
+                            ImportResult &result, bool hold = false) {
   if (failed(checkFunctionAttributes(function, result)))
     return failure();
+  if (auto attr = function->getAttr(semanticsAttr);
+      attr && !isa<StringAttr>(attr))
+    return result.reject(function, "PBC semantics attribute must be a string");
+  if (auto attr = function->getAttrOfType<StringAttr>(semanticsAttr)) {
+    if (attr.getValue() != "hold" && attr.getValue() != "release")
+      return result.reject(function, "invalid PBC semantics attribute");
+    if (hold && attr.getValue() == "release")
+      return result.reject(function,
+                           "release PBC has discarded its quantum frame; "
+                           "regenerate hold PBC from the original circuit");
+  }
   if (function.isExternal())
     return success();
   if (!llvm::hasSingleElement(function.getBody()))
@@ -266,6 +304,8 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
     if (isa<cudaq::quake::ExpPauliOp>(op))
       llvm::append_range(allowed,
                          ArrayRef<StringRef>{"pauliLiteral", exactAngleAttr});
+    if (isa<cudaq::quake::PhaseOp>(op))
+      allowed.push_back(exactAngleAttr);
     if (isa<cudaq::quake::MeasurementInterface>(op))
       allowed.push_back("registerName");
     if (isa<cudaq::quake::MppOp>(op))
@@ -311,7 +351,7 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
     // Shared support is allowed, but all terminal observables must commute.
     if (auto meas = dyn_cast<cudaq::quake::MeasurementInterface>(op)) {
       if (!isa<cudaq::quake::MppOp>(op) &&
-          (strict ||
+          ((strict && !hold) ||
            !isa<cudaq::quake::MxOp, cudaq::quake::MyOp, cudaq::quake::MzOp>(
                op)))
         return result.reject(&op,
@@ -330,7 +370,7 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
       // Quake mx/my rotate to Z before measuring and leave a computational
       // basis state, unlike the nondestructive MPP instrument. They are
       // interchangeable only when the measured wire is immediately discarded.
-      if (isa<cudaq::quake::MxOp, cudaq::quake::MyOp>(op) &&
+      if (!hold && isa<cudaq::quake::MxOp, cudaq::quake::MyOp>(op) &&
           !llvm::all_of(meas.getWires(), [](Value wire) {
             return wire.hasOneUse() &&
                    isa<cudaq::quake::SinkOp>(*wire.getUsers().begin());
@@ -361,15 +401,16 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
       plan.observables.push_back(word);
       plan.measurements.push_back({&op, op.getResult(0),
                                    op.getAttrOfType<StringAttr>("registerName"),
-                                   qs.front()});
-      plan.erase.push_back(&op);
+                                   qs.front(), qs});
+      if (!hold)
+        plan.erase.push_back(&op);
       continue;
     }
     if (auto gate = dyn_cast<cudaq::quake::OperatorInterface>(op)) {
       if (terminal)
         return result.reject(
             &op, "PBC rotations must precede all measurements and sinks");
-      if (strict && !isa<cudaq::quake::ExpPauliOp>(op))
+      if (strict && !hold && !isa<cudaq::quake::ExpPauliOp>(op))
         return result.reject(
             &op, "PBC form permits only quake.exp_pauli unitary operations");
       SmallVector<Value> operands(gate.getControls());
@@ -403,7 +444,7 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
           if (c == 'Z' || c == 'Y')
             word.z |= QubitSet::single(qs[i], 1);
         }
-        if (strict && !word.weight())
+        if (strict && !hold && !word.weight())
           return result.reject(&op,
                                "PBC does not retain identity-only rotations");
         // Quake exp_pauli uses exp(+i exponent P), while the native rotation
@@ -420,7 +461,15 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
           angle = *converted;
         } else
           angle = symbol(plan, exp.getParameters()[0], -2, adj);
-        plan.gates.push_back(cudaq::pauli::Gate::rotation(word, angle));
+        if (hold && !word.weight()) {
+          if (auto exact = op.getAttrOfType<DenseI64ArrayAttr>(exactAngleAttr))
+            plan.gates.push_back(
+                cudaq::pauli::Gate::phase({exact[0], exact[1], 0, adj}));
+          else
+            plan.gates.push_back(cudaq::pauli::Gate::phase(
+                symbol(plan, exp.getParameters()[0], 1, adj)));
+        } else
+          plan.gates.push_back(cudaq::pauli::Gate::rotation(word, angle));
       } else if (isa<cudaq::quake::RxOp, cudaq::quake::RyOp, cudaq::quake::RzOp,
                      cudaq::quake::PhaseOp>(op)) {
         if (qs.size() != 1 || gate.getParameters().size() != 1 ||
@@ -428,9 +477,25 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
           return result.reject(&op,
                                "PBC conversion requires scalar f64 rotations");
         auto angle = symbol(plan, gate.getParameters()[0], 1, adj);
-        if (isa<cudaq::quake::PhaseOp>(op))
+        if (isa<cudaq::quake::PhaseOp>(op)) {
+          if (hold)
+            if (auto exact =
+                    op.getAttrOfType<DenseI64ArrayAttr>(exactAngleAttr)) {
+              if (exact.size() != 2 || exact[1] <= 0)
+                return result.reject(&op, "invalid exact hold scalar phase");
+              auto constant =
+                  gate.getParameters()[0].getDefiningOp<arith::ConstantOp>();
+              auto value = constant ? dyn_cast<FloatAttr>(constant.getValue())
+                                    : FloatAttr{};
+              if (!value || value.getValueAsDouble() !=
+                                std::numbers::pi * exact[0] / exact[1])
+                return result.reject(
+                    &op,
+                    "exact hold scalar phase must match its constant operand");
+              angle = {exact[0], exact[1], 0, adj};
+            }
           plan.gates.push_back(cudaq::pauli::Gate::phase(angle));
-        else {
+        } else {
           unsigned axis = isa<cudaq::quake::RxOp>(op)   ? 1
                           : isa<cudaq::quake::RyOp>(op) ? 3
                                                         : 2;
@@ -440,6 +505,8 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
                                            angle));
         }
       } else if (isa<cudaq::quake::TOp>(op) && qs.size() == 1) {
+        if (hold)
+          plan.gates.push_back(cudaq::pauli::Gate::phase({adj ? -1 : 1, 8}));
         plan.gates.push_back(cudaq::pauli::Gate::rotation(
             {0, QubitSet::single(qs[0], 1)}, {adj ? -1 : 1, 4}));
       } else {
@@ -470,11 +537,20 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
       continue;
     }
     if (auto ret = dyn_cast<func::ReturnOp>(op)) {
-      for (Value v : ret.getOperands())
+      for (auto [operand, v] : llvm::enumerate(ret.getOperands())) {
+        if (hold && isa<cudaq::quake::WireType>(v.getType())) {
+          SmallVector<unsigned> qs;
+          if (failed(indices(&op, ValueRange{v}, qs)))
+            return failure();
+          plan.returns.emplace_back(operand, qs.front());
+          current[qs.front()] = {};
+          continue;
+        }
         if (isa<cudaq::quake::WireType, cudaq::quake::RefType,
                 cudaq::quake::VeqType>(v.getType()))
           return result.reject(&op,
                                "PBC does not permit escaping quantum outputs");
+      }
       continue;
     }
     // These classical operations remain in the block. Measurement users are
@@ -494,18 +570,20 @@ LogicalResult readSupported(func::FuncOp function, bool strict, Plan &plan,
 
 /// Classify the whole function before choosing strict rejection or optional
 /// fallback. Verification errors are never downgraded to unsupported input.
-ImportResult inspect(func::FuncOp function, bool strict, Plan &plan) {
+ImportResult inspect(func::FuncOp function, bool strict, Plan &plan,
+                     bool hold = false) {
   if (failed(mlir::verify(function)))
     return {Eligibility::Invalid, function, {}};
   ImportResult result;
-  if (failed(readSupported(function, strict, plan, result)) &&
+  if (failed(readSupported(function, strict, plan, result, hold)) &&
       result.status == Eligibility::Supported)
     (void)result.reject(function, "unsupported PBC operand structure");
   return result;
 }
 
-LogicalResult read(func::FuncOp function, bool strict, Plan &plan) {
-  return inspect(function, strict, plan).diagnose();
+LogicalResult read(func::FuncOp function, bool strict, Plan &plan,
+                   bool hold = false) {
+  return inspect(function, strict, plan, hold).diagnose();
 }
 
 /// Commit only a verified replacement. Cloning keeps all original SSA users,
@@ -513,6 +591,28 @@ LogicalResult read(func::FuncOp function, bool strict, Plan &plan) {
 void commit(func::FuncOp original, func::FuncOp candidate) {
   original->setAttrs(candidate->getAttrs());
   original.getBody().takeBody(candidate.getBody());
+}
+
+/// Explicit benchmark boundary, shared by normalization and native synthesis.
+/// The caller owns a private clone; every fallback retains these same readouts.
+LogicalResult addTerminalReadouts(func::FuncOp function, Plan &plan) {
+  if (plan.sinks.empty())
+    return function.emitError("assume-measure-all requires terminal sinks");
+  OpBuilder b(function.getContext());
+  auto sinks = plan.sinks;
+  llvm::sort(sinks, [](auto a, auto b) { return a.second < b.second; });
+  b.setInsertionPoint(plan.sinks.front().first);
+  for (auto [sink, index] : sinks) {
+    OperationState state(sink->getLoc(),
+                         cudaq::quake::MzOp::getOperationName());
+    state.addOperands(sink->getOperand(0));
+    state.addTypes({cudaq::quake::MeasureType::get(b.getContext()),
+                    cudaq::quake::WireType::get(b.getContext())});
+    auto *measurement = b.create(state);
+    sink->setOperand(0, measurement->getResult(1));
+  }
+  plan = {};
+  return read(function, false, plan);
 }
 
 /// Enumerate nonidentity wire indices in ascending order. The first is the
@@ -674,7 +774,8 @@ void basis(IRRewriter &b, Location loc, cudaq::pauli::Pauli word,
 /// either mode.
 LogicalResult emit(func::FuncOp function, Plan &plan,
                    const cudaq::pauli::pbc::Result &form, bool lower,
-                   bool allowApproximate = false, bool nativeNetwork = false) {
+                   bool allowApproximate = false, bool nativeNetwork = false,
+                   bool hold = false) {
   unsigned width = plan.inputs.size();
   auto validWord = [width](const cudaq::pauli::Pauli &word) {
     return (word.x || word.z) && word.x.fits(width) && word.z.fits(width);
@@ -688,7 +789,8 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
                     [&](const cudaq::pauli::Gate &gate) {
                       if (nativeNetwork &&
                           gate.kind != cudaq::pauli::Kind::Rotate)
-                        return true;
+                        return gate.kind != cudaq::pauli::Kind::Phase ||
+                               gate.angle.symbol <= plan.symbols.size();
                       return gate.kind == cudaq::pauli::Kind::Rotate &&
                              validWord(gate.pauli) &&
                              (nativeNetwork || !gate.pauli.sign) &&
@@ -702,11 +804,16 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
       return function.emitError(
           "native PBC reconstruction has noncommuting outcomes");
   auto readout = terminalReadout(width, form.measurements, plan.measurements);
-  if (lower && !readout)
+  if (lower && !hold && !readout)
     return function.emitError(
         "PBC readouts require unsupported classical remapping");
   // Validate every exact angle before editing the owning function.
   for (auto gate : form.rotations) {
+    if (hold && gate.kind == cudaq::pauli::Kind::Phase && !gate.angle.symbol &&
+        !rational(__int128(gate.angle.numerator) *
+                      (gate.angle.negative ? -1 : 1),
+                  gate.angle.denominator))
+      return function.emitError("PBC scalar phase exceeds exact integer range");
     if (gate.kind != cudaq::pauli::Kind::Rotate)
       continue;
     if (gate.angle.symbol)
@@ -724,13 +831,35 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
   b.setInsertionPoint(plan.insertion);
   auto loc = function.getLoc();
   SmallVector<Value> wires(plan.inputs);
+  auto phase = [&](cudaq::pauli::Angle angle) {
+    if (!angle.symbol)
+      angle = *rational(__int128(angle.numerator) * (angle.negative ? -1 : 1),
+                        angle.denominator);
+    Value value = angle.symbol
+                      ? scaled(b, loc, plan.symbols[angle.symbol - 1],
+                               angle.negative ? -1 : 1)
+                      : arith::ConstantOp::create(
+                            b, loc,
+                            b.getF64FloatAttr(
+                                std::numbers::pi * angle.numerator /
+                                angle.denominator * (angle.negative ? -1 : 1)))
+                            .getResult();
+    primitive(b, loc, "phase", {0}, wires, value);
+    if (!angle.symbol)
+      wires[0].getDefiningOp()->setAttr(
+          exactAngleAttr,
+          b.getDenseI64ArrayAttr({angle.numerator, angle.denominator}));
+  };
   for (auto gate : form.rotations) {
     if (nativeNetwork && gate.kind != cudaq::pauli::Kind::Rotate) {
       using cudaq::pauli::Kind;
       // Scalar phase is unobservable only at this measured-function boundary.
       // The native transformations themselves preserve it exactly.
-      if (gate.kind == Kind::Phase)
+      if (gate.kind == Kind::Phase) {
+        if (hold)
+          phase(gate.angle);
         continue;
+      }
       if (gate.kind == Kind::CX || gate.kind == Kind::CZ)
         primitive(b, loc, gate.kind == Kind::CX ? "x" : "z", {gate.a, gate.b},
                   wires, {}, false, 1);
@@ -755,6 +884,12 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
       // Emit exact multiples of pi/4 directly as Z/S/T gates, avoiding a
       // floating-point Rz that would need to be synthesized again downstream.
       if (auto k = cudaq::pauli::tcount::detail::quarters(a)) {
+        if (hold && a.numerator) {
+          auto correction =
+              *rational(-__int128(a.numerator) * (a.negative ? -1 : 1),
+                        __int128(a.denominator) * 2);
+          phase(correction);
+        }
         int turns = *k % 8;
         unsigned magnitude = std::abs(turns);
         if (magnitude & 4)
@@ -813,7 +948,7 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
   }
   // Prepare every parity before the first measurement. No quantum state escapes
   // this function, so restoring the old basis after readout is unnecessary.
-  if (lower)
+  if (lower && !hold)
     for (auto gate : *readout) {
       using cudaq::pauli::Kind;
       switch (gate.kind) {
@@ -842,6 +977,16 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
   // Preserve both the classical SSA outcome and its physical readout identity.
   for (auto [observable, original] :
        llvm::zip(form.measurements, plan.measurements)) {
+    if (hold) {
+      // Keep the original instrument, including mx/my post-measurement basis.
+      auto measurement = cast<cudaq::quake::MeasurementInterface>(original.op);
+      for (auto [operand, index] : llvm::enumerate(original.wires))
+        original.op->setOperand(operand, wires[index]);
+      for (auto [index, wire] :
+           llvm::zip(original.wires, measurement.getWires()))
+        wires[index] = wire;
+      continue;
+    }
     auto qs = support(observable);
     if (!lower) {
       // The first MPP operand carries readout identity through PBC rewrites.
@@ -879,6 +1024,8 @@ LogicalResult emit(func::FuncOp function, Plan &plan,
   // removes consumers before producers in the original SSA wire chain.
   for (auto [sink, index] : plan.sinks)
     sink->setOperand(0, wires[index]);
+  for (auto [operand, index] : plan.returns)
+    function.front().getTerminator()->setOperand(operand, wires[index]);
   for (auto *op : llvm::reverse(plan.erase))
     b.eraseOp(op);
   return success();
@@ -891,7 +1038,7 @@ public:
   using QuakeVerifyPBCBase::QuakeVerifyPBCBase;
   void runOnOperation() override {
     Plan plan;
-    if (failed(read(getOperation(), true, plan)))
+    if (failed(read(getOperation(), true, plan, holds(getOperation()))))
       signalPassFailure();
   }
 };
@@ -900,47 +1047,53 @@ class QuakeToPBCPass : public cudaq::opt::impl::QuakeToPBCBase<QuakeToPBCPass> {
 public:
   using QuakeToPBCBase::QuakeToPBCBase;
   void runOnOperation() override {
+    if (semantics != "hold" && semantics != "release") {
+      getOperation().emitError("PBC semantics must be hold or release");
+      return signalPassFailure();
+    }
+    bool hold = semantics == "hold";
+    if (hold && assumeMeasureAll) {
+      getOperation().emitError("assume-measure-all requires semantics=release");
+      return signalPassFailure();
+    }
     OwningOpRef<func::FuncOp> candidate(getOperation().clone());
     Plan plan;
-    if (failed(read(*candidate, false, plan)))
+    if (failed(read(*candidate, false, plan, hold)))
       return signalPassFailure();
     if (plan.inputs.empty())
       return;
-    if (assumeMeasureAll && plan.measurements.empty()) {
-      // This explicit benchmark contract is opt-in. Insert at each terminal
-      // sink, then reimport so ordinary measurement bookkeeping owns the bits.
-      OpBuilder b(candidate->getContext());
-      auto sinks = plan.sinks;
-      llvm::sort(sinks, [](auto a, auto b) { return a.second < b.second; });
-      b.setInsertionPoint(plan.sinks.front().first);
-      for (auto [sink, index] : sinks) {
-        OperationState state(sink->getLoc(),
-                             cudaq::quake::MzOp::getOperationName());
-        state.addOperands(sink->getOperand(0));
-        state.addTypes({cudaq::quake::MeasureType::get(b.getContext()),
-                        cudaq::quake::WireType::get(b.getContext())});
-        auto *measurement = b.create(state);
-        sink->setOperand(0, measurement->getResult(1));
-      }
-      plan = {};
-      if (failed(read(*candidate, false, plan)))
-        return signalPassFailure();
-    }
-    // Push the Clifford frame into rotation axes and terminal observables.
-    // This preserves joint outcome probabilities for arbitrary inputs; final
-    // quantum states are not outputs of the accepted PBC contract.
-    auto result = cudaq::pauli::pbc::normalize(plan.inputs.size(), plan.gates,
-                                               plan.observables);
+    if (assumeMeasureAll && plan.measurements.empty() &&
+        failed(addTerminalReadouts(*candidate, plan)))
+      return signalPassFailure();
+    // Hold keeps local Clifford witnesses between Pauli rotations so later
+    // checkpoint synthesis can choose its own block boundaries. These frames
+    // are unitary obligations, never a native network to preserve. Release
+    // absorbs its frame into terminal observables as before.
+    cudaq::pauli::pbc::Result result;
+    if (hold && localFrames)
+      result = {plan.gates, plan.observables, {}};
+    else if (hold) {
+      auto unitary =
+          cudaq::pauli::pbc::normalizeUnitary(plan.inputs.size(), plan.gates);
+      result = {std::move(unitary.rotations), plan.observables, unitary.error};
+      result.rotations.insert(result.rotations.end(), unitary.frame.begin(),
+                              unitary.frame.end());
+    } else
+      result = cudaq::pauli::pbc::normalize(plan.inputs.size(), plan.gates,
+                                            plan.observables);
     if (!result) {
       getOperation().emitError(result.error);
       return signalPassFailure();
     }
     Plan replacement;
-    if (failed(read(*candidate, false, replacement)) ||
-        failed(emit(*candidate, replacement, result, false)))
+    if (failed(read(*candidate, false, replacement, hold)) ||
+        failed(emit(*candidate, replacement, result, false, false, hold, hold)))
       return signalPassFailure();
+    (*candidate)
+        ->setAttr(semanticsAttr,
+                  StringAttr::get(candidate->getContext(), semantics));
     Plan output;
-    if (failed(read(*candidate, true, output)))
+    if (failed(read(*candidate, true, output, hold)))
       return signalPassFailure();
     commit(getOperation(), *candidate);
   }
@@ -951,17 +1104,18 @@ class QuakeLowerPBCPass
 public:
   using QuakeLowerPBCBase::QuakeLowerPBCBase;
   void runOnOperation() override {
+    bool hold = holds(getOperation());
     Plan plan;
-    if (failed(read(getOperation(), true, plan)))
+    if (failed(read(getOperation(), true, plan, hold)))
       return signalPassFailure();
     if (plan.inputs.empty())
       return;
     cudaq::pauli::pbc::Result form{plan.gates, plan.observables, {}};
     OwningOpRef<func::FuncOp> candidate(getOperation().clone());
     Plan replacement;
-    if (failed(read(*candidate, true, replacement)) ||
-        failed(emit(*candidate, replacement, form, true,
-                    allowApproximateAngles)) ||
+    if (failed(read(*candidate, true, replacement, hold)) ||
+        failed(emit(*candidate, replacement, form, true, allowApproximateAngles,
+                    hold, hold)) ||
         failed(mlir::verify(*candidate)))
       return signalPassFailure();
     commit(getOperation(), *candidate);
@@ -972,6 +1126,10 @@ public:
 template <typename Pass>
 std::string synthesisOptions(const Pass &pass,
                              cudaq::pauli::graph::Options &o) {
+  if (pass.semantics != "hold" && pass.semantics != "release")
+    return "PBC semantics must be hold or release";
+  if (pass.semantics == "hold" && pass.pruneUnobserved)
+    return "synthesis-prune-unobserved requires semantics=release";
   using cudaq::pauli::graph::SynthesisObjective;
   if (pass.objective == "total-gates")
     o.objective = SynthesisObjective::TotalGates;
@@ -1019,15 +1177,18 @@ std::string synthesisOptions(const Pass &pass,
   if (pass.jointPhaseAcceptance == "all-metrics")
     o.jointPhaseAcceptance = cudaq::pauli::graph::JointPhaseAcceptance::AllFive;
   else if (pass.jointPhaseAcceptance == "gates-and-t")
-    o.jointPhaseAcceptance = cudaq::pauli::graph::JointPhaseAcceptance::GatesAndT;
+    o.jointPhaseAcceptance =
+        cudaq::pauli::graph::JointPhaseAcceptance::GatesAndT;
   else
-    return "synthesis-joint-phase-acceptance must be all-metrics or gates-and-t";
+    return "synthesis-joint-phase-acceptance must be all-metrics or "
+           "gates-and-t";
   o.readoutCandidates = pass.readoutCandidates;
   o.commutingCandidates = pass.commutingCandidates;
   o.algebraicCandidates = pass.algebraicCandidates;
   o.legacyWorkLimit = pass.legacyWorkLimit;
   o.legacyPortfolioTimeoutMs = pass.legacyPortfolioTimeoutMs;
   o.pruneUnobserved = pass.pruneUnobserved;
+  o.holdCheckpoints = pass.holdCheckpoints;
   o.parallelizationCredit = pass.parallelizationCredit;
   o.frontierWeight = pass.frontierWeight;
   o.frameWeight = pass.frameWeight;
@@ -1037,6 +1198,7 @@ std::string synthesisOptions(const Pass &pass,
   o.asymmetric = pass.asymmetric;
   o.maxGates = pass.maxGates;
   o.maxDependencies = pass.maxDependencies;
+  o.maxDependencyBytes = pass.maxDependencyBytes;
   o.maxSteps = pass.maxSteps;
   // Empty unitary synthesis validates every numeric control without searching.
   return cudaq::pauli::graph::synthesize(1, {}, o).error;
@@ -1056,34 +1218,250 @@ public:
       getOperation().emitError(error);
       return signalPassFailure();
     }
+    bool hold = semantics == "hold";
+    if (nativeInput && hold) {
+      getOperation().emitError(
+          "native-input currently requires semantics=release");
+      return signalPassFailure();
+    }
+    if (nativeAcceptance != "all-metrics" &&
+        nativeAcceptance != "gates-and-t") {
+      getOperation().emitError(
+          "native-acceptance must be all-metrics or gates-and-t");
+      return signalPassFailure();
+    }
+    if (assumeMeasureAll && (hold || !nativeInput)) {
+      getOperation().emitError("synthesis assume-measure-all requires "
+                               "native-input and semantics=release");
+      return signalPassFailure();
+    }
+    func::FuncOp function = getOperation();
+    OwningOpRef<func::FuncOp> assumedInput;
     Plan plan;
-    if (failed(read(getOperation(), true, plan)))
+    if (failed(read(function, !nativeInput, plan, hold)))
       return signalPassFailure();
     if (plan.inputs.empty())
       return;
+    if (assumeMeasureAll && plan.measurements.empty()) {
+      assumedInput = OwningOpRef<func::FuncOp>(function.clone());
+      function = *assumedInput;
+      plan = {};
+      if (failed(read(function, false, plan)) ||
+          failed(addTerminalReadouts(function, plan)) ||
+          failed(mlir::verify(function)))
+        return signalPassFailure();
+    }
     std::vector<unsigned> wires;
     for (auto m : plan.measurements)
       wires.push_back(m.readout);
     cudaq::pauli::SearchBudget budget(maxWork, timeoutMs);
-    auto form = cudaq::pauli::graph::synthesizeMeasured(
-        plan.inputs.size(), plan.gates, plan.observables, wires, options,
-        &budget);
+    cudaq::pauli::graph::Diagnostics diagnostics;
+    if (!hold)
+      options.diagnostics = &diagnostics;
+    auto circuitCost =
+        [&](const std::vector<cudaq::pauli::Gate> &gates,
+            const std::vector<cudaq::pauli::Pauli> &observables) {
+          auto readout = terminalReadout(plan.inputs.size(), observables,
+                                         plan.measurements);
+          if (!readout || readout->empty())
+            return cudaq::pauli::tcount::cost(plan.inputs.size(), gates);
+          auto complete = gates;
+          llvm::append_range(complete, *readout);
+          return cudaq::pauli::tcount::cost(plan.inputs.size(), complete);
+        };
+    // Benchmark native metrics exclude measurement operations. Source and
+    // candidate include the actual basis/readout network, with no MZ proxy.
+    auto before = hold ? cudaq::pauli::tcount::Cost{}
+                       : circuitCost(plan.gates, plan.observables);
+    auto record = [&](func::FuncOp function, StringRef selected,
+                      StringRef reason,
+                      const cudaq::pauli::tcount::Cost &after) {
+      Builder b(function.getContext());
+      function->setAttr("pbc.synthesis_selected", b.getStringAttr(selected));
+      function->setAttr("pbc.synthesis_reason", b.getStringAttr(reason));
+      function->setAttr("pbc.synthesis_work",
+                        b.getI64IntegerAttr(budget.work()));
+      function->setAttr("pbc.synthesis_budget_exhausted",
+                        b.getBoolAttr(budget.stopped()));
+      auto costs = [&](const auto &c) {
+        return b.getDenseI64ArrayAttr({int64_t(c.gates), int64_t(c.t),
+                                       int64_t(c.twoQubit), int64_t(c.depth),
+                                       int64_t(c.tDepth)});
+      };
+      function->setAttr("pbc.synthesis_cost_before", costs(before));
+      function->setAttr("pbc.synthesis_cost_after", costs(after));
+      SmallVector<Attribute> events;
+      for (const auto &event : diagnostics.events) {
+        NamedAttrList attributes;
+        attributes.set("route", b.getStringAttr(event.route));
+        attributes.set("status", b.getStringAttr(event.status));
+        attributes.set("reason", b.getStringAttr(event.reason));
+        attributes.set("source_gates", b.getI64IntegerAttr(event.sourceGates));
+        attributes.set("candidate_gates",
+                       b.getI64IntegerAttr(event.candidateGates));
+        attributes.set("work", b.getI64IntegerAttr(event.work));
+        attributes.set("memory_bytes", b.getI64IntegerAttr(event.memoryBytes));
+        attributes.set("logical_dependencies",
+                       b.getI64IntegerAttr(event.logicalDependencies));
+        attributes.set("stored_conflicts",
+                       b.getI64IntegerAttr(event.storedConflicts));
+        attributes.set("independent_gates",
+                       b.getI64IntegerAttr(event.independentGates));
+        events.push_back(b.getDictionaryAttr(attributes));
+      }
+      function->setAttr("pbc.synthesis_routes", b.getArrayAttr(events));
+      function->setAttr("pbc.synthesis_routes_dropped",
+                        b.getI64IntegerAttr(diagnostics.dropped));
+    };
+    auto fallback = [&](StringRef reason) {
+      diagnostics.record({"selection", "incoming", reason.str(),
+                          plan.gates.size(), plan.gates.size()});
+      record(function, "incoming", reason, before);
+      if (assumedInput)
+        commit(getOperation(), function);
+    };
+    std::optional<cudaq::pauli::pbc::Result> normalized;
+    if (nativeInput) {
+      if (function->hasAttr("quake.pbc") ||
+          !llvm::all_of(plan.gates, [&](const auto &gate) {
+            using cudaq::pauli::Kind;
+            return (gate.kind != Kind::Rotate || gate.pauli.weight() <= 1) &&
+                   (gate.kind != Kind::CX || options.nativeCX) &&
+                   (gate.kind != Kind::CZ || options.nativeCZ) &&
+                   (gate.kind != Kind::Swap || options.nativeSwap);
+          })) {
+        getOperation().emitError(
+            "native-input requires a native circuit before PBC normalization "
+            "in its configured basis");
+        return signalPassFailure();
+      }
+      if (plan.measurements.empty()) {
+        fallback("native release source has no terminal readouts");
+        return;
+      }
+      if (plan.gates.size() > maxGates) {
+        fallback("native source exceeds exploration gate limit");
+        return;
+      }
+      normalized = cudaq::pauli::pbc::normalize(plan.inputs.size(), plan.gates,
+                                                plan.observables, &budget);
+      if (!*normalized) {
+        fallback(normalized->error);
+        return;
+      }
+      if (!cudaq::pauli::graph::verifyMeasured(
+              plan.inputs.size(), plan.gates, plan.observables,
+              normalized->rotations, normalized->measurements, &budget)) {
+        if (budget.stopped()) {
+          fallback("normalization binding budget exhausted");
+          return;
+        }
+        getOperation().emitError(
+            "native synthesis normalization binding failed");
+        return signalPassFailure();
+      }
+      diagnostics.record({"normalization",
+                          "verified",
+                          {},
+                          plan.gates.size(),
+                          normalized->rotations.size(),
+                          budget.work()});
+    }
+    std::vector<cudaq::pauli::Gate> incomingReadout;
+    const std::vector<cudaq::pauli::Gate> *incoming = nullptr;
+    auto admission = nativeAcceptance == "gates-and-t"
+                         ? cudaq::pauli::graph::JointPhaseAcceptance::GatesAndT
+                         : cudaq::pauli::graph::JointPhaseAcceptance::AllFive;
+    if (nativeInput) {
+      auto tail = terminalReadout(plan.inputs.size(), plan.observables,
+                                  plan.measurements);
+      if (!tail) {
+        fallback("native readout reconstruction is unavailable");
+        return;
+      }
+      incoming = &plan.gates;
+      if (!tail->empty()) {
+        incomingReadout = plan.gates;
+        llvm::append_range(incomingReadout, *tail);
+        incoming = &incomingReadout;
+      }
+      if (incoming->size() > options.maxGates) {
+        fallback("native readout exceeds exploration gate limit");
+        return;
+      }
+      if (admission == cudaq::pauli::graph::JointPhaseAcceptance::AllFive)
+        options.jointPhaseAcceptance = admission;
+    }
+    cudaq::pauli::pbc::Result form;
+    auto status = cudaq::pauli::graph::SearchTermination::Complete;
+    if (hold) {
+      auto result = cudaq::pauli::graph::synthesizeUnitary(
+          plan.inputs.size(), plan.gates, options, &budget);
+      form = {std::move(result.gates), plan.observables, result.error};
+    } else
+      form = cudaq::pauli::graph::synthesizeMeasured(
+          plan.inputs.size(), normalized ? normalized->rotations : plan.gates,
+          normalized ? normalized->measurements : plan.observables, wires,
+          options, &budget, &status, incoming, admission);
     if (!form) {
+      if (nativeInput &&
+          status != cudaq::pauli::graph::SearchTermination::InvalidProof) {
+        fallback(form.error);
+        return;
+      }
       getOperation().emitError(form.error);
       return signalPassFailure();
     }
-    OwningOpRef<func::FuncOp> candidate(getOperation().clone());
+    auto after = hold ? cudaq::pauli::tcount::Cost{}
+                      : circuitCost(form.rotations, form.measurements);
+    if (nativeInput) {
+      auto score = [&](const cudaq::pauli::tcount::Cost &c) {
+        using Objective = cudaq::pauli::graph::SynthesisObjective;
+        switch (options.objective) {
+        case Objective::TCount:
+          return std::tuple{c.t, c.gates, c.twoQubit, c.depth, c.tDepth};
+        case Objective::Entanglers:
+          return std::tuple{c.twoQubit, c.gates, c.t, c.depth, c.tDepth};
+        case Objective::Depth:
+          return std::tuple{c.depth, c.gates, c.t, c.twoQubit, c.tDepth};
+        case Objective::TDepth:
+          return std::tuple{c.tDepth, c.gates, c.t, c.twoQubit, c.depth};
+        default:
+          return std::tuple{c.gates, c.t, c.twoQubit, c.depth, c.tDepth};
+        }
+      };
+      bool admissible = after.gates <= before.gates && after.t <= before.t;
+      if (nativeAcceptance == "all-metrics")
+        admissible &= after.twoQubit <= before.twoQubit &&
+                      after.depth <= before.depth &&
+                      after.tDepth <= before.tDepth;
+      if (!admissible || !(score(after) < score(before))) {
+        fallback("no admissible improvement over incoming native circuit");
+        return;
+      }
+    }
+    if (nativeInput && !llvm::all_of(form.rotations, [](const auto &gate) {
+          return gate.kind != cudaq::pauli::Kind::Rotate || gate.angle.symbol ||
+                 cudaq::pauli::tcount::detail::quarters(gate.angle).has_value();
+        })) {
+      fallback("candidate requires nonexact angle lowering");
+      return;
+    }
+    OwningOpRef<func::FuncOp> candidate(function.clone());
     Plan replacement;
-    if (failed(read(*candidate, true, replacement)) ||
-        failed(emit(*candidate, replacement, form, true, false, true)) ||
+    if (failed(read(*candidate, !nativeInput, replacement, hold)) ||
+        failed(emit(*candidate, replacement, form, true, false, true, hold)) ||
         failed(mlir::verify(*candidate)))
       return signalPassFailure();
     Builder b(getOperation().getContext());
+    (*candidate)->setAttr(semanticsAttr, b.getStringAttr(semantics));
     (*candidate)
         ->setAttr("pbc.synthesis_work", b.getI64IntegerAttr(budget.work()));
     (*candidate)
         ->setAttr("pbc.synthesis_budget_exhausted",
                   b.getBoolAttr(budget.stopped()));
+    if (!hold)
+      record(*candidate, "synthesized", "checked complete candidate", after);
     commit(getOperation(), *candidate);
   }
 };
@@ -1151,6 +1529,7 @@ public:
   using Base::Base;
   void runOnOperation() override {
     auto function = this->getOperation();
+    bool hold = this->semantics == "hold";
     cudaq::opt::PBCTelemetry report(function, this->getArgument(),
                                     this->telemetry, this->telemetryMaxEvents);
     auto options = nativeOptions();
@@ -1210,7 +1589,7 @@ public:
     }
     Plan plan;
     auto eligibility = report.time(
-        "import", [&] { return inspect(function, !Optional, plan); });
+        "import", [&] { return inspect(function, !Optional, plan, hold); });
     if (eligibility.status != Eligibility::Supported) {
       if constexpr (Optional) {
         if (eligibility.status == Eligibility::Unsupported) {
@@ -1245,13 +1624,24 @@ public:
     cudaq::pauli::SearchBudget budget(options.maxWork, options.timeoutMs);
     bool measuredSynthesis = false;
     if constexpr (Optional)
-      measuredSynthesis = options.enableGraphSynthesis &&
+      measuredSynthesis = !hold && options.enableGraphSynthesis &&
                           !this->preserveCliffordNetwork &&
                           !plan.observables.empty();
+    bool unitarySynthesis = hold && options.enableGraphSynthesis;
+    if constexpr (Optional)
+      unitarySynthesis &= !this->preserveCliffordNetwork;
     auto portfolioOptions = options;
-    if (measuredSynthesis)
+    if (measuredSynthesis || unitarySynthesis)
       portfolioOptions.enableGraphSynthesis = false;
     auto result = report.time("search", [&] {
+      if (unitarySynthesis) {
+        // Preserve source locality until graph/frame reconstruction. Native
+        // optimization is a continuation of the generated circuit, never a
+        // preserved-network seed for the hold synthesis route.
+        cudaq::pauli::OptimizerResult source;
+        source.gates = plan.gates;
+        return source;
+      }
       return cudaq::pauli::optimize(plan.inputs.size(), plan.gates,
                                     portfolioOptions, &budget,
                                     report.collector());
@@ -1266,12 +1656,25 @@ public:
       skip(function, "search size/work/deadline limit", report);
       return;
     }
-    auto before = mechanicalCost(plan.inputs.size(), plan.gates,
-                                 plan.observables, plan.measurements);
+    auto before =
+        hold ? cudaq::pauli::tcount::cost(plan.inputs.size(), plan.gates)
+             : mechanicalCost(plan.inputs.size(), plan.gates, plan.observables,
+                              plan.measurements);
     bool preserveNetwork = false;
     if constexpr (Optional)
       preserveNetwork = this->preserveCliffordNetwork;
     auto normalized = report.time("normalization", [&] {
+      if (hold) {
+        preserveNetwork = true;
+        if (unitarySynthesis) {
+          auto form = cudaq::pauli::graph::synthesizeUnitary(
+              plan.inputs.size(), result.gates, options.graphSynthesis,
+              &budget);
+          return cudaq::pauli::pbc::Result{std::move(form.gates),
+                                           plan.observables, form.error};
+        }
+        return cudaq::pauli::pbc::Result{result.gates, plan.observables, {}};
+      }
       if (measuredSynthesis) {
         std::vector<unsigned> wires;
         for (auto m : plan.measurements)
@@ -1315,7 +1718,7 @@ public:
         return;
       }
       if constexpr (Optional) {
-        if (measuredSynthesis) {
+        if (measuredSynthesis || unitarySynthesis) {
           // Like graph proposals inside the native portfolio, a failed
           // measured-synthesis candidate is declined without committing it.
           // Structural limits need not exhaust the shared work budget.
@@ -1330,15 +1733,19 @@ public:
     }
     // Lexicographic ordering prioritizes the requested objective. Include the
     // cost of reconstructing every outcome, not just the native rotations.
-    auto readout = terminalReadout(plan.inputs.size(), normalized.measurements,
-                                   plan.measurements);
+    auto readout =
+        hold ? std::optional{std::vector<cudaq::pauli::Gate>{}}
+             : terminalReadout(plan.inputs.size(), normalized.measurements,
+                               plan.measurements);
     if (!readout) {
       skip(function, "PBC readouts require unsupported classical remapping",
            report);
       return;
     }
-    auto after = readoutCost(plan.inputs.size(), normalized.rotations, *readout,
-                             plan.measurements);
+    auto after = hold ? cudaq::pauli::tcount::cost(plan.inputs.size(),
+                                                   normalized.rotations)
+                      : readoutCost(plan.inputs.size(), normalized.rotations,
+                                    *readout, plan.measurements);
     if (report.enabled()) {
       report.candidateCost = after;
       report.unresolvedCandidate =
@@ -1401,10 +1808,10 @@ public:
     Plan replacement;
     if (failed(report.time(
             "candidate_import",
-            [&] { return read(*candidate, !Optional, replacement); })) ||
+            [&] { return read(*candidate, !Optional, replacement, hold); })) ||
         failed(report.time(Optional ? "lowering" : "pbc_emission", [&] {
           return emit(*candidate, replacement, normalized, Optional, false,
-                      preserveNetwork);
+                      preserveNetwork, hold);
         })))
       return this->signalPassFailure();
     // Lowered output contains primitive gates and measurements, so verify it
@@ -1415,11 +1822,13 @@ public:
         return this->signalPassFailure();
     } else {
       Plan output;
-      if (failed(report.time("output_verification",
-                             [&] { return read(*candidate, true, output); })))
+      if (failed(report.time("output_verification", [&] {
+            return read(*candidate, true, output, hold);
+          })))
         return this->signalPassFailure();
     }
     Builder b(function.getContext());
+    (*candidate)->setAttr(semanticsAttr, b.getStringAttr(this->semantics));
     (*candidate)->setAttr("pbc.t_before", b.getI64IntegerAttr(before.t));
     (*candidate)->setAttr("pbc.t_after", b.getI64IntegerAttr(after.t));
     (*candidate)

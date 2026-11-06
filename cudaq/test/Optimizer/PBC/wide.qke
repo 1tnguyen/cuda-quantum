@@ -14,7 +14,7 @@
 /// lowering without truncation.
 //===----------------------------------------------------------------------===//
 
-// RUN: cudaq-opt %s --quake-to-pbc --quake-verify-pbc --quake-lower-pbc | FileCheck %s
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release' --quake-verify-pbc --quake-lower-pbc | FileCheck %s
 
 func.func @wide(%q0: !quake.wire, %q1: !quake.wire, %q2: !quake.wire, %q3: !quake.wire, %q4: !quake.wire, %q5: !quake.wire, %q6: !quake.wire, %q7: !quake.wire, %q8: !quake.wire, %q9: !quake.wire, %q10: !quake.wire, %q11: !quake.wire, %q12: !quake.wire, %q13: !quake.wire, %q14: !quake.wire, %q15: !quake.wire, %q16: !quake.wire, %q17: !quake.wire, %q18: !quake.wire, %q19: !quake.wire, %q20: !quake.wire, %q21: !quake.wire, %q22: !quake.wire, %q23: !quake.wire, %q24: !quake.wire, %q25: !quake.wire, %q26: !quake.wire, %q27: !quake.wire, %q28: !quake.wire, %q29: !quake.wire, %q30: !quake.wire, %q31: !quake.wire, %q32: !quake.wire, %q33: !quake.wire, %q34: !quake.wire, %q35: !quake.wire, %q36: !quake.wire, %q37: !quake.wire, %q38: !quake.wire, %q39: !quake.wire, %q40: !quake.wire, %q41: !quake.wire, %q42: !quake.wire, %q43: !quake.wire, %q44: !quake.wire, %q45: !quake.wire, %q46: !quake.wire, %q47: !quake.wire, %q48: !quake.wire, %q49: !quake.wire, %q50: !quake.wire, %q51: !quake.wire, %q52: !quake.wire, %q53: !quake.wire, %q54: !quake.wire, %q55: !quake.wire, %q56: !quake.wire, %q57: !quake.wire, %q58: !quake.wire, %q59: !quake.wire, %q60: !quake.wire, %q61: !quake.wire, %q62: !quake.wire, %q63: !quake.wire, %q64: !quake.wire) {
   quake.sink %q0 : !quake.wire

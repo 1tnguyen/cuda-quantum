@@ -40,6 +40,7 @@
 #include "SynthesisCost.h"
 #include "SynthesisDependencies.h"
 #include "SynthesisGeneral.h"
+#include "SynthesisHold.h"
 #include "SynthesisJointPhasePlanner.h"
 #include "SynthesisLinearFour.h"
 #include "SynthesisNativeRefinement.h"
@@ -348,7 +349,8 @@ struct Graph {
 /// F R(F^dagger P F,a). Absorb a negative transformed axis into the angle, so
 /// imported axes are unsigned and equal-axis merging can compare them directly.
 /// See PCOAST Lemma 30 and Sec. V-A, Fig. 9 (circuit-to-graph conversion).
-Graph import(unsigned n, const std::vector<Gate> &gates) {
+Graph import(unsigned n, const std::vector<Gate> &gates,
+             bool retainCliffords = true) {
   Graph graph(n);
   for (const Gate &g : gates) {
     if (g.kind == Kind::Phase)
@@ -360,7 +362,8 @@ Graph import(unsigned n, const std::vector<Gate> &gates) {
       graph.nodes.push_back({p, {}, a});
     } else {
       graph.frame.append(g);
-      graph.cliffords.push_back(g);
+      if (retainCliffords)
+        graph.cliffords.push_back(g);
     }
   }
   return graph;
@@ -890,7 +893,12 @@ class Synthesizer {
           found = true;
           break;
         }
-        for (Kind kind : {Kind::H, Kind::S}) {
+        const auto localKinds =
+            options.nativeLocalCliffords
+                ? std::vector<Kind>{Kind::H, Kind::S, Kind::Sdg,
+                                    Kind::X, Kind::Y, Kind::Z}
+                : std::vector<Kind>{Kind::H, Kind::S};
+        for (Kind kind : localKinds) {
           Gate g{kind, q};
           auto x = conjugate(state.x, g), z = conjugate(state.z, g);
           if (seen.emplace(x.axis(q), z.axis(q), x.sign, z.sign).second) {
@@ -1024,6 +1032,11 @@ public:
         result.error = "Pauli graph synthesis dependency index size exceeded";
         result.stats.budgetExhausted = true;
         break;
+      case detail::DependencyError::StorageLimit:
+        result.error =
+            "Pauli graph synthesis dependency storage limit exceeded";
+        result.stats.budgetExhausted = true;
+        break;
       case detail::DependencyError::InvalidOccurrence:
       case detail::DependencyError::None:
         result.error = "Pauli graph synthesis invalid dependency cursor state";
@@ -1040,14 +1053,12 @@ public:
       for (const Node &node : graph.nodes)
         axes.push_back(node.p);
       return detail::DependencyIndex::build(axes, options.maxDependencies,
-                                            budget);
+                                            budget, options.maxDependencyBytes);
     }();
     if (!dependencySucceeded(dependencies))
       return result;
     const auto &dependencyStats = dependencies.value->statistics();
-    // The checked logical cap and the input gate cap both fit unsigned.
-    result.stats.dependencies =
-        static_cast<unsigned>(dependencyStats.logicalEdges);
+    result.stats.dependencies = dependencyStats.logicalEdges;
     result.stats.dependencyAxisClasses =
         static_cast<unsigned>(dependencyStats.classes);
     result.stats.dependencyConflictEntries = dependencyStats.storedConflicts;
@@ -1583,7 +1594,25 @@ bool equivalentMeasured(unsigned width, const std::vector<Gate> &input,
       llvm::SaturatingAdd<uint64_t>(size, uint64_t(width) * width + 1));
   if (budget && !budget->take(work))
     return false;
-  auto a = import(width, input), b = import(width, output);
+  // Measured replay needs the accumulated frames, not a second copy of every
+  // native Clifford in a potentially large mechanical completion.
+  auto a = import(width, input, false), b = import(width, output, false);
+  if (observables.size() != outcomes.size())
+    return false;
+  auto sameReadouts = [&] {
+    for (unsigned i = 0; i < observables.size(); ++i)
+      if (a.frame.lookup(observables[i]) != b.frame.lookup(outcomes[i]))
+        return false;
+    return true;
+  };
+  // Mechanical completions replay to the original word exactly. Their proof
+  // does not need word simplification or a quadratic sequence of removals.
+  if (a.nodes.size() == b.nodes.size() &&
+      std::equal(a.nodes.begin(), a.nodes.end(), b.nodes.begin(),
+                 [](const Node &x, const Node &y) {
+                   return x.p == y.p && equalAngles(x.angle, y.angle);
+                 }))
+    return sameReadouts();
   simplify(a);
   simplify(b);
   if (prune) {
@@ -1607,26 +1636,30 @@ bool equivalentMeasured(unsigned width, const std::vector<Gate> &input,
     a.nodes = std::move(retained);
     simplify(a);
   }
-  if (a.nodes.size() != b.nodes.size() || observables.size() != outcomes.size())
+  if (a.nodes.size() != b.nodes.size())
     return false;
+  std::vector<bool> matchedNodes(b.nodes.size());
+  size_t firstUnmatched = 0;
   for (const Node &node : a.nodes) {
     bool matched = false;
-    for (auto it = b.nodes.begin(); it != b.nodes.end(); ++it) {
-      if (node.p == it->p && equalAngles(node.angle, it->angle)) {
-        b.nodes.erase(it);
+    for (size_t i = firstUnmatched; i < b.nodes.size(); ++i) {
+      if (matchedNodes[i])
+        continue;
+      const Node &other = b.nodes[i];
+      if (node.p == other.p && equalAngles(node.angle, other.angle)) {
+        matchedNodes[i] = true;
         matched = true;
         break;
       }
-      if (node.p.anti(it->p))
+      if (node.p.anti(other.p))
         break;
     }
     if (!matched)
       return false;
+    while (firstUnmatched < matchedNodes.size() && matchedNodes[firstUnmatched])
+      ++firstUnmatched;
   }
-  for (unsigned i = 0; i < observables.size(); ++i)
-    if (a.frame.lookup(observables[i]) != b.frame.lookup(outcomes[i]))
-      return false;
-  return true;
+  return sameReadouts();
 }
 } // namespace
 
@@ -1637,7 +1670,7 @@ detail::MeasuredCandidateSink::MeasuredCandidateSink(MeasuredProblem problem,
   inputError = invalidOptions(options);
   if (!inputError.empty())
     return;
-  if (!validCircuit(problem.width, problem.rotations) ||
+  if (problem.unitary || !validCircuit(problem.width, problem.rotations) ||
       problem.observables.empty() ||
       problem.rotations.size() > options.maxGates) {
     inputError = "invalid measured synthesis input or gate limit";
@@ -1742,8 +1775,6 @@ struct ReadoutProblem {
   std::vector<Gate> prefix;
   std::vector<Pauli> observables;
 };
-
-enum class SearchTermination { Complete, Exhausted, Unsupported, InvalidProof };
 
 pbc::Result
 runMeasuredSearch(unsigned width, const std::vector<Gate> &input,
@@ -1883,6 +1914,27 @@ uint64_t readoutWorkEstimate(unsigned width, size_t observables) {
       llvm::SaturatingMultiply<uint64_t>(uint64_t(width) + 1, observables + 1));
 }
 
+template <typename ResultType>
+std::string routeStatus(const ResultType &result) {
+  using Status = decltype(result.status);
+  if constexpr (requires { Status::InvalidProof; })
+    if (result.status == Status::InvalidProof)
+      return "invalid-proof";
+  if constexpr (requires { Status::Unsupported; })
+    if (result.status == Status::Unsupported)
+      return "unsupported";
+  if constexpr (requires { Status::Exhausted; })
+    if (result.status == Status::Exhausted)
+      return "exhausted";
+  if constexpr (requires { Status::BudgetExhausted; })
+    if (result.status == Status::BudgetExhausted)
+      return "exhausted";
+  if constexpr (requires { Status::Unchanged; })
+    if (result.status == Status::Unchanged)
+      return "unchanged";
+  return "complete";
+}
+
 pbc::Result bootstrapMeasured(const detail::MeasuredProblem &problem,
                               const Options &options, SearchBudget &budget,
                               SearchTermination &status) {
@@ -1899,6 +1951,13 @@ pbc::Result bootstrapMeasured(const detail::MeasuredProblem &problem,
   if (!generation)
     return {{}, {}, "bootstrap completion work reserve unavailable"};
   auto prefix = detail::buildBootstrapPrefix(problem, options, &*generation);
+  if (options.diagnostics) {
+    RouteEvent event{"bootstrap",         routeStatus(prefix),
+                     prefix.error,        problem.rotations.size(),
+                     prefix.gates.size(), prefix.work};
+    event.independentGates = prefix.independentGates;
+    options.diagnostics->record(std::move(event));
+  }
   if (!prefix) {
     if (prefix.status == detail::BootstrapStatus::Unsupported)
       status = SearchTermination::Unsupported;
@@ -1937,16 +1996,20 @@ pbc::Result bootstrapMeasured(const detail::MeasuredProblem &problem,
 pbc::Result representationBaseline(const detail::MeasuredProblem &problem,
                                    const Options &options, SearchBudget &budget,
                                    std::optional<ReadoutProblem> *completion,
-                                   SearchTermination *termination = nullptr) {
+                                   SearchTermination *termination = nullptr,
+                                   unsigned bootstrapGateCap = 0) {
   if (!options.legacyWorkLimit)
     return runMeasuredSearch(problem.width, problem.rotations,
                              problem.observables, problem.readoutWires, options,
                              &budget, completion, termination);
   SearchTermination bootstrapStatus = SearchTermination::Exhausted;
   auto bootstrapBudget = explorationSlice(budget);
+  Options bootstrapOptions = options;
+  if (bootstrapGateCap)
+    bootstrapOptions.maxGates = std::min(options.maxGates, bootstrapGateCap);
   auto bootstrap = bootstrapBudget
-                       ? bootstrapMeasured(problem, options, *bootstrapBudget,
-                                           bootstrapStatus)
+                       ? bootstrapMeasured(problem, bootstrapOptions,
+                                           *bootstrapBudget, bootstrapStatus)
                        : pbc::Result{{}, {}, "bootstrap reserve unavailable"};
   if (!bootstrap && bootstrapStatus == SearchTermination::InvalidProof) {
     if (termination)
@@ -2271,10 +2334,8 @@ std::string tryRegionalAlternatives(const detail::MeasuredProblem &problem,
 }
 std::string tryNativeRefinement(unsigned width, const Options &options,
                                 SearchBudget &budget, pbc::Result &incumbent) {
-  detail::NativeRefinementLimits limits;
-  limits.maxGates = options.maxGates;
-  limits.maxTemporaryGates =
-      std::max(limits.maxTemporaryGates, options.maxGates);
+  auto limits = detail::boundedNativeRefinementLimits(
+      options, incumbent.rotations.size());
   limits.maxCandidates = 4 * std::min(options.algebraicCandidates, 4u);
   auto generation = explorationSlice(budget, limits.maxWork);
   if (!generation ||
@@ -2285,6 +2346,14 @@ std::string tryNativeRefinement(unsigned width, const Options &options,
   auto synthesized = incumbent.rotations;
   auto alternatives = detail::refineSynthesizedNative(
       width, synthesized, options, limits, *generation);
+  if (options.diagnostics)
+    options.diagnostics->record(
+        {"native-refinement", routeStatus(alternatives), alternatives.error,
+         synthesized.size(),
+         alternatives.alternatives.empty()
+             ? synthesized.size()
+             : alternatives.alternatives.front().gates().size(),
+         generation->work()});
   if (alternatives.status == detail::NativeRefinementStatus::InvalidProof)
     return alternatives.error;
   for (const auto &candidate : alternatives.alternatives) {
@@ -2316,7 +2385,8 @@ std::string tryFourWireRefinement(unsigned width, const Options &options,
   if (width < 4 || incumbent.rotations.size() < 4)
     return {};
   detail::LinearFourLimits limits;
-  limits.maxGates = options.maxGates;
+  limits.maxGates =
+      detail::nativeContinuationGateLimit(options, incumbent.rotations.size());
   auto generation =
       explorationSlice(budget, limits.maxWork + limits.maxTableWork);
   if (!generation)
@@ -2349,11 +2419,13 @@ std::string tryFourWireRefinement(unsigned width, const Options &options,
   return {};
 }
 
-pbc::Result runMeasuredPortfolio(unsigned width, const std::vector<Gate> &input,
-                                 const std::vector<Pauli> &observables,
-                                 const std::vector<unsigned> &readoutWires,
-                                 const Options &options, SearchBudget *budget,
-                                 SearchTermination *termination = nullptr) {
+pbc::Result runMeasuredPortfolio(
+    unsigned width, const std::vector<Gate> &input,
+    const std::vector<Pauli> &observables,
+    const std::vector<unsigned> &readoutWires, const Options &options,
+    SearchBudget *budget, SearchTermination *termination = nullptr,
+    const pbc::Result *incoming = nullptr,
+    JointPhaseAcceptance incomingAcceptance = JointPhaseAcceptance::AllFive) {
   if (termination)
     *termination = SearchTermination::Complete;
   auto invalid = [&](std::string error) {
@@ -2365,9 +2437,35 @@ pbc::Result runMeasuredPortfolio(unsigned width, const std::vector<Gate> &input,
   SearchBudget &shared = budget ? *budget : unlimited;
   detail::MeasuredProblem source{width, input, observables, readoutWires};
   std::optional<ReadoutProblem> completion;
+  auto baselineStatus = SearchTermination::Complete;
   auto incumbent = representationBaseline(
       source, options, shared,
-      options.readoutCandidates ? &completion : nullptr, termination);
+      options.readoutCandidates ? &completion : nullptr, &baselineStatus,
+      incoming ? static_cast<unsigned>(incoming->rotations.size()) : 0);
+  if (termination)
+    *termination = baselineStatus;
+  if (incoming) {
+    if (!incumbent && baselineStatus == SearchTermination::InvalidProof)
+      return incumbent;
+    bool improve = false;
+    if (incumbent) {
+      auto cost = tcount::cost(width, incumbent.rotations);
+      auto anchor = tcount::cost(width, incoming->rotations);
+      improve =
+          cost.gates <= anchor.gates && cost.t <= anchor.t &&
+          (incomingAcceptance == JointPhaseAcceptance::GatesAndT ||
+           (cost.twoQubit <= anchor.twoQubit && cost.depth <= anchor.depth &&
+            cost.tDepth <= anchor.tDepth)) &&
+          circuitScore(width, incumbent.rotations, options) <
+              circuitScore(width, incoming->rotations, options);
+    }
+    if (!improve) {
+      incumbent = *incoming;
+      completion.reset();
+    }
+    if (termination)
+      *termination = SearchTermination::Complete;
+  }
   if (!incumbent || shared.stopped())
     return incumbent;
   if (!options.readoutCandidates && !options.representationSteps &&
@@ -2451,8 +2549,10 @@ pbc::Result runMeasuredPortfolio(unsigned width, const std::vector<Gate> &input,
       return invalid(std::move(error));
     detail::AlgebraLimits limits;
     limits.maxCandidates = options.algebraicCandidates;
-    limits.maxInputGates = options.maxGates;
-    limits.maxTemporaryGates = options.maxGates;
+    limits.maxInputGates = limits.maxTemporaryGates =
+        detail::nativeContinuationGateLimit(
+            options,
+            std::max(source.rotations.size(), incumbent.rotations.size()));
     auto generation = explorationSlice(shared, limits.maxWork);
     if (!generation)
       return incumbent;
@@ -2512,6 +2612,12 @@ std::string tryIndexedRepresentation(const detail::MeasuredProblem &source,
     return {};
   auto proposal =
       detail::exploreIndexedRepresentations(source, limits, *generation);
+  if (options.diagnostics)
+    options.diagnostics->record(
+        {"indexed-representation", routeStatus(proposal), proposal.error,
+         source.rotations.size(),
+         proposal.alternative ? proposal.alternative->rotations.size() : 0,
+         proposal.work});
   if (!proposal.alternative)
     return {};
   auto proofBudget = explorationSlice(budget);
@@ -2575,10 +2681,8 @@ std::string tryNativeFourCompletion(unsigned width, const Options &options,
                                     pbc::Result &incumbent) {
   if (width < 4 || incumbent.rotations.size() < 4)
     return {};
-  detail::NativeRefinementLimits limits;
-  limits.maxGates = options.maxGates;
-  limits.maxTemporaryGates =
-      std::max(limits.maxTemporaryGates, options.maxGates);
+  auto limits = detail::boundedNativeRefinementLimits(
+      options, incumbent.rotations.size());
   limits.maxCandidates = 4;
   limits.maxWork = 100000000;
   auto copyWork = [width](size_t gates) {
@@ -2599,9 +2703,8 @@ std::string tryNativeFourCompletion(unsigned width, const Options &options,
     auto selection = explorationSlice(budget);
     const auto scoringWork = llvm::SaturatingMultiply<uint64_t>(
         8, uint64_t(width) + word.size() + incumbent.rotations.size() + 1);
-    if (!selection ||
-        !selection->take(llvm::SaturatingAdd<uint64_t>(
-            scoringWork, copyWork(word.size()))))
+    if (!selection || !selection->take(llvm::SaturatingAdd<uint64_t>(
+                          scoringWork, copyWork(word.size()))))
       return false;
     if (improvesWithoutRegression(width, word, incumbent.rotations, options))
       incumbent.rotations = word;
@@ -2616,12 +2719,13 @@ std::string tryNativeFourCompletion(unsigned width, const Options &options,
     if (!candidate.matchesSource(width, synthesized))
       return "native completion belongs to a different synthesized source";
     detail::LinearFourLimits fourLimits;
-    fourLimits.maxGates = options.maxGates;
-    auto continuation = explorationSlice(
-        budget, fourLimits.maxWork + fourLimits.maxTableWork);
+    fourLimits.maxGates =
+        detail::nativeContinuationGateLimit(options, candidate.gates().size());
+    auto continuation =
+        explorationSlice(budget, fourLimits.maxWork + fourLimits.maxTableWork);
     if (continuation) {
-      auto dictionary = detail::buildLinearFourDictionary(
-          options, fourLimits, *continuation);
+      auto dictionary =
+          detail::buildLinearFourDictionary(options, fourLimits, *continuation);
       if (dictionary.status == detail::LinearFourStatus::InvalidProof)
         return dictionary.error;
       if (dictionary.dictionary) {
@@ -2656,10 +2760,11 @@ std::string tryNativeFourCompletion(unsigned width, const Options &options,
 /// immutable, already proved synthesis result. The local certificates include
 /// scalar phase, so they compose directly with its measured proof.
 std::string tryCliffordNativeCompletion(unsigned width, const Options &options,
-                                       SearchBudget &budget,
-                                       pbc::Result &incumbent) {
+                                        SearchBudget &budget,
+                                        pbc::Result &incumbent) {
   detail::CliffordWindowLimits limits;
-  limits.maxGates = options.maxGates;
+  limits.maxGates =
+      detail::nativeContinuationGateLimit(options, incumbent.rotations.size());
   auto copyWork = [width](size_t gates) {
     return llvm::SaturatingMultiply<uint64_t>(
         uint64_t(gates) + 1, 2 * ((uint64_t(width) + 63) / 64) + 1);
@@ -2668,18 +2773,40 @@ std::string tryCliffordNativeCompletion(unsigned width, const Options &options,
       budget, llvm::SaturatingMultiply<uint64_t>(2, limits.maxWork));
   if (!generation || !generation->take(copyWork(incumbent.rotations.size())))
     return {};
+  uint64_t gateBytes = sizeof(Gate) + 16 * (uint64_t(width) / 64 + 1);
+  uint64_t fullStorage = (8 * uint64_t(limits.maxGates) + 1024) * gateBytes +
+                         512 * uint64_t(std::min(limits.maxStates, 11544u));
+  if (fullStorage > limits.maxBytes) {
+    auto result = detail::optimizeCliffordWindows(width, incumbent.rotations,
+                                                  options, limits, *generation,
+                                                  &incumbent.rotations);
+    if (options.diagnostics)
+      options.diagnostics->record(
+          {"clifford-windows-bounded", routeStatus(result), result.error, 0,
+           incumbent.rotations.size(), result.work, result.memoryBound});
+    return result.status == detail::CliffordWindowStatus::InvalidProof
+               ? result.error
+               : std::string{};
+  }
   const auto synthesized = incumbent.rotations;
   auto alternatives = detail::optimizeCliffordWindows(
       width, synthesized, options, limits, *generation);
+  if (options.diagnostics)
+    options.diagnostics->record(
+        {"clifford-windows", routeStatus(alternatives), alternatives.error,
+         synthesized.size(),
+         alternatives.alternatives.empty()
+             ? synthesized.size()
+             : alternatives.alternatives.front().gates().size(),
+         alternatives.work, alternatives.memoryBound});
   if (alternatives.status == detail::CliffordWindowStatus::InvalidProof)
     return alternatives.error;
   auto consider = [&](const std::vector<Gate> &word) {
     auto selection = explorationSlice(budget);
     const auto scoringWork = llvm::SaturatingMultiply<uint64_t>(
         8, uint64_t(width) + word.size() + incumbent.rotations.size() + 1);
-    if (!selection ||
-        !selection->take(llvm::SaturatingAdd<uint64_t>(
-            scoringWork, copyWork(word.size()))))
+    if (!selection || !selection->take(llvm::SaturatingAdd<uint64_t>(
+                          scoringWork, copyWork(word.size()))))
       return false;
     if (improvesWithoutRegression(width, word, incumbent.rotations, options))
       incumbent.rotations = word;
@@ -2691,10 +2818,8 @@ std::string tryCliffordNativeCompletion(unsigned width, const Options &options,
       break;
     if (!candidate.matchesSource(width, synthesized))
       return "Clifford completion belongs to a different synthesized source";
-    detail::NativeRefinementLimits nativeLimits;
-    nativeLimits.maxGates = options.maxGates;
-    nativeLimits.maxTemporaryGates =
-        std::max(nativeLimits.maxTemporaryGates, options.maxGates);
+    auto nativeLimits = detail::boundedNativeRefinementLimits(
+        options, candidate.gates().size());
     auto continuation = explorationSlice(budget, nativeLimits.maxWork);
     if (continuation) {
       auto completed = detail::refineSynthesizedNative(
@@ -2743,7 +2868,11 @@ std::string tryJointPhaseCompletion(const detail::MeasuredProblem &source,
   proofOptions.simplify = proofOptions.pruneUnobserved =
       proofOptions.acceptOnlyImprovement = false;
   detail::CompletionLimits completionLimits;
-  completionLimits.maxGates = options.maxGates;
+  // This optional provider has a fixed live-storage allowance. Increasing the
+  // whole-program gate cap must not inflate its reserved incumbent slot and
+  // disable completion for small sources.
+  completionLimits.maxGates =
+      std::min(options.maxGates, completionLimits.maxGates);
   completionLimits.maxWork = options.jointPhaseMaxWork;
   completionLimits.maxLiveBytes = 2ull << 30;
   completionLimits.rankedContinuation = true;
@@ -2767,6 +2896,10 @@ std::string tryJointPhaseCompletion(const detail::MeasuredProblem &source,
         options.jointPhaseAcceptance == JointPhaseAcceptance::GatesAndT
             ? detail::CompletionPolicy::GatesAndT
             : detail::CompletionPolicy::AllFive);
+    if (options.diagnostics && !session.originalRoute())
+      options.diagnostics->record({"joint-completion", "unavailable",
+                                   session.error(), source.rotations.size(), 0,
+                                   profileBudget.work()});
     auto run = [&](const detail::CompletionRouteHandle &route) -> std::string {
       if (!route || profileBudget.remaining() < 2 ||
           !detail::open_detail::hasTime(profileBudget))
@@ -2781,8 +2914,20 @@ std::string tryJointPhaseCompletion(const detail::MeasuredProblem &source,
       auto plans = detail::generateJointPhasePlans(
           route->problem(), proofOptions, limits, profileBudget,
           [&](const detail::RegionalPlan &plan, SearchBudget &scoring) {
-          return session.score(route, plan, scoring).rank;
+            return session.score(route, plan, scoring).rank;
           });
+      if (options.diagnostics) {
+        RouteEvent event{profile ? "joint-wide" : "joint-normal",
+                         routeStatus(plans),
+                         plans.error,
+                         source.rotations.size(),
+                         plans.candidates.size(),
+                         plans.work,
+                         plans.reservedLiveBytes};
+        event.logicalDependencies = plans.logicalDependencies;
+        event.storedConflicts = plans.storedDependencyConflicts;
+        options.diagnostics->record(std::move(event));
+      }
       if (plans.status == detail::OpenRegionStatus::InvalidProof)
         return plans.error;
       if (session.status() == detail::CompletionStatus::InvalidProof)
@@ -2834,13 +2979,268 @@ std::string tryJointPhaseCompletion(const detail::MeasuredProblem &source,
 
 } // namespace
 
+static Result synthesizeUnitaryWhole(unsigned width,
+                                     const std::vector<Gate> &input,
+                                     const Options &options,
+                                     SearchBudget *budget) {
+  auto invalid = [&](std::string error, SearchTermination status =
+                                            SearchTermination::InvalidProof) {
+    if (budget && budget->stopped() &&
+        status != SearchTermination::InvalidProof)
+      status = SearchTermination::Exhausted;
+    return detail::holdFailure(std::move(error), status);
+  };
+  if (auto error = invalidOptions(options); !error.empty())
+    return invalid(std::move(error), SearchTermination::Unsupported);
+  if (options.release || options.pruneUnobserved)
+    return invalid("hold synthesis cannot release or prune quantum outputs",
+                   SearchTermination::Unsupported);
+  if (input.size() > options.maxGates)
+    return invalid("hold synthesis input gate limit exceeded",
+                   SearchTermination::Unsupported);
+  SearchBudget unlimited(std::numeric_limits<uint64_t>::max());
+  SearchBudget &shared = budget ? *budget : unlimited;
+  auto normalized = pbc::normalizeUnitary(width, input, &shared);
+  if (!normalized)
+    return invalid(normalized.error, SearchTermination::Unsupported);
+  auto source = normalized.rotations;
+  source.insert(source.end(), normalized.frame.begin(), normalized.frame.end());
+  // Bind the lossless normalization to the actual input before any search or
+  // certificate composition. The independent replay has separate frame code.
+  uint64_t sourceSize = uint64_t(input.size()) + source.size() + 1;
+  uint64_t sourceProofWork = llvm::SaturatingAdd<uint64_t>(
+      llvm::SaturatingMultiply<uint64_t>(
+          3, llvm::SaturatingMultiply(sourceSize, sourceSize)),
+      llvm::SaturatingMultiply<uint64_t>(sourceSize,
+                                         uint64_t(width) * width + 1));
+  if (!shared.take(sourceProofWork))
+    return invalid("hold normalization replay work budget exhausted",
+                   SearchTermination::Exhausted);
+  if (!equivalent(width, input, source))
+    return invalid("hold normalization full-unitary replay failed");
+  Options quantum = options;
+  quantum.acceptOnlyImprovement = false;
+  quantum.nativeLocalCliffords = true;
+  // This imports a Pauli word and its full frame, then rebuilds BOTH networks.
+  // The original native circuit is never a search seed or cost incumbent.
+  auto best = synthesize(width, source, quantum, &shared);
+  if (!best) {
+    best.termination = best.stats.budgetExhausted
+                           ? SearchTermination::Exhausted
+                           : SearchTermination::InvalidProof;
+    return best;
+  }
+  const std::vector<Pauli> none;
+  const std::vector<unsigned> noReadouts;
+  detail::MeasuredProblem problem{width, normalized.rotations, none, noReadouts,
+                                  true};
+  std::string proofError;
+  auto complete = [&](const detail::RegionalPlan &plan,
+                      SearchBudget &work) -> std::optional<detail::CostRank> {
+    if (plan.prefix.size() > options.maxGates ||
+        plan.exitCliffords.size() > options.maxGates ||
+        normalized.frame.size() >
+            options.maxGates - plan.exitCliffords.size() ||
+        !work.take(plan.prefix.size() + plan.exitCliffords.size() +
+                   normalized.frame.size() + 1))
+      return std::nullopt;
+    // prefix = E*R, so the tail is F*inverse(E), in circuit order.
+    auto tail = tcount::detail::adjoint(plan.exitCliffords);
+    tail.insert(tail.end(), normalized.frame.begin(), normalized.frame.end());
+    auto completion = synthesize(width, tail, quantum, &work);
+    if (!completion ||
+        completion.gates.size() > options.maxGates - plan.prefix.size())
+      return std::nullopt;
+    auto word = plan.prefix;
+    word.insert(word.end(), completion.gates.begin(), completion.gates.end());
+    uint64_t size = uint64_t(source.size()) + word.size() + 1;
+    uint64_t replay = llvm::SaturatingAdd<uint64_t>(
+        llvm::SaturatingMultiply<uint64_t>(
+            3, llvm::SaturatingMultiply(size, size)),
+        llvm::SaturatingMultiply<uint64_t>(size, uint64_t(width) * width + 1));
+    if (!work.take(replay))
+      return std::nullopt;
+    if (!equivalent(width, source, word)) {
+      proofError = "hold synthesis full-unitary completion replay failed";
+      return std::nullopt;
+    }
+    auto rank = circuitScore(width, word, options);
+    if (tcount::cost(width, word).t <= tcount::cost(width, best.gates).t &&
+        rank < circuitScore(width, best.gates, options))
+      best.gates = std::move(word);
+    return rank;
+  };
+  auto admit = [&](const auto &plans) {
+    for (const auto &plan : plans.candidates) {
+      auto work = explorationSlice(shared);
+      if (!work)
+        break;
+      complete(plan, *work);
+      if (!proofError.empty())
+        break;
+    }
+  };
+  if (options.commutingCandidates) {
+    detail::RegionLimits limits;
+    limits.maxPlans = options.commutingCandidates;
+    // Boundary beam's readout scorer is release-specific. Hold uses the
+    // complete-frame scorer and the exact exit-carrying regional sweeps.
+    limits.beamWidth = 0;
+    if (auto work = explorationSlice(shared, limits.maxWork)) {
+      auto plans =
+          detail::generateRegionCandidates(problem, quantum, limits, *work);
+      if (plans.status == detail::RegionStatus::InvalidProof)
+        return invalid(plans.error);
+      admit(plans);
+    }
+    detail::GeneralLimits general;
+    general.maxPlans = std::min(options.commutingCandidates, 2u);
+    for (bool macros : {false, true}) {
+      general.useMacros = macros;
+      if (auto work = explorationSlice(shared, general.maxWork)) {
+        auto plans =
+            detail::generateGeneralCandidates(problem, quantum, general, *work);
+        if (plans.status == detail::RegionStatus::InvalidProof)
+          return invalid(plans.error);
+        admit(plans);
+      }
+    }
+    detail::OpenRegionLimits open;
+    open.maxPlans = std::min(options.commutingCandidates, 4u);
+    if (auto work = explorationSlice(shared, open.maxWork)) {
+      auto plans =
+          detail::generateOpenRegionCandidates(problem, quantum, open, *work);
+      if (plans.status == detail::OpenRegionStatus::InvalidProof)
+        return invalid(plans.error);
+      admit(plans);
+    }
+  }
+  if (options.jointPhaseCandidates) {
+    const unsigned profiles = options.jointPhaseWideSearch ? 2 : 1;
+    SearchBudget joint(shared,
+                       std::min(shared.remaining(), options.jointPhaseMaxWork),
+                       options.jointPhaseTimeoutMs);
+    for (unsigned profile = 0; profile < profiles; ++profile) {
+      detail::JointPhasePlannerLimits limits;
+      limits.maxPlans = options.jointPhaseCandidates;
+      limits.maxWork = profile ? 10000000000ull : options.jointPhasePlannerWork;
+      limits.maxExpansions = profile ? 16384 : 4096;
+      limits.contextScoring = false;
+      auto plans = detail::generateJointPhasePlans(problem, quantum, limits,
+                                                   joint, complete);
+      if (plans.status == detail::OpenRegionStatus::InvalidProof)
+        return invalid(plans.error);
+      for (const auto &plan : plans.candidates)
+        complete(plan, joint);
+    }
+  }
+  if (!proofError.empty())
+    return invalid(proofError);
+  // These source-bound certificates preserve exact unitary and phase; their
+  // algebra can exceed the restricted rotation-word matcher's identities.
+  if (!detail::refineHoldNative(width, best, quantum, shared))
+    return best;
+  if (options.algebraicCandidates && !shared.stopped()) {
+    pbc::Result incumbent{best.gates, {}, {}};
+    if (auto error = tryNativeRefinement(width, quantum, shared, incumbent);
+        !error.empty())
+      return invalid(error);
+    if (auto error = tryFourWireRefinement(width, quantum, shared, incumbent);
+        !error.empty())
+      return invalid(error);
+    if (auto error =
+            tryCliffordNativeCompletion(width, quantum, shared, incumbent);
+        !error.empty())
+      return invalid(error);
+    best.gates = std::move(incumbent.rotations);
+  }
+  return best;
+}
+
+Result cudaq::pauli::graph::synthesizeUnitary(unsigned width,
+                                              const std::vector<Gate> &input,
+                                              const Options &options,
+                                              SearchBudget *budget) {
+  if (auto error = invalidOptions(options); !error.empty())
+    return detail::holdFailure(std::move(error),
+                               SearchTermination::Unsupported);
+  if (options.release || options.pruneUnobserved)
+    return detail::holdFailure(
+        "hold synthesis cannot release or prune quantum outputs",
+        SearchTermination::Unsupported);
+  if (!width || !options.maxGates || !options.maxDependencies ||
+      input.size() > options.maxGates)
+    return detail::holdFailure("hold synthesis input gate/width limit exceeded",
+                               SearchTermination::Unsupported);
+  SearchBudget unlimited(std::numeric_limits<uint64_t>::max());
+  SearchBudget &shared = budget ? *budget : unlimited;
+  if (!shared.take(llvm::SaturatingMultiply<uint64_t>(
+          input.size() + 1, uint64_t(width) / 64 + 1)))
+    return detail::holdFailure("hold synthesis input work budget exhausted",
+                               SearchTermination::Exhausted);
+  if (!validCircuit(width, input))
+    return detail::holdFailure("invalid hold synthesis source",
+                               SearchTermination::Unsupported);
+  if (!options.holdCheckpoints || input.empty())
+    return synthesizeUnitaryWhole(width, input, options, &shared);
+  return detail::synthesizeHoldPortfolio(width, input, options, shared,
+                                         synthesizeUnitaryWhole);
+}
+
 pbc::Result cudaq::pauli::graph::synthesizeMeasured(
     unsigned width, const std::vector<Gate> &input,
     const std::vector<Pauli> &observables,
     const std::vector<unsigned> &readoutWires, const Options &options,
-    SearchBudget *budget) {
+    SearchBudget *budget, SearchTermination *termination,
+    const std::vector<Gate> *incoming,
+    JointPhaseAcceptance incomingAcceptance) {
+  if (termination)
+    *termination = SearchTermination::Complete;
+  auto invalid = [&](std::string error) {
+    if (termination)
+      *termination = SearchTermination::InvalidProof;
+    return pbc::Result{{}, {}, std::move(error)};
+  };
   SearchBudget unlimited(std::numeric_limits<uint64_t>::max());
   SearchBudget &shared = budget ? *budget : unlimited;
+  std::optional<pbc::Result> anchor;
+  if (incoming) {
+    if (!width || observables.size() != readoutWires.size() ||
+        std::any_of(readoutWires.begin(), readoutWires.end(),
+                    [&](unsigned wire) { return wire >= width; }))
+      return invalid(
+          "incoming synthesis candidate has invalid readout identities");
+    std::vector<Pauli> outcomes;
+    for (unsigned wire : readoutWires)
+      outcomes.push_back(single(2, wire));
+    if (!validCircuit(width, *incoming) ||
+        incoming->size() > options.maxGates ||
+        std::any_of(incoming->begin(), incoming->end(), [&](const Gate &gate) {
+          return (gate.kind == Kind::CX && !options.nativeCX) ||
+                 (gate.kind == Kind::CZ && !options.nativeCZ) ||
+                 (gate.kind == Kind::Swap && !options.nativeSwap);
+        }))
+      return invalid(
+          "incoming synthesis candidate violates source/basis limits");
+    if (!equivalentMeasured(width, input, observables, *incoming, outcomes,
+                            false, &shared)) {
+      if (shared.stopped()) {
+        if (termination)
+          *termination = SearchTermination::Exhausted;
+        return {{}, {}, "incoming source binding budget exhausted"};
+      }
+      return invalid(
+          "incoming synthesis candidate belongs to a different source");
+    }
+    anchor = pbc::Result{*incoming, std::move(outcomes), {}};
+    if (options.diagnostics)
+      options.diagnostics->record({"incoming-anchor",
+                                   "verified",
+                                   {},
+                                   input.size(),
+                                   incoming->size(),
+                                   shared.work()});
+  }
   std::optional<SearchBudget> legacyBudget;
   if (options.legacyPortfolioTimeoutMs) {
     uint64_t allowance = shared.remaining();
@@ -2849,30 +3249,70 @@ pbc::Result cudaq::pauli::graph::synthesizeMeasured(
     legacyBudget.emplace(shared, allowance, options.legacyPortfolioTimeoutMs);
   }
   SearchBudget &legacy = legacyBudget ? *legacyBudget : shared;
-  auto result = runMeasuredPortfolio(width, input, observables, readoutWires,
-                                     options, &legacy);
+  auto result = runMeasuredPortfolio(
+      width, input, observables, readoutWires, options, &legacy, termination,
+      anchor ? &*anchor : nullptr, incomingAcceptance);
+  if (options.diagnostics)
+    options.diagnostics->record(
+        {"legacy-portfolio",
+         result ? (legacy.stopped() ? "complete-with-local-exhaustion"
+                                    : "complete")
+                : "failed",
+         result.error, input.size(), result.rotations.size(), legacy.work()});
   if (result && options.algebraicCandidates && !legacy.stopped())
     if (auto error = tryFourWireRefinement(width, options, legacy, result);
         !error.empty())
-      return {{}, {}, std::move(error)};
+      return invalid(std::move(error));
   if (result && options.indexedRepresentationSteps && !legacy.stopped())
     if (auto error = tryIndexedRepresentation(
             {width, input, observables, readoutWires}, options, legacy, result);
         !error.empty())
-      return {{}, {}, std::move(error)};
+      return invalid(std::move(error));
   if (result && options.algebraicCandidates && !legacy.stopped())
     if (auto error = tryNativeFourCompletion(width, options, legacy, result);
         !error.empty())
-      return {{}, {}, std::move(error)};
+      return invalid(std::move(error));
   if (result && options.algebraicCandidates && !legacy.stopped())
     if (auto error =
             tryCliffordNativeCompletion(width, options, legacy, result);
         !error.empty())
-      return {{}, {}, std::move(error)};
+      return invalid(std::move(error));
   if (result && options.jointPhaseCandidates && !shared.stopped())
     if (auto error = tryJointPhaseCompletion(
             {width, input, observables, readoutWires}, options, shared, result);
         !error.empty())
-      return {{}, {}, std::move(error)};
+      return invalid(std::move(error));
+  if (result && anchor) {
+    auto cost = tcount::cost(width, result.rotations);
+    auto floor = tcount::cost(width, anchor->rotations);
+    bool admissible =
+        cost.gates <= floor.gates && cost.t <= floor.t &&
+        (incomingAcceptance == JointPhaseAcceptance::GatesAndT ||
+         (cost.twoQubit <= floor.twoQubit && cost.depth <= floor.depth &&
+          cost.tDepth <= floor.tDepth));
+    if (!admissible || !(circuitScore(width, result.rotations, options) <
+                         circuitScore(width, anchor->rotations, options)))
+      return std::move(*anchor);
+  }
   return result;
+}
+
+// A public binding check for callers that retain a native incoming candidate.
+bool cudaq::pauli::graph::verifyMeasured(unsigned width,
+                                         const std::vector<Gate> &input,
+                                         const std::vector<Pauli> &observables,
+                                         const std::vector<Gate> &output,
+                                         const std::vector<Pauli> &outcomes,
+                                         SearchBudget *budget) {
+  if (!validCircuit(width, input) || !validCircuit(width, output) ||
+      observables.size() != outcomes.size())
+    return false;
+  for (const auto &word : observables)
+    if (!word.x.fits(width) || !word.z.fits(width))
+      return false;
+  for (const auto &word : outcomes)
+    if (!word.x.fits(width) || !word.z.fits(width))
+      return false;
+  return equivalentMeasured(width, input, observables, output, outcomes, false,
+                            budget);
 }

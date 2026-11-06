@@ -116,7 +116,7 @@ generateGeneralCandidates(const MeasuredProblem &source, const Options &options,
   if (!source.width || !options.maxGates || !options.maxDependencies ||
       source.rotations.size() > options.maxGates || !limits.maxPlans ||
       !limits.maxActiveWires || !limits.maxRegionRotations ||
-      source.observables.empty() ||
+      (!source.unitary && source.observables.empty()) ||
       source.observables.size() != source.readoutWires.size() ||
       (!options.nativeCX && !options.nativeCZ) ||
       static_cast<unsigned>(options.objective) >

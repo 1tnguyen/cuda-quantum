@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #include "Pauli/SynthesisCliffordWindows.h"
+#include "Pauli/SynthesisNativeRefinement.h"
 #include "gtest/gtest.h"
 #include <complex>
 #include <numbers>
@@ -15,6 +16,44 @@
 using namespace cudaq::pauli;
 using namespace cudaq::pauli::graph;
 using namespace cudaq::pauli::graph::detail;
+
+TEST(SynthesisCliffordWindows, WholeProgramCapacityKeepsLocalMemoryAdmission) {
+  const std::vector<Gate> word{{Kind::CX, 0, 1}, {Kind::CX, 0, 1}};
+  for (unsigned capacity : {262144u, 200000000u}) {
+    Options options;
+    options.maxGates = capacity;
+    CliffordWindowLimits limits;
+    limits.maxGates = nativeContinuationGateLimit(options, word.size());
+    SearchBudget budget(100000000);
+    auto result = optimizeCliffordWindows(2, word, options, limits, budget);
+    ASSERT_NE(result.status, CliffordWindowStatus::InvalidProof)
+        << result.error;
+    EXPECT_LE(result.memoryBound, limits.maxBytes);
+    EXPECT_GT(result.windowsChecked, 0u);
+  }
+}
+
+TEST(SynthesisCliffordWindows, BoundedBorrowedCleanupKeepsItsSourceBuffer) {
+  std::vector<Gate> word(20000, Gate{Kind::CX, 0, 1});
+  const auto source = word;
+  auto *buffer = word.data();
+  Options options;
+  CliffordWindowLimits limits;
+  limits.maxGates = 200000000;
+  limits.maxBytes = 8ull << 20;
+  limits.maxRewrites = 4;
+  SearchBudget budget(100000000);
+  auto result =
+      optimizeCliffordWindows(2, word, options, limits, budget, &word);
+  ASSERT_NE(result.status, CliffordWindowStatus::InvalidProof) << result.error;
+  EXPECT_EQ(result.rewrites, 4u);
+  EXPECT_EQ(word.size(), source.size() - 8);
+  EXPECT_EQ(word.data(), buffer);
+  EXPECT_LE(result.memoryBound, limits.maxBytes);
+  EXPECT_TRUE(result.alternatives.empty());
+  EXPECT_TRUE(graph::equivalent(2, source, word));
+  EXPECT_FALSE(budget.stopped());
+}
 
 namespace {
 using Complex = std::complex<double>;

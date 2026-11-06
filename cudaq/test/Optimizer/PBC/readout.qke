@@ -6,9 +6,9 @@
 // the terms of the Apache License 2.0 which accompanies this distribution.    //
 // ========================================================================== //
 
-// RUN: cudaq-opt %s --quake-to-pbc --quake-lower-pbc --verify-each | FileCheck %s
-// RUN: cudaq-opt %s --quake-to-pbc --quake-lower-pbc --codegen-for-qir='convert-to=qir-base value-semantics=true' --verify-each | FileCheck %s --check-prefix=QIR
-// RUN: cudaq-opt %s --quake-to-pbc --quake-lower-pbc --add-wireset --assign-wire-indices --qubit-mapping='device=path(2) placement=identity search=none' --verify-each -o /dev/null
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release' --quake-lower-pbc --verify-each | FileCheck %s
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release' --quake-lower-pbc --codegen-for-qir='convert-to=qir-base value-semantics=true' --verify-each | FileCheck %s --check-prefix=QIR
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release' --quake-lower-pbc --add-wireset --assign-wire-indices --qubit-mapping='device=path(2) placement=identity search=none' --verify-each -o /dev/null
 
 // The target's transformed observable is ZZ. Reading its lowest-index support
 // would measure q0 twice, changing implicit sample output as well as placement.

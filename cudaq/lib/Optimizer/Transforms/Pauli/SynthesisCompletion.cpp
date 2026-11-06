@@ -81,6 +81,7 @@ struct CompletionSession::Impl {
   CompletionStatus status = CompletionStatus::Complete;
   std::string error;
   uint64_t ownedBytes = 0;
+  unsigned maxSourceGates = 0;
   std::vector<CompletionRouteHandle> routes;
   std::vector<Entry> cache;
   std::optional<CertifiedCompletion> best;
@@ -103,6 +104,7 @@ CompletionSession::CompletionSession(const MeasuredProblem &source,
     : impl(std::make_unique<Impl>()) {
   auto &p = *impl;
   p.options = options;
+  p.maxSourceGates = options.maxGates;
   p.options.pruneUnobserved = false;
   p.limits = limits;
   p.policy = policy;
@@ -117,8 +119,7 @@ CompletionSession::CompletionSession(const MeasuredProblem &source,
     p.error = message;
   };
   if (!source.width || source.width > std::min(limits.maxWidth, 4096u) ||
-      source.rotations.size() > 32768 ||
-      source.rotations.size() > p.options.maxGates ||
+      source.rotations.size() > p.maxSourceGates ||
       source.observables.size() > 4096 || !p.limits.maxRoutes ||
       !p.limits.maxPlans || !p.options.maxGates ||
       (!options.nativeCX && !options.nativeCZ) ||
@@ -188,7 +189,8 @@ CompletionSession::checkIndexedRoute(const RepresentationAlternative &proposal,
   const auto &root = p.routes.front()->original;
   MeasuredProblem alternate{proposal.width, proposal.rotations,
                             proposal.observables, proposal.readoutWires};
-  if (proposal.width != root->width || proposal.rotations.size() > 32768 ||
+  if (proposal.width != root->width ||
+      proposal.rotations.size() > p.maxSourceGates ||
       proposal.observables.size() > 4096 ||
       proposal.certificate.size() > 4096 || !cd::boundedRows(alternate)) {
     p.fatal("indexed completion route has invalid source/storage binding");
@@ -296,9 +298,14 @@ CompletionResult CompletionSession::runCompletion(
   const uint64_t dictionaryBytes = p.limits.enableFour ? 64ull << 20 : 0;
   if (scratchBytes <= dictionaryBytes)
     return exhausted("completion continuation scratch cap");
+  // Whole-program capacity is not an allocation request for this bounded
+  // provider. Keep its established scratch allowance when a larger program
+  // cap is needed by other routes.
+  const unsigned temporaryGateCap =
+      std::min(p.options.maxGates, NativeRefinementLimits{}.maxTemporaryGates);
   const uint64_t temporaryBytes =
       p.limits.rankedContinuation && p.limits.enableNative
-          ? cd::multiply(8 * uint64_t(p.options.maxGates), rows)
+          ? cd::multiply(8 * uint64_t(temporaryGateCap), rows)
           : 0;
   const bool temporaryFunded = temporaryBytes < scratchBytes - dictionaryBytes;
   // Include simultaneously retained provider alternatives, source copies,
@@ -569,7 +576,7 @@ CompletionResult CompletionSession::runCompletion(
         NativeRefinementLimits limits;
         limits.maxGates = providerGateCap;
         limits.maxTemporaryGates =
-            p.limits.rankedContinuation ? p.options.maxGates : providerGateCap;
+            p.limits.rankedContinuation ? temporaryGateCap : providerGateCap;
         limits.maxCandidates = p.limits.maxNativeCandidates;
         limits.maxWork = p.limits.nativeWork;
         ++result.nativeSources;

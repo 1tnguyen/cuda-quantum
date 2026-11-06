@@ -1,0 +1,42 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+// This source code is licensed under the Apache License 2.0 which accompanies //
+// this distribution.                                                        //
+// ========================================================================== //
+
+// RUN: cudaq-opt %s --quake-to-pbc --quake-verify-pbc --quake-synthesize-pbc='synthesis-discrepancy-steps=0 synthesis-commuting-candidates=2 synthesis-joint-phase-candidates=2' --verify-each | FileCheck %s
+// RUN: cudaq-opt %s --quake-to-pbc --quake-verify-pbc --quake-lower-pbc --verify-each | FileCheck %s
+// RUN: not cudaq-opt %s --quake-to-pbc='semantics=release' 2>&1 | FileCheck %s --check-prefix=RELEASE
+
+func.func @live(%a: !quake.wire, %b: !quake.wire) -> (!quake.wire, !quake.wire) {
+  %h = quake.h %a : (!quake.wire) -> !quake.wire
+  %t = quake.t %h : (!quake.wire) -> !quake.wire
+  %s:2 = quake.swap %t, %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+  return %s#0, %s#1 : !quake.wire, !quake.wire
+}
+
+func.func @scalar(%q: !quake.wire) -> !quake.wire {
+  %pi = arith.constant 3.141592653589793 : f64
+  %r = quake.exp_pauli (%pi) %q to "I" : (f64, !quake.wire) -> !quake.wire {quake.pbc_angle = array<i64: 1, 1>}
+  return %r : !quake.wire
+}
+
+func.func @live_measurement(%q: !quake.wire) -> (!quake.measure, !quake.wire) {
+  %s = quake.s %q : (!quake.wire) -> !quake.wire
+  %m, %r = quake.my %s name "live" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  return %m, %r : !quake.measure, !quake.wire
+}
+
+// CHECK-LABEL: func.func @live
+// CHECK-SAME: quake.pbc_semantics = "hold"
+// CHECK: quake.t
+// CHECK: return {{.*}} : !quake.wire, !quake.wire
+// CHECK-LABEL: func.func @scalar
+// CHECK: quake.phase
+// CHECK-NOT: quake.exp_pauli
+// CHECK: return {{.*}} : !quake.wire
+// CHECK-LABEL: func.func @live_measurement
+// CHECK: quake.my {{.*}} name "live"
+// CHECK: return {{.*}} : !quake.measure, !quake.wire
+// RELEASE: PBC does not permit escaping quantum outputs

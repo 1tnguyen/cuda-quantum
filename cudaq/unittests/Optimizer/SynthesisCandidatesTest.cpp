@@ -47,6 +47,34 @@ TEST(SynthesisCandidates, PhysicalReadoutOrderIsPartOfContract) {
   ASSERT_TRUE(sink.takeBest());
 }
 
+TEST(SynthesisCandidates, ExactWordReplayStillRequiresTheTerminalFrame) {
+  std::vector<Gate> rotations, native;
+  for (unsigned i = 0; i < 128; ++i) {
+    rotations.push_back(Gate::rotation({1, 0}, {1, 4}));
+    rotations.push_back(Gate::rotation({0, 1}, {1, 4}));
+    native.push_back({Kind::H, 0});
+    native.push_back(Gate::rotation({0, 1}, {1, 4}));
+    native.push_back({Kind::H, 0});
+    native.push_back(Gate::rotation({0, 1}, {1, 4}));
+  }
+  const std::vector<Pauli> measured{{0, 1}};
+  const std::vector<unsigned> wires{0};
+  synthesis::Options options;
+  SearchBudget goodBudget(100000000);
+  local::MeasuredCandidateSink good({1, rotations, measured, wires}, options,
+                                    &goodBudget);
+  EXPECT_EQ(good.submit(native).status, local::SubmissionStatus::Verified);
+  EXPECT_TRUE(good.takeBest());
+  // The rotation word is unchanged, but this trailing Clifford changes the
+  // measured observable. Equality of rotation words alone is insufficient.
+  native.push_back({Kind::H, 0});
+  SearchBudget badBudget(100000000);
+  local::MeasuredCandidateSink bad({1, rotations, measured, wires}, options,
+                                   &badBudget);
+  EXPECT_EQ(bad.submit(native).status, local::SubmissionStatus::InvalidProof);
+  EXPECT_FALSE(bad.takeBest());
+}
+
 TEST(SynthesisCandidates, ProofExhaustionCannotPublishPartialCandidate) {
   const std::vector<Gate> rotations;
   const std::vector<Pauli> measured{{0, 1}};

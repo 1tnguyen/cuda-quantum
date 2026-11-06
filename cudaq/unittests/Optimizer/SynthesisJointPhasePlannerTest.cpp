@@ -241,6 +241,28 @@ TEST(SynthesisJointPhasePlanner, StorageAndMalformedInputFailTransactionally) {
   EXPECT_TRUE(bad.candidates.empty());
 }
 
+TEST(SynthesisJointPhasePlanner, LargeSparseSourceReachesRegionalSearch) {
+  const std::vector<Gate> word(40000, Gate::rotation({0, 1}, {1, 4}));
+  const std::vector<Pauli> observables{{0, 1}};
+  const std::vector<unsigned> readouts{0};
+  Options options;
+  options.maxGates = 2000000;
+  options.maxDependencies = 1000000000000ull;
+  JointPhasePlannerLimits limits;
+  limits.maxExpansions = 1;
+  limits.beamWidth = 0;
+  SearchBudget budget(2000000000);
+  auto result = generateJointPhasePlans({2, word, observables, readouts},
+                                        options, limits, budget);
+  EXPECT_TRUE(result.greedyMemory.admitted) << result.error;
+  EXPECT_GT(result.packetsSolved + result.fallbackPackets, 0u) << result.error;
+  EXPECT_EQ(result.logicalDependencies, 0u);
+  EXPECT_EQ(result.storedDependencyConflicts, 0u);
+  EXPECT_LT(result.dependencyStorageBytes, 2ull << 20);
+  EXPECT_LE(result.reservedLiveBytes, limits.maxLiveBytes);
+  EXPECT_FALSE(budget.stopped());
+}
+
 TEST(SynthesisJointPhasePlanner, ContextRankIncludesSignedFixedWireReadout) {
   SearchBudget budget(1000000);
   bool invalid = false;

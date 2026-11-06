@@ -70,6 +70,27 @@ TEST(SynthesisCompletion, CertificatesCannotBeDefaultConstructed) {
   static_assert(!std::is_copy_constructible_v<CompletionRoute>);
 }
 
+TEST(SynthesisCompletion, WholeProgramCapacityDoesNotDisableNativeRefinement) {
+  for (unsigned gateCap : {262144u, 200000000u}) {
+    Fixture f;
+    f.options.maxGates = f.limits.maxGates = gateCap;
+    f.limits.rankedContinuation = true;
+    f.limits.enableNative = true;
+    f.limits.maxNativeCandidates = 1;
+    // Fund the independently configured retained-word capacity so this checks
+    // the temporary provider allowance rather than session construction.
+    f.limits.maxLiveBytes = 256ull << 30;
+    SearchBudget budget(10000000000ULL);
+    CompletionSession session(f.source(), f.options, f.anchor, f.rank, f.limits,
+                              budget);
+    auto result = session.complete(session.originalRoute(), f.plan(), budget);
+    ASSERT_NE(result.status, CompletionStatus::InvalidProof) << result.error;
+    EXPECT_EQ(result.nativeSources, 1u);
+    ASSERT_NE(session.best(), nullptr);
+    expectOrderedEffects(*session.best(), f);
+  }
+}
+
 TEST(SynthesisCompletion, EveryCheckedStageOfferedWithoutVisitorDependency) {
   Fixture f;
   SearchBudget budget(100000000);
@@ -216,6 +237,19 @@ TEST(SynthesisCompletion, CrossSessionRouteAndInvalidProofAreFatal) {
   EXPECT_EQ(session.best(), nullptr);
   EXPECT_EQ(session.complete(session.originalRoute(), f.plan(), budget).status,
             CompletionStatus::InvalidProof);
+}
+
+TEST(SynthesisCompletion, SourceBindingIsIndependentOfTheOutputGateCap) {
+  Fixture f;
+  f.rotations.assign(40000, Gate::rotation({0, 1}, {1, 4}));
+  f.limits.maxGates = 16;
+  f.options.maxGates = 2000000;
+  SearchBudget budget(1000000000);
+  CompletionSession session(f.source(), f.options, f.anchor, f.rank, f.limits,
+                            budget);
+  ASSERT_EQ(session.status(), CompletionStatus::Complete) << session.error();
+  ASSERT_NE(session.originalRoute(), nullptr);
+  EXPECT_EQ(session.originalRoute()->problem().rotations.size(), 40000u);
 }
 
 TEST(SynthesisCompletion, CheckedIndexedFlipComposesWithMeasuredCompletion) {
@@ -374,11 +408,13 @@ TEST(SynthesisCompletion, StorageAndIgnoredOperandPayloadsAreBounded) {
   f.rotations = {Gate::rotation({{}, 1}, {1, 4}),
                  Gate::rotation({{}, 1}, {1, 4})};
   f.limits.maxGates = 1;
+  f.options.maxGates = 1;
   CompletionSession sourceTooLarge(f.source(), f.options, f.anchor, f.rank,
                                    f.limits, budget);
   EXPECT_EQ(sourceTooLarge.status(), CompletionStatus::Unsupported);
   EXPECT_FALSE(sourceTooLarge.originalRoute());
   f.rotations.clear();
+  f.options.maxGates = 128;
   f.limits.maxGates = 128;
   f.limits.maxLiveBytes = 1;
   CompletionSession tiny(f.source(), f.options, f.anchor, f.rank, f.limits,

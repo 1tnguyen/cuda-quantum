@@ -14,14 +14,14 @@
 /// unit tests also compare operation identities and pipeline continuation.
 //===----------------------------------------------------------------------===//
 
-// RUN: cudaq-opt %s --quake-try-pbc='graph-synthesis=false' | FileCheck %s
+// RUN: cudaq-opt %s --quake-try-pbc='semantics=release graph-synthesis=false' | FileCheck %s
 // RUN: cudaq-opt %s > %t.original
-// RUN: cudaq-opt %s --quake-try-pbc='max-work=1' > %t.budget
+// RUN: cudaq-opt %s --quake-try-pbc='semantics=release max-work=1' > %t.budget
 // RUN: diff %t.original %t.budget
-// RUN: cudaq-opt %s --quake-try-pbc='max-operations=1' > %t.size
+// RUN: cudaq-opt %s --quake-try-pbc='semantics=release max-operations=1' > %t.size
 // RUN: diff %t.original %t.size
-// RUN: cudaq-opt %s --quake-try-pbc='emit-remarks=true' 2>&1 | FileCheck %s --check-prefix=REMARK
-// RUN: not cudaq-opt %s --quake-try-pbc='max-operations=0' 2>&1 | FileCheck %s --check-prefix=INVALID
+// RUN: cudaq-opt %s --quake-try-pbc='semantics=release emit-remarks=true' 2>&1 | FileCheck %s --check-prefix=REMARK
+// RUN: not cudaq-opt %s --quake-try-pbc='semantics=release max-operations=0' 2>&1 | FileCheck %s --check-prefix=INVALID
 
 func.func @improve(%q: !quake.wire) -> !quake.measure {
   %h = quake.h %q : (!quake.wire) -> !quake.wire

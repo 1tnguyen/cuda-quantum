@@ -90,6 +90,11 @@ public:
   }
   explicit operator bool() const { return !bits.isZero(); }
   unsigned count() const { return bits.popcount(); }
+  /// Owned payload, including APInt's out-of-line limbs when present.
+  uint64_t storageBytes() const {
+    return sizeof(QubitSet) +
+           (bits.getBitWidth() > 64 ? uint64_t(bits.getNumWords()) * 8 : 0);
+  }
   unsigned intersectionCount(const QubitSet &rhs) const {
     auto left = bits.getRawData(), right = rhs.bits.getRawData();
     unsigned count = 0;

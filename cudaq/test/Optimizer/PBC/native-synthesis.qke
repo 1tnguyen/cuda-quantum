@@ -1,0 +1,66 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                         //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.    //
+// ========================================================================== //
+
+// RUN: cudaq-opt %s --quake-synthesize-pbc='semantics=release native-input=true max-work=1' | FileCheck %s --check-prefix=FALLBACK
+// RUN: cudaq-opt %s --quake-synthesize-pbc='semantics=release native-input=true max-gates=1' | FileCheck %s --check-prefix=SIZE
+// RUN: cudaq-opt %s --quake-synthesize-pbc='semantics=release native-input=true' | FileCheck %s --check-prefix=IMPROVE
+// RUN: cudaq-opt %s --quake-synthesize-pbc='semantics=release native-input=true assume-measure-all=true max-work=1' | FileCheck %s --check-prefix=ASSUME
+// RUN: not cudaq-opt %s --quake-synthesize-pbc='native-input=true' 2>&1 | FileCheck %s --check-prefix=HOLD
+// RUN: not cudaq-opt %s --quake-synthesize-pbc='semantics=release native-input=true native-acceptance=unknown' 2>&1 | FileCheck %s --check-prefix=POLICY
+
+// Preserve the arbitrary quantum input and the ordered named measurement.
+// The incoming candidate is retained before normalization consumes any budget.
+func.func @incoming_floor(%q: !quake.wire) -> !quake.measure {
+  %t = quake.t %q : (!quake.wire) -> !quake.wire
+  %u = quake.t %t : (!quake.wire) -> !quake.wire
+  %m, %end = quake.mz %u name "answer" : (!quake.wire) -> (!quake.measure, !quake.wire)
+  quake.sink %end : !quake.wire
+  return %m : !quake.measure
+}
+
+func.func @implicit_readouts(%q: !quake.wire) {
+  %t = quake.t %q : (!quake.wire) -> !quake.wire
+  %u = quake.t %t : (!quake.wire) -> !quake.wire
+  quake.sink %u : !quake.wire
+  return
+}
+
+// FALLBACK-LABEL: func.func @incoming_floor
+// FALLBACK-SAME: pbc.synthesis_selected = "incoming"
+// FALLBACK-COUNT-2: quake.t
+// FALLBACK: quake.mz
+// FALLBACK-SAME: name "answer"
+// FALLBACK: return
+// FALLBACK-LABEL: func.func @implicit_readouts
+// FALLBACK-NOT: quake.mz
+// FALLBACK: quake.sink
+// FALLBACK: return
+
+// SIZE-LABEL: func.func @incoming_floor
+// SIZE-SAME: pbc.synthesis_reason = "native source exceeds exploration gate limit"
+// SIZE-SAME: pbc.synthesis_selected = "incoming"
+// SIZE-COUNT-2: quake.t
+// SIZE: quake.mz
+// SIZE-SAME: name "answer"
+
+// IMPROVE-LABEL: func.func @incoming_floor
+// IMPROVE-SAME: pbc.synthesis_selected = "synthesized"
+// IMPROVE-NOT: quake.t
+// IMPROVE: quake.mz
+// IMPROVE-SAME: name "answer"
+// IMPROVE: return
+
+// ASSUME-LABEL: func.func @implicit_readouts
+// ASSUME-SAME: pbc.synthesis_selected = "incoming"
+// ASSUME-COUNT-2: quake.t
+// ASSUME: quake.mz
+// ASSUME: quake.sink
+// ASSUME: return
+
+// HOLD: native-input currently requires semantics=release
+// POLICY: native-acceptance must be all-metrics or gates-and-t

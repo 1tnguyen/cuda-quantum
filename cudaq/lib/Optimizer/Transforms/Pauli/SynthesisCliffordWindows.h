@@ -39,7 +39,8 @@ enum class CliffordWindowStatus {
 struct CliffordWindowResult;
 CliffordWindowResult
 optimizeCliffordWindows(unsigned, const std::vector<Gate> &, const Options &,
-                        const CliffordWindowLimits &, SearchBudget &);
+                        const CliffordWindowLimits &, SearchBudget &,
+                        std::vector<Gate> *inPlace = nullptr);
 
 namespace clifford_window_detail {
 inline bool sameWord(const std::vector<Gate> &a, const std::vector<Gate> &b) {
@@ -157,7 +158,8 @@ public:
 private:
   friend CliffordWindowResult
   optimizeCliffordWindows(unsigned, const std::vector<Gate> &, const Options &,
-                          const CliffordWindowLimits &, SearchBudget &);
+                          const CliffordWindowLimits &, SearchBudget &,
+                          std::vector<Gate> *);
   CertifiedCliffordWindow(
       std::shared_ptr<const clifford_window_detail::Source> origin,
       std::vector<Gate> word)
@@ -174,6 +176,7 @@ struct CliffordWindowResult {
   std::string error;
   uint64_t work = 0, windowsChecked = 0, commutationChecks = 0;
   uint64_t memoryBound = 0;
+  unsigned costRejections = 0;
   unsigned rewrites = 0, mapStates = 0, proofChecks = 0;
 };
 
@@ -181,7 +184,7 @@ inline CliffordWindowResult
 optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
                         const Options &options,
                         const CliffordWindowLimits &limits,
-                        SearchBudget &shared) {
+                        SearchBudget &shared, std::vector<Gate> *inPlace) {
   namespace lw = clifford_window_detail;
   CliffordWindowResult result;
   uint64_t initialWork = shared.work();
@@ -191,6 +194,8 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
     result.work = shared.work() - initialWork;
     return result;
   };
+  if (inPlace && inPlace != &synthesized)
+    return unsupported("in-place Clifford source must be the retained word");
   if (!width || width > 4096 || !limits.maxLookahead || !limits.maxWireSets ||
       !limits.maxSelectedGates || !limits.maxRewrites || !limits.maxGates ||
       !limits.maxStates || synthesized.size() > limits.maxGates ||
@@ -215,10 +220,13 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
     return false;
   };
   std::shared_ptr<const lw::Source> origin;
-  std::vector<Gate> current;
+  std::vector<Gate> ownedCurrent;
+  auto &current = inPlace ? *inPlace : ownedCurrent;
   auto finish = [&]() {
     result.work = budget.work();
-    if (result.rewrites &&
+    if (result.rewrites && result.status == CliffordWindowStatus::Unchanged)
+      result.status = CliffordWindowStatus::Complete;
+    if (!inPlace && result.rewrites &&
         result.status != CliffordWindowStatus::InvalidProof) {
       result.alternatives.push_back(
           CertifiedCliffordWindow(origin, std::move(current)));
@@ -242,7 +250,15 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
   // Node allowance includes implementation overhead; state/queue cardinalities
   // remain capped independently. Width bounds both dynamically stored axes.
   const uint64_t gateBytes = sizeof(Gate) + 16 * limbs;
-  result.memoryBound = (8 * uint64_t(limits.maxGates) + 1024) * gateBytes +
+  // The borrowed mode updates an already owned, certified incumbent. It
+  // retains only local patch/undo storage; the existing complete word belongs
+  // to the caller and is neither copied nor used as extra scratch capacity.
+  uint64_t gateSlots =
+      inPlace
+          ? 16 * (uint64_t(limits.maxLookahead) + limits.maxSelectedGates + 1) +
+                1024
+          : 8 * uint64_t(limits.maxGates) + 1024;
+  result.memoryBound = gateSlots * gateBytes +
                        512 * uint64_t(std::min(limits.maxStates, 11544u));
   if (result.memoryBound > limits.maxBytes) {
     result.status = CliffordWindowStatus::Exhausted;
@@ -257,9 +273,52 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
         (gate.kind == Kind::CZ && !options.nativeCZ) ||
         (gate.kind == Kind::Swap && !options.nativeSwap))
       return unsupported("Clifford-window source must use its native profile");
-  origin = std::make_shared<const lw::Source>(lw::Source{width, synthesized});
-  current = synthesized;
-  result.alternatives.reserve(1);
+  if (!inPlace) {
+    origin = std::make_shared<const lw::Source>(lw::Source{width, synthesized});
+    current = synthesized;
+    result.alternatives.reserve(1);
+  }
+  if (inPlace) {
+    // Delete exact adjacent primitive inverse pairs in one streaming pass.
+    // Deletion preserves order of every surviving operation, hence cannot
+    // increase any ASAP depth or count. The existing buffer is the stack.
+    if (!charge(4 * uint64_t(current.size() + 1) * limbs))
+      return finish();
+    auto inversePair = [](const Gate &a, const Gate &b) {
+      if (a.a != b.a || a.b != b.b)
+        return false;
+      switch (a.kind) {
+      case Kind::H:
+      case Kind::X:
+      case Kind::Y:
+      case Kind::Z:
+      case Kind::CX:
+      case Kind::CZ:
+      case Kind::Swap:
+        return a.kind == b.kind;
+      case Kind::S:
+        return b.kind == Kind::Sdg;
+      case Kind::Sdg:
+        return b.kind == Kind::S;
+      default:
+        return false;
+      }
+    };
+    size_t retained = 0;
+    for (size_t i = 0; i < current.size(); ++i) {
+      if (retained && result.rewrites < limits.maxRewrites &&
+          inversePair(current[retained - 1], current[i])) {
+        --retained;
+        ++result.rewrites;
+        ++result.proofChecks;
+      } else {
+        if (retained != i)
+          current[retained] = std::move(current[i]);
+        ++retained;
+      }
+    }
+    current.erase(current.begin() + retained, current.end());
+  }
 
   // Invocation-local, profile-bound dictionaries. Each queue contains at most
   // one entry per discovered state (decrease-key via erase/insert), avoiding an
@@ -499,19 +558,72 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
       if (!charge(llvm::SaturatingMultiply<uint64_t>(
               retained + replacement.size() + 1, limbs)))
         return finish();
-      std::vector<Gate> next;
-      next.reserve(retained + replacement.size());
-      next.insert(next.end(), current.begin(), current.begin() + seed);
-      size_t selectedAt = 0, boundary = selected.back() + 1;
-      for (size_t at = seed; at < boundary; ++at)
-        if (selectedAt < selected.size() && selected[selectedAt] == at)
-          ++selectedAt;
-        else
-          next.push_back(current[at]);
-      for (const auto &gate : replacement)
-        next.push_back(lw::expand(gate, wires));
-      next.insert(next.end(), current.begin() + boundary, current.end());
-      current = std::move(next);
+      size_t boundary = selected.back() + 1;
+      if (inPlace) {
+        // All semantic checks above finished before mutation. Keep the exact
+        // bounded old window for rollback if the full-circuit depth guard
+        // rejects the local improvement. Positive growth may only use capacity
+        // already owned by the caller; it must never reallocate the full word.
+        std::vector<Gate> patch;
+        size_t selectedAt = 0;
+        for (size_t at = seed; at < boundary; ++at)
+          if (selectedAt < selected.size() && selected[selectedAt] == at)
+            ++selectedAt;
+          else
+            patch.push_back(current[at]);
+        for (const auto &gate : replacement)
+          patch.push_back(lw::expand(gate, wires));
+        size_t oldLength = boundary - seed;
+        if (patch.size() > oldLength &&
+            patch.size() - oldLength > current.capacity() - current.size())
+          continue;
+        // Prepay both complete metric traversals and every possible shift,
+        // including rollback, before applying a proven local replacement.
+        if (!charge(llvm::SaturatingMultiply<uint64_t>(
+                32 * uint64_t(current.size() + 1), limbs)))
+          return finish();
+        auto before = tcount::cost(width, current);
+        std::vector<Gate> undo(current.begin() + seed,
+                               current.begin() + boundary);
+        auto replace = [&](size_t length, const std::vector<Gate> &word) {
+          if (word.size() <= length) {
+            std::copy(word.begin(), word.end(), current.begin() + seed);
+            if (word.size() < length) {
+              auto end =
+                  std::move(current.begin() + seed + length, current.end(),
+                            current.begin() + seed + word.size());
+              current.erase(end, current.end());
+            }
+          } else {
+            auto split = word.begin() + length;
+            std::copy(word.begin(), split, current.begin() + seed);
+            current.insert(current.begin() + seed + length, split, word.end());
+          }
+        };
+        replace(oldLength, patch);
+        auto after = tcount::cost(width, current);
+        if (after.gates > before.gates || after.t > before.t ||
+            after.twoQubit > before.twoQubit || after.depth > before.depth ||
+            after.tDepth > before.tDepth) {
+          replace(patch.size(), undo);
+          ++result.costRejections;
+          continue;
+        }
+      } else {
+        std::vector<Gate> next;
+        next.reserve(retained + replacement.size());
+        next.insert(next.end(), current.begin(), current.begin() + seed);
+        size_t selectedAt = 0;
+        for (size_t at = seed; at < boundary; ++at)
+          if (selectedAt < selected.size() && selected[selectedAt] == at)
+            ++selectedAt;
+          else
+            next.push_back(current[at]);
+        for (const auto &gate : replacement)
+          next.push_back(lw::expand(gate, wires));
+        next.insert(next.end(), current.begin() + boundary, current.end());
+        current = std::move(next);
+      }
       ++result.rewrites;
       rewritten = true;
       break;

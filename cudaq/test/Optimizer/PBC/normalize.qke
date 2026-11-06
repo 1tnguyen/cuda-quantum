@@ -15,9 +15,9 @@
 /// conversion.
 //===----------------------------------------------------------------------===//
 
-// RUN: cudaq-opt %s --quake-to-pbc --quake-verify-pbc | FileCheck %s
-// RUN: cudaq-opt %s --quake-to-pbc --quake-optimize-pbc --quake-verify-pbc --quake-lower-pbc | FileCheck %s --check-prefix=LOWER
-// RUN: not cudaq-opt %s --quake-optimize-pbc 2>&1 | FileCheck %s --check-prefix=REJECT
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release' --quake-verify-pbc | FileCheck %s
+// RUN: cudaq-opt %s --quake-to-pbc='semantics=release' --quake-optimize-pbc='semantics=release' --quake-verify-pbc --quake-lower-pbc | FileCheck %s --check-prefix=LOWER
+// RUN: not cudaq-opt %s --quake-optimize-pbc='semantics=release' 2>&1 | FileCheck %s --check-prefix=REJECT
 
 func.func @frame(%a: !quake.wire, %b: !quake.wire) -> (!quake.measure, !quake.measure) {
   %c:2 = quake.x [%a] %b : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)

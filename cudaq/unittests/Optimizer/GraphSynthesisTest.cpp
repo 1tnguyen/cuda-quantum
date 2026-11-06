@@ -18,13 +18,78 @@
 
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
 #include "Pauli/SignedCliffordFrames.h"
+#include "Pauli/SynthesisHold.h"
 #include "gtest/gtest.h"
 #include <bit>
 #include <complex>
+#include <limits>
 #include <numbers>
 #include <random>
 
 using namespace cudaq::pauli::graph;
+
+TEST(GraphSynthesis, NativeNormalizationBindingChecksOrderedSigns) {
+  const std::vector<Gate> input{
+      {Kind::H, 0}, {Kind::CX, 0, 1}, Gate::rotation({0, 2}, {1, 4})};
+  const std::vector<Pauli> observables{{0, 1}, {0, 2}};
+  auto normalized = cudaq::pauli::pbc::normalize(2, input, observables);
+  ASSERT_TRUE(normalized) << normalized.error;
+  EXPECT_TRUE(verifyMeasured(2, input, observables, normalized.rotations,
+                             normalized.measurements));
+  auto wrong = normalized.measurements;
+  wrong[0].sign = !wrong[0].sign;
+  EXPECT_FALSE(
+      verifyMeasured(2, input, observables, normalized.rotations, wrong));
+  wrong = normalized.measurements;
+  std::swap(wrong[0], wrong[1]);
+  EXPECT_FALSE(
+      verifyMeasured(2, input, observables, normalized.rotations, wrong));
+  cudaq::pauli::SearchBudget none(0);
+  EXPECT_FALSE(verifyMeasured(2, input, observables, normalized.rotations,
+                              normalized.measurements, &none));
+  EXPECT_TRUE(none.stopped());
+}
+
+TEST(GraphSynthesis, IncomingAnchorSurvivesReconstructionLimits) {
+  const std::vector<Gate> incoming{
+      {Kind::H, 0}, {Kind::CX, 0, 1}, Gate::rotation({0, 2}, {1, 4})};
+  const std::vector<Pauli> observables{{0, 1}, {0, 2}};
+  const std::vector<unsigned> readouts{0, 1};
+  auto source = cudaq::pauli::pbc::normalize(2, incoming, observables);
+  ASSERT_TRUE(source) << source.error;
+  Options options;
+  options.maxGates = incoming.size();
+  options.maxSteps = 0;
+  options.legacyWorkLimit = 100000;
+  cudaq::pauli::SearchBudget budget(10000000);
+  SearchTermination status;
+  auto result =
+      synthesizeMeasured(2, source.rotations, source.measurements, readouts,
+                         options, &budget, &status, &incoming);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_EQ(status, SearchTermination::Complete);
+  EXPECT_EQ(result.rotations.size(), incoming.size());
+  EXPECT_TRUE(verifyMeasured(2, incoming, observables, result.rotations,
+                             result.measurements));
+  auto memoryLimited = options;
+  memoryLimited.maxSteps = 100;
+  memoryLimited.maxDependencyBytes = 0;
+  auto retained =
+      synthesizeMeasured(2, source.rotations, source.measurements, readouts,
+                         memoryLimited, nullptr, &status, &incoming);
+  ASSERT_TRUE(retained) << retained.error;
+  EXPECT_EQ(status, SearchTermination::Complete);
+  EXPECT_TRUE(verifyMeasured(2, incoming, observables, retained.rotations,
+                             retained.measurements));
+  auto wrong = incoming;
+  wrong[0].a = 1;
+  auto invalid =
+      synthesizeMeasured(2, source.rotations, source.measurements, readouts,
+                         options, nullptr, &status, &wrong);
+  EXPECT_FALSE(invalid);
+  EXPECT_EQ(status, SearchTermination::InvalidProof);
+}
+
 namespace {
 // The independent statevector oracle is deliberately restricted to small
 // circuits; wide tests explicitly relabel their active support before using it.
@@ -137,6 +202,255 @@ TEST(GraphSynthesis, ExactPhaseAndPermutation) {
   corrupted = result.gates;
   corrupted.push_back({Kind::Swap, 0, 2});
   EXPECT_FALSE(equivalent(3, gates, corrupted));
+}
+
+TEST(GraphSynthesis, LosslessPauliNormalizationRetainsFrameAndScalar) {
+  std::vector<Gate> input{{Kind::H, 0},
+                          {Kind::CX, 0, 1},
+                          Gate::rotation({0, 2}, {1, 4}),
+                          {Kind::S, 1},
+                          Gate::rotation({1, 1, true}, {1, 7}),
+                          Gate::phase({3, 8}),
+                          {Kind::Swap, 0, 1}};
+  auto form = cudaq::pauli::pbc::normalizeUnitary(2, input);
+  ASSERT_TRUE(form) << form.error;
+  ASSERT_FALSE(form.frame.empty());
+  auto word = form.rotations;
+  word.insert(word.end(), form.frame.begin(), form.frame.end());
+  assertUnitary(2, input, word);
+  EXPECT_TRUE(equivalent(2, input, word));
+}
+
+TEST(GraphSynthesis, HoldReconstructsUnmeasuredCliffords) {
+  for (const auto &input : std::vector<std::vector<Gate>>{
+           {{Kind::S, 0}},
+           {{Kind::CZ, 0, 1}},
+           {{Kind::Swap, 0, 1}, Gate::phase({1, 8})}}) {
+    Options options;
+    options.discrepancySteps = 0;
+    auto result = synthesizeUnitary(2, input, options);
+    ASSERT_TRUE(result) << result.error;
+    assertUnitary(2, input, result.gates);
+    EXPECT_FALSE(equivalent(2, {}, result.gates));
+  }
+}
+
+namespace {
+std::vector<Gate> holdThreeWireGadget(unsigned a, unsigned b, unsigned c) {
+  auto rz = [](unsigned q, int sign) {
+    return Gate::rotation({0, cudaq::pauli::QubitSet::single(q)}, {sign, 4});
+  };
+  return {{Kind::CX, b, a}, {Kind::CZ, b, c}, {Kind::CX, b, c}, {Kind::H, b},
+          {Kind::CX, b, a}, rz(a, -1),        {Kind::CX, c, a}, rz(b, 1),
+          {Kind::CX, c, b}, rz(a, 1),         {Kind::CX, b, a}, rz(b, -1),
+          {Kind::H, b},     {Kind::Z, b}};
+}
+} // namespace
+
+TEST(GraphSynthesis, HoldThreeWireTemplatePreservesPhaseAndPhysicalWires) {
+  std::array<unsigned, 3> physical{0, 2, 4};
+  do {
+    auto source = holdThreeWireGadget(physical[0], physical[1], physical[2]);
+    // Entangle a spectator, and retain both rational and opaque scalar phases.
+    source.insert(source.begin() + 5, Gate::phase({3, 8}));
+    source.insert(source.begin() + 9, Gate::phase({0, 1, 7, true}));
+    source.insert(source.begin(), {{Kind::H, 5}, {Kind::CX, 5, physical[0]}});
+    Result result;
+    result.gates = source;
+    Options options;
+    options.algebraicCandidates = 4;
+    cudaq::pauli::SearchBudget budget(1000000);
+    ASSERT_TRUE(
+        detail::refineHoldThreeWireTemplates(6, result, options, budget));
+    EXPECT_EQ(result.gates.size(), source.size() - 2);
+    EXPECT_EQ(cudaq::pauli::tcount::cost(6, result.gates).t, 4u);
+    assertUnitary(6, source, result.gates);
+  } while (std::next_permutation(physical.begin(), physical.end()));
+}
+
+TEST(GraphSynthesis, HoldThreeWireTemplateHonorsObjectiveAndBudget) {
+  auto source = holdThreeWireGadget(0, 1, 2);
+  Options options;
+  options.algebraicCandidates = 4;
+  options.objective = SynthesisObjective::TDepth;
+  Result result;
+  result.gates = source;
+  cudaq::pauli::SearchBudget budget(1000000);
+  ASSERT_TRUE(detail::refineHoldThreeWireTemplates(3, result, options, budget));
+  EXPECT_EQ(result.gates.size(), source.size());
+  options.objective = SynthesisObjective::TotalGates;
+  cudaq::pauli::SearchBudget empty(0);
+  ASSERT_TRUE(detail::refineHoldThreeWireTemplates(3, result, options, empty));
+  EXPECT_EQ(result.gates.size(), source.size());
+  // A 2*pi rotation offset changes scalar phase and must not match pi/4.
+  source[5].angle = {7, 4};
+  result.gates = source;
+  cudaq::pauli::SearchBudget reserve(1000000);
+  ASSERT_TRUE(
+      detail::refineHoldThreeWireTemplates(3, result, options, reserve));
+  EXPECT_EQ(result.gates.size(), source.size());
+  assertUnitary(3, source, result.gates);
+}
+
+TEST(GraphSynthesis,
+     HoldNormalizesExactCliffordRotationsWithIndependentReplay) {
+  std::vector<Gate> input{Gate::rotation({3, 2}, {1, 2}),
+                          Gate::rotation({1, 3}, {1, 4}),
+                          Gate::rotation({0, 1}, {-1, 2}),
+                          Gate::rotation({3, 1}, {1, 7}),
+                          {Kind::CX, 1, 0},
+                          Gate::phase({1, 8})};
+  Options options;
+  options.discrepancySteps = 0;
+  auto result = synthesizeUnitary(2, input, options);
+  ASSERT_TRUE(result) << result.error;
+  assertUnitary(2, input, result.gates);
+}
+
+TEST(GraphSynthesis, HoldRegionalAndJointExitsPreserveCompleteUnitary) {
+  std::mt19937 rng(83127);
+  for (unsigned trial = 0; trial < 12; ++trial) {
+    std::vector<Gate> input;
+    for (unsigned i = 0; i < 8; ++i) {
+      unsigned x = rng() % 4, z = rng() % 4;
+      if (!(x | z))
+        z = 1;
+      input.push_back(
+          Gate::rotation({x, z, bool(rng() & 1)}, {rng() & 1 ? 1 : -1, 4}));
+    }
+    input.push_back({Kind::CX, 1, 0});
+    input.push_back({Kind::Swap, 0, 1});
+    input.push_back(Gate::phase({1, 8}));
+    Options options;
+    options.holdCheckpoints = false; // Exercise the global providers directly.
+    options.discrepancySteps = 0;
+    options.commutingCandidates = 2;
+    options.algebraicCandidates = trial % 3 == 0 ? 2 : 0;
+    options.jointPhaseCandidates = 2;
+    options.jointPhasePlannerWork = 1000000;
+    options.jointPhaseMaxWork = 10000000;
+    options.jointPhaseTimeoutMs = 10000;
+    options.nativeSwap = false;
+    options.nativeCX = trial % 2;
+    options.nativeCZ = !options.nativeCX;
+    cudaq::pauli::SearchBudget budget(100000000);
+    auto result = synthesizeUnitary(2, input, options, &budget);
+    ASSERT_TRUE(result) << result.error;
+    assertUnitary(2, input, result.gates);
+    for (const auto &gate : result.gates) {
+      EXPECT_NE(gate.kind, Kind::Swap);
+      EXPECT_NE(gate.kind, options.nativeCX ? Kind::CZ : Kind::CX);
+    }
+  }
+}
+
+TEST(GraphSynthesis, HoldCheckpointsPreserveSparseWiresOversizedAxesAndPhase) {
+  std::vector<Gate> input{
+      Gate::phase({3, 8}), {Kind::H, 4},
+      {Kind::CX, 4, 1},    Gate::rotation({0, 2}, {1, 4}),
+      {Kind::Swap, 1, 3},  {Kind::Sdg, 0},
+      {Kind::CZ, 0, 2},    Gate::rotation({0b10101, 0b01010, true}, {-1, 4}),
+      {Kind::H, 3},        Gate::rotation({8, 0}, {1, 7}),
+      {Kind::X, 4}};
+  Options options;
+  options.discrepancySteps = 0;
+  options.candidateNodes = 1;
+  options.lookahead = 16;
+  options.algebraicCandidates = 4;
+  Diagnostics diagnostics;
+  options.diagnostics = &diagnostics;
+  cudaq::pauli::SearchBudget budget(1000000000);
+  auto result = synthesizeUnitary(5, input, options, &budget);
+  ASSERT_TRUE(result) << result.error;
+  assertUnitary(5, input, result.gates);
+  EXPECT_TRUE(std::any_of(diagnostics.events.begin(), diagnostics.events.end(),
+                          [](const auto &event) {
+                            return event.route == "hold-checkpoint-3" &&
+                                   event.status == "verified";
+                          }));
+}
+
+TEST(GraphSynthesis, HoldCheckpointOptionalExhaustionRetainsVerifiedUnitary) {
+  const std::vector<Gate> input{{Kind::H, 0}, Gate::phase({1, 8})};
+  unsigned calls = 0;
+  auto callback = [&](unsigned width, const std::vector<Gate> &word,
+                      const Options &options,
+                      cudaq::pauli::SearchBudget *work) {
+    if (++calls > 1) {
+      EXPECT_FALSE(work->take(std::numeric_limits<uint64_t>::max()));
+      return detail::holdFailure("injected optional work exhaustion",
+                                 SearchTermination::Exhausted);
+    }
+    return synthesize(width, word, options, work);
+  };
+  Options options;
+  options.acceptOnlyImprovement = false;
+  options.discrepancySteps = 0;
+  cudaq::pauli::SearchBudget budget(10000000);
+  auto result =
+      detail::synthesizeHoldPortfolio(2, input, options, budget, callback);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_FALSE(budget.stopped());
+  assertUnitary(2, input, result.gates);
+}
+
+TEST(GraphSynthesis, HoldCheckpointScalarOnlyAndIdentityRotations) {
+  Options options;
+  options.discrepancySteps = 0;
+  for (const auto &input : std::vector<std::vector<Gate>>{
+           {Gate::phase({1, 8})},
+           {Gate::rotation({}, {1, 7}), Gate::phase({3, 8})},
+           {Gate::rotation({}, {0, 1})}}) {
+    auto result = synthesizeUnitary(2, input, options);
+    ASSERT_TRUE(result) << result.error;
+    assertUnitary(2, input, result.gates);
+    for (const auto &gate : result.gates)
+      EXPECT_NE(gate.kind, Kind::Rotate);
+  }
+}
+
+TEST(GraphSynthesis, HoldCheckpointInvalidProofIsFatalAfterAnIncumbentExists) {
+  const std::vector<Gate> input{{Kind::H, 0}};
+  unsigned calls = 0;
+  auto callback = [&](unsigned width, const std::vector<Gate> &word,
+                      const Options &options,
+                      cudaq::pauli::SearchBudget *work) {
+    if (++calls > 1) {
+      EXPECT_FALSE(work->take(std::numeric_limits<uint64_t>::max()));
+      return detail::holdFailure("injected invalid unitary certificate",
+                                 SearchTermination::InvalidProof);
+    }
+    return synthesize(width, word, options, work);
+  };
+  Options options;
+  options.acceptOnlyImprovement = false;
+  options.discrepancySteps = 0;
+  cudaq::pauli::SearchBudget budget(10000000);
+  auto result =
+      detail::synthesizeHoldPortfolio(2, input, options, budget, callback);
+  EXPECT_FALSE(result);
+  EXPECT_EQ(result.termination, SearchTermination::InvalidProof);
+  EXPECT_TRUE(result.gates.empty());
+}
+
+TEST(GraphSynthesis, HoldRejectsReleaseFreedomAndUnfinishedProofs) {
+  std::vector<Gate> input{Gate::rotation({0, 1}, {1, 4})};
+  Options options;
+  options.pruneUnobserved = true;
+  EXPECT_FALSE(synthesizeUnitary(1, input, options));
+  options.pruneUnobserved = false;
+  options.release = true;
+  EXPECT_FALSE(synthesizeUnitary(1, input, options));
+  options.release = false;
+  cudaq::pauli::SearchBudget exhausted(1);
+  EXPECT_FALSE(synthesizeUnitary(1, input, options, &exhausted));
+  auto hold = synthesizeUnitary(1, input, options);
+  ASSERT_TRUE(hold) << hold.error;
+  assertUnitary(1, input, hold.gates);
+  options.pruneUnobserved = true;
+  auto release = synthesizeMeasured(1, input, {{0, 1}}, {0}, options);
+  ASSERT_TRUE(release) << release.error;
+  EXPECT_TRUE(release.rotations.empty());
 }
 TEST(GraphSynthesis, RandomUnitaryAndAllSearchControls) {
   std::mt19937 rng(0x50434f41);

@@ -18,8 +18,72 @@
 #include "cudaq/Optimizer/Pauli/PBC.h"
 #include "TCountInternal.h"
 #include <bit>
+#include <limits>
+#include <numeric>
 
 using namespace cudaq::pauli;
+
+pbc::UnitaryForm pbc::normalizeUnitary(unsigned width,
+                                       const std::vector<Gate> &gates,
+                                       SearchBudget *budget) {
+  UnitaryForm result;
+  if (!tcount::detail::valid(width, gates)) {
+    result.error = "unitary PBC normalization requires valid gates";
+    return result;
+  }
+  const uint64_t work = uint64_t(width) * width + 1;
+  if (budget && !budget->take(work)) {
+    result.error = "unitary PBC normalization work budget exhausted";
+    return result;
+  }
+  tcount::detail::Frame frame(width);
+  for (auto gate : gates) {
+    if (budget && !budget->take(work)) {
+      result.error = "unitary PBC normalization work budget exhausted";
+      return result;
+    }
+    if (gate.kind == Kind::Rotate && !gate.pauli.weight()) {
+      if (gate.angle.symbol) {
+        result.error = "opaque identity rotation requires a scalar-phase angle";
+        return result;
+      }
+      __int128 numerator = __int128(gate.angle.numerator) *
+                           (gate.pauli.sign != gate.angle.negative ? 1 : -1);
+      __int128 denominator = __int128(gate.angle.denominator) * 2;
+      // The input denominator is positive. Reduce before narrowing the half.
+      auto magnitude = numerator < 0 ? -numerator : numerator;
+      while (denominator) {
+        auto remainder = magnitude % denominator;
+        magnitude = denominator;
+        denominator = remainder;
+      }
+      denominator = __int128(gate.angle.denominator) * 2 / magnitude;
+      numerator /= magnitude;
+      if (numerator < std::numeric_limits<int64_t>::min() ||
+          numerator > std::numeric_limits<int64_t>::max() ||
+          denominator > std::numeric_limits<int64_t>::max()) {
+        result.error = "identity rotation scalar phase exceeds exact range";
+        return result;
+      }
+      result.frame.push_back(
+          Gate::phase({int64_t(numerator), int64_t(denominator)}));
+    } else if (gate.kind != Kind::Rotate) {
+      // Keep exact Clifford-angle rotations in the Pauli word as well. This
+      // matches the independent unitary replay's primitive-Clifford frame;
+      // absorption must not exceed the checker's supported normalization.
+      frame.append(gate);
+      result.frame.push_back(gate);
+    } else {
+      gate.pauli = frame.lookup(gate.pauli);
+      if (gate.pauli.sign) {
+        gate.pauli.sign = false;
+        gate.angle = gate.angle.negated();
+      }
+      result.rotations.push_back(gate);
+    }
+  }
+  return result;
+}
 
 /// Check that word commutes with the accumulated observable span, then extend
 /// its binary support basis if word is independent. Return false without

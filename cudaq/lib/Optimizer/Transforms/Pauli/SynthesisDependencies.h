@@ -23,6 +23,7 @@ enum class DependencyError {
   None,
   WorkLimit,
   DependencyLimit,
+  StorageLimit,
   SizeOverflow,
   InvalidOccurrence
 };
@@ -37,6 +38,7 @@ struct DependencyResult {
   bool exhausted() const {
     return error == DependencyError::WorkLimit ||
            error == DependencyError::DependencyLimit ||
+           error == DependencyError::StorageLimit ||
            error == DependencyError::SizeOverflow;
   }
 };
@@ -47,6 +49,8 @@ struct DependencyStatistics {
   uint64_t logicalEdges = 0;
   /// Directed axis-conflict entries actually stored (two per conflicting pair).
   uint64_t storedConflicts = 0;
+  /// Conservative peak owned bytes, including classification/hash scratch.
+  uint64_t storageBytes = 0;
 };
 
 class DependencyCursor;
@@ -85,7 +89,8 @@ public:
   /// validity is the caller's semantic contract; identity axes are supported.
   static DependencyResult<DependencyIndex>
   build(const std::vector<Pauli> &word, uint64_t maxLogicalDependencies,
-        SearchBudget *budget = nullptr) {
+        SearchBudget *budget = nullptr,
+        uint64_t maxStorageBytes = std::numeric_limits<uint64_t>::max()) {
     auto take = [&](uint64_t amount = 1) {
       return !budget || budget->take(amount);
     };
@@ -95,14 +100,35 @@ public:
     if (word.size() > std::numeric_limits<unsigned>::max())
       return {std::nullopt, DependencyError::SizeOverflow};
     DependencyIndex result;
+    auto reserve = [&](uint64_t bytes) {
+      if (bytes > maxStorageBytes - result.counts.storageBytes)
+        return false;
+      result.counts.storageBytes += bytes;
+      return true;
+    };
+    // Occurrence vectors and their growth, plus container bookkeeping. Class
+    // payload and actual conflicts are admitted incrementally before copying.
+    if (!reserve(1024 + 24 * uint64_t(word.size())))
+      return {std::nullopt, DependencyError::StorageLimit};
+    uint64_t temporaryBytes = 0;
     std::vector<Pauli> axes;
     std::unordered_map<Pauli, unsigned, AxisHash> classes;
     for (unsigned i = 0; i < word.size(); ++i) {
       if (!take())
         return {std::nullopt, DependencyError::WorkLimit};
+      uint64_t payload = word[i].x.storageBytes() + word[i].z.storageBytes();
+      if (3 * payload > temporaryBytes) {
+        if (!reserve(3 * payload - temporaryBytes))
+          return {std::nullopt, DependencyError::StorageLimit};
+        temporaryBytes = 3 * payload;
+      }
       Pauli axis = word[i];
       axis.sign = false;
-      auto [it, inserted] = classes.emplace(axis, axes.size());
+      auto found = classes.find(axis);
+      bool inserted = found == classes.end();
+      if (inserted && !reserve(1024 + 4 * payload))
+        return {std::nullopt, DependencyError::StorageLimit};
+      auto it = inserted ? classes.emplace(axis, axes.size()).first : found;
       unsigned id = it->second;
       if (inserted) {
         axes.push_back(std::move(axis));
@@ -134,6 +160,8 @@ public:
           return {std::nullopt, DependencyError::SizeOverflow};
         if (!take(2))
           return {std::nullopt, DependencyError::WorkLimit};
+        if (!reserve(32))
+          return {std::nullopt, DependencyError::StorageLimit};
         result.conflicts[a].push_back(b);
         result.conflicts[b].push_back(a);
         result.counts.logicalEdges += edges;

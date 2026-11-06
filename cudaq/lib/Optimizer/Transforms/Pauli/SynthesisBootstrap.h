@@ -27,7 +27,7 @@ struct BootstrapResult {
   /// replay remain the caller's responsibility. Empty on every failure.
   std::vector<Gate> gates;
   BootstrapStatus status = BootstrapStatus::Complete;
-  uint64_t work = 0;
+  uint64_t work = 0, independentGates = 0;
   std::string error;
   explicit operator bool() const { return status == BootstrapStatus::Complete; }
 };
@@ -59,12 +59,14 @@ inline std::optional<Angle> identityPhase(const Gate &gate) {
 } // namespace bootstrap_detail
 
 /// Produce a first feasible prefix directly from normalized Pauli rotations,
-/// without a source Clifford-network seed or a heuristic search. Each gadget
-/// changes local bases, computes parity, rotates one Z axis, then restores
-/// parity and bases. Thus the original terminal observables remain unchanged.
-/// This function validates the word/profile, not the terminal readout contract;
-/// the caller must validate that contract and independently check prefix+tail.
-/// Native Clifford input is unsupported. Explicit scalar phases are preserved.
+/// without a source Clifford-network seed or a heuristic search. Neighboring
+/// gadgets share a checked common Clifford prefix. Each residual basis/parity
+/// change is undone before an incompatible change, and the final frame is
+/// restored. Thus the full unitary and original terminal observables are
+/// unchanged. This function validates the word/profile, not the terminal
+/// readout contract; the caller must validate that contract and independently
+/// check prefix+tail. Native Clifford input is unsupported. Explicit scalar
+/// phases are preserved.
 ///
 /// Preflight computes the exact output size before any output allocation. Work
 /// units charge one entry, one width-in-limbs scan per source operation, one
@@ -97,7 +99,9 @@ inline BootstrapResult buildBootstrapPrefix(const MeasuredProblem &problem,
   if (!charge(1))
     return result;
   const uint64_t rowWork = uint64_t(problem.width) / 64 + 1;
-  uint64_t outputSize = 0;
+  // Validate the whole source first. The independent size is diagnostic, not
+  // an allocation or admission bound: sharing can make a previously oversized
+  // independent reconstruction fit the configured output cap.
   for (const auto &gate : problem.rotations) {
     if (!charge(rowWork))
       return result;
@@ -118,80 +122,158 @@ inline BootstrapResult buildBootstrapPrefix(const MeasuredProblem &problem,
           return unsupported(
               "bootstrap identity half-angle is not representable");
       } else {
-        uint64_t basis =
-            2 * uint64_t(gate.pauli.x.count()) +
-            2 * uint64_t(gate.pauli.x.intersectionCount(gate.pauli.z));
-        uint64_t parity = 2 * uint64_t(weight - 1) * (options.nativeCX ? 1 : 3);
-        count += basis + parity;
+        count += 2 * uint64_t(gate.pauli.x.count()) +
+                 2 * uint64_t(gate.pauli.x.intersectionCount(gate.pauli.z)) +
+                 2 * uint64_t(weight - 1) * (options.nativeCX ? 1 : 3);
       }
     }
-    if (count > uint64_t(options.maxGates) - outputSize) {
-      result.status = BootstrapStatus::Exhausted;
-      result.error = "bootstrap prefix native gate limit exceeded";
-      return result;
-    }
-    outputSize += count;
+    if (count > std::numeric_limits<uint64_t>::max() - result.independentGates)
+      return unsupported("bootstrap independent size overflow");
+    result.independentGates += count;
   }
-  if (!charge(outputSize))
-    return result;
   std::vector<Gate> gates;
-  gates.reserve(outputSize);
-  auto append = [&](Gate gate) {
-    if (!charge(1))
-      return false;
-    gates.push_back(std::move(gate));
+  uint64_t outputSize = 0;
+  auto inverse = [](Gate gate) {
+    if (gate.kind == Kind::S)
+      gate.kind = Kind::Sdg;
+    else if (gate.kind == Kind::Sdg)
+      gate.kind = Kind::S;
+    return gate;
+  };
+  auto same = [](const Gate &a, const Gate &b) {
+    return a.kind == b.kind && a.a == b.a && a.b == b.b;
+  };
+  // Count the actual shared word before allocating it. Both traversals retain
+  // only two O(width) Clifford decompositions, never the independent expansion.
+  auto reconstruct = [&](bool emit) {
+    std::vector<Gate> previous;
+    std::vector<unsigned> previousOrder;
+    Pauli previousAxis;
+    unsigned previousPivot = problem.width;
+    uint64_t count = 0;
+    auto append = [&](Gate gate) {
+      if (!charge(1))
+        return false;
+      if (count == options.maxGates) {
+        result.status = BootstrapStatus::Exhausted;
+        result.error = "bootstrap prefix native gate limit exceeded";
+        return false;
+      }
+      ++count;
+      if (emit)
+        gates.push_back(std::move(gate));
+      return true;
+    };
+    for (size_t index = 0; index < problem.rotations.size(); ++index) {
+      const auto &gate = problem.rotations[index];
+      if (bootstrap_detail::zero(gate.angle))
+        continue;
+      if (!charge(2 * rowWork))
+        return false;
+      if (gate.kind == Kind::Phase) {
+        if (!append(Gate::phase(gate.angle)))
+          return false;
+        continue;
+      }
+      auto support = gate.pauli.x | gate.pauli.z;
+      if (!support) {
+        if (!append(Gate::phase(*bootstrap_detail::identityPhase(gate))))
+          return false;
+        continue;
+      }
+      const Pauli *next = nullptr;
+      for (size_t j = index + 1; j < problem.rotations.size(); ++j) {
+        if (!charge(1))
+          return false;
+        const auto &following = problem.rotations[j];
+        if (following.kind == Kind::Rotate && following.pauli.weight() &&
+            !bootstrap_detail::zero(following.angle)) {
+          next = &following.pauli;
+          break;
+        }
+      }
+      unsigned pivot = support.first();
+      if (previousPivot < problem.width &&
+          gate.pauli.axis(previousPivot) == previousAxis.axis(previousPivot))
+        pivot = previousPivot;
+      else if (next)
+        for (unsigned q : support.set_bits())
+          if (gate.pauli.axis(q) == next->axis(q)) {
+            pivot = q;
+            break;
+          }
+      std::vector<Gate> compute;
+      std::vector<unsigned> order;
+      auto basis = [&](unsigned q) {
+        unsigned axis = gate.pauli.axis(q);
+        if (axis == 3)
+          compute.push_back({Kind::Sdg, q});
+        if (axis & 1)
+          compute.push_back({Kind::H, q});
+      };
+      basis(pivot);
+      QubitSet used = QubitSet::single(pivot);
+      auto control = [&](unsigned q) {
+        basis(q);
+        if (options.nativeCX)
+          compute.push_back({Kind::CX, q, pivot});
+        else {
+          compute.push_back({Kind::H, pivot});
+          compute.push_back({Kind::CZ, q, pivot});
+          compute.push_back({Kind::H, pivot});
+        }
+        used.set(q);
+        order.push_back(q);
+      };
+      // Preserve an already shared prefix; place future-compatible controls
+      // first in the remaining suffix. Local basis changes on distinct
+      // controls commute with all other same-target parity CNOTs.
+      if (pivot == previousPivot)
+        for (unsigned q : previousOrder) {
+          if (!gate.pauli.axis(q) || gate.pauli.axis(q) != previousAxis.axis(q))
+            break;
+          control(q);
+        }
+      for (bool compatible : {true, false})
+        for (unsigned q : support.set_bits()) {
+          if (used.test(q))
+            continue;
+          bool shared = next && gate.pauli.axis(q) == next->axis(q);
+          if (shared == compatible)
+            control(q);
+        }
+      if (!charge(compute.size() + previous.size() + 1))
+        return false;
+      size_t common = 0;
+      while (common < previous.size() && common < compute.size() &&
+             same(previous[common], compute[common]))
+        ++common;
+      for (size_t j = previous.size(); j > common; --j)
+        if (!append(inverse(previous[j - 1])))
+          return false;
+      for (size_t j = common; j < compute.size(); ++j)
+        if (!append(compute[j]))
+          return false;
+      Angle angle = gate.pauli.sign ? gate.angle.negated() : gate.angle;
+      if (!append(Gate::rotation({{}, QubitSet::single(pivot), false}, angle)))
+        return false;
+      previous = std::move(compute);
+      previousOrder = std::move(order);
+      previousAxis = gate.pauli;
+      previousPivot = pivot;
+    }
+    for (auto it = previous.rbegin(); it != previous.rend(); ++it)
+      if (!append(inverse(*it)))
+        return false;
+    if (!emit)
+      outputSize = count;
     return true;
   };
-  auto cx = [&](unsigned control, unsigned target) {
-    if (options.nativeCX)
-      return append({Kind::CX, control, target});
-    return append({Kind::H, target}) && append({Kind::CZ, control, target}) &&
-           append({Kind::H, target});
-  };
-  for (const auto &gate : problem.rotations) {
-    if (bootstrap_detail::zero(gate.angle))
-      continue;
-    // Covers support copying and construction of the one-wire Z rotation.
-    if (!charge(2 * rowWork))
-      return result;
-    if (gate.kind == Kind::Phase) {
-      if (!append(Gate::phase(gate.angle)))
-        return result;
-      continue;
-    }
-    auto support = gate.pauli.x | gate.pauli.z;
-    if (!support) {
-      if (!append(Gate::phase(*bootstrap_detail::identityPhase(gate))))
-        return result;
-      continue;
-    }
-    unsigned pivot = support.first();
-    for (unsigned q : support.set_bits()) {
-      unsigned axis = gate.pauli.axis(q);
-      if (axis == 3 && !append({Kind::Sdg, q}))
-        return result;
-      if ((axis & 1) && !append({Kind::H, q}))
-        return result;
-    }
-    for (unsigned q : support.set_bits())
-      if (q != pivot && !cx(q, pivot))
-        return result;
-    Angle angle = gate.pauli.sign ? gate.angle.negated() : gate.angle;
-    if (!append(Gate::rotation({{}, QubitSet::single(pivot), false}, angle)))
-      return result;
-    // Same-target CNOTs commute and are self-inverse, so repeating this order
-    // exactly uncomputes parity. Local basis changes on distinct wires commute.
-    for (unsigned q : support.set_bits())
-      if (q != pivot && !cx(q, pivot))
-        return result;
-    for (unsigned q : support.set_bits()) {
-      unsigned axis = gate.pauli.axis(q);
-      if ((axis & 1) && !append({Kind::H, q}))
-        return result;
-      if (axis == 3 && !append({Kind::S, q}))
-        return result;
-    }
-  }
+  if (!reconstruct(false) || !charge(outputSize))
+    return result;
+  gates.reserve(outputSize);
+  if (!reconstruct(true))
+    return result;
   result.gates = std::move(gates);
   return result;
 }

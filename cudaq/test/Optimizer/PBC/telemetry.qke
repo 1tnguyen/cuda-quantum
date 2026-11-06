@@ -15,18 +15,18 @@
 //===----------------------------------------------------------------------===//
 
 // RUN: rm -f %t.env %t.option %t.off %t.strict
-// RUN: env CUDAQ_PBC_TELEMETRY=%t.env cudaq-opt %s --quake-try-pbc > %t.ir
+// RUN: env CUDAQ_PBC_TELEMETRY=%t.env cudaq-opt %s --quake-try-pbc='semantics=release' > %t.ir
 // RUN: FileCheck %s --check-prefix=REPORT --input-file=%t.env
-// RUN: env CUDAQ_PBC_TELEMETRY=%t.env cudaq-opt %s --quake-try-pbc='telemetry=%t.option' > %t.option.ir
+// RUN: env CUDAQ_PBC_TELEMETRY=%t.env cudaq-opt %s --quake-try-pbc='semantics=release telemetry=%t.option' > %t.option.ir
 // RUN: diff %t.ir %t.option.ir
 // RUN: FileCheck %s --check-prefix=REPORT --input-file=%t.option
 // RUN: wc -l < %t.env | FileCheck %s --check-prefix=LINES
-// RUN: env CUDAQ_PBC_TELEMETRY=%t.off cudaq-opt %s --quake-try-pbc='telemetry=off' > %t.off.ir
+// RUN: env CUDAQ_PBC_TELEMETRY=%t.off cudaq-opt %s --quake-try-pbc='semantics=release telemetry=off' > %t.off.ir
 // RUN: diff %t.ir %t.off.ir
 // RUN: not test -e %t.off
-// RUN: cudaq-opt %s --quake-try-pbc='telemetry=-' > /dev/null 2> %t.stderr
+// RUN: cudaq-opt %s --quake-try-pbc='semantics=release telemetry=-' > /dev/null 2> %t.stderr
 // RUN: FileCheck %s --check-prefix=REPORT --input-file=%t.stderr
-// RUN: cudaq-opt %S/optimize.qke --quake-optimize-pbc='telemetry=%t.strict' > /dev/null
+// RUN: cudaq-opt %S/optimize.qke --quake-optimize-pbc='semantics=release telemetry=%t.strict' > /dev/null
 // RUN: FileCheck %s --check-prefix=STRICT --input-file=%t.strict
 
 func.func @improve(%q: !quake.wire) -> !quake.measure {
