@@ -104,7 +104,7 @@ gadgetLogicalAction(qlx::fabric::GadgetOp gadget) {
   auto spec = resolvedGadgetSpec(gadget);
   if (!spec)
     return std::nullopt;
-  auto objective = dyn_cast_or_null<qlx::fabric::ObjectiveOp>(
+  auto objective = dyn_cast_or_null<qlx::fabric::ActionOp>(
       SymbolTable::lookupNearestSymbolFrom(spec, spec.getObjectiveAttr()));
   if (!objective || !objective.getLogicalAttr())
     return std::nullopt;
@@ -119,7 +119,7 @@ gadgetLogicalInstrument(qlx::fabric::GadgetOp gadget) {
   auto spec = resolvedGadgetSpec(gadget);
   if (!spec)
     return {};
-  auto objective = dyn_cast_or_null<qlx::fabric::ObjectiveOp>(
+  auto objective = dyn_cast_or_null<qlx::fabric::ActionOp>(
       SymbolTable::lookupNearestSymbolFrom(spec, spec.getObjectiveAttr()));
   if (!objective || !objective.getLogicalAttr())
     return {};
@@ -136,9 +136,9 @@ logicalMeasurementBasis(qlx::InstrumentDeclOp instrument) {
       dyn_cast_or_null<FlatSymbolRefAttr>(instrument.getSemanticsAttr());
   auto body =
       semantics
-          ? dyn_cast_or_null<qlx::ObjectiveBodyOp>(
+          ? dyn_cast_or_null<qlx::ActionBodyOp>(
                 SymbolTable::lookupNearestSymbolFrom(instrument, semantics))
-          : qlx::ObjectiveBodyOp{};
+          : qlx::ActionBodyOp{};
   if (!body || body.getBody().empty())
     return std::nullopt;
   Block &block = body.getBody().front();
@@ -503,7 +503,7 @@ static LogicalResult verifySurfaceAutoCCZApplicationPlan(SpacetimePlanOp plan) {
       !resource_provider::hasExactSurfaceAutoCCZApplicationStructure(source)) {
     auto diagnostic = plan.emitOpError(
         "surface AutoCCZ application source is not the exact selected "
-        "three-owner protocol");
+        "three-patch protocol");
     if (source) {
       diagnostic << " (ops="
                  << std::distance(source.getBody().front().begin(),
@@ -700,10 +700,10 @@ verifySurfaceSpacelikeCallableInvocation(SpacetimeCallOp call,
       shape->reactionApplications != canonicalShape->reactionApplications ||
       shape->peakReactionWidth != canonicalShape->peakReactionWidth) {
     auto diagnostic = call.emitOpError(
-        "reused surface spacelike plan requires the same exact P2 owner-graph "
+        "reused surface spacelike plan requires the same exact P2 patch-graph "
         "shape as its canonical source");
     if (shape)
-      diagnostic << "; actual=(owners=" << shape->boundaryOwners
+      diagnostic << "; actual=(boundary_patches=" << shape->boundaryOwners
                  << ", access_layers=" << shape->accessLayers
                  << ", reaction_depth=" << shape->reactionDepth
                  << ", reaction_applications=" << shape->reactionApplications
@@ -711,7 +711,8 @@ verifySurfaceSpacelikeCallableInvocation(SpacetimeCallOp call,
     else
       diagnostic << "; actual=unsupported";
     if (canonicalShape)
-      diagnostic << ", canonical=(owners=" << canonicalShape->boundaryOwners
+      diagnostic << ", canonical=(boundary_patches="
+                 << canonicalShape->boundaryOwners
                  << ", access_layers=" << canonicalShape->accessLayers
                  << ", reaction_depth=" << canonicalShape->reactionDepth
                  << ", reaction_applications="
@@ -1502,7 +1503,7 @@ static LogicalResult verifyComponentPlan(SpacetimePlanOp plan) {
       source->getAttrOfType<StringAttr>("component_boundary_sha256") !=
           boundaryDigest)
     return plan.emitOpError(
-        "component plan source/objective/boundary commitment differs from "
+        "component plan source/action/boundary commitment differs from "
         "its exact retained protocol");
   bool characterized = plan.getDerivation() == "characterized";
   bool hasBuild = static_cast<bool>(plan.getSourceBuildSha256Attr());
@@ -1711,7 +1712,7 @@ static LogicalResult verifyComponentInvocation(SpacetimeCallOp call,
       source->getAttrOfType<StringAttr>("component_boundary_sha256") !=
           plan.getSourceBoundarySha256Attr())
     return call.emitOpError(
-        "component invocation source/objective/boundary differs from its plan");
+        "component invocation source/action/boundary differs from its plan");
   return success();
 }
 
@@ -2240,7 +2241,7 @@ static bool hasExactGidneyFowlerAutoCCZStructure(ProtocolOp protocol) {
       return false;
   }
 
-  // Track the current SSA owner for each semantic payload role.  Authors may
+  // Track the current SSI value for each semantic payload role.  Authors may
   // serialize the ring edge-by-edge or in three disjoint matchings; both are
   // the same circuit.  The provider authenticates dataflow, not source order.
   SmallVector<Value, 9> current{unpack.getOutputs()[3],
@@ -2483,17 +2484,17 @@ static LogicalResult verifyAutoCCZUnpackProvenance(UnpackResourceOp unpack) {
   if (!protocol || protocol.getBody().empty() ||
       protocol.getFunctionType().getNumInputs() != 3)
     return unpack.emitOpError(
-        "AutoCCZ unpack anchor provenance requires one three-owner protocol "
+        "AutoCCZ unpack anchor provenance requires one three-patch protocol "
         "boundary");
   Block &entry = protocol.getBody().front();
   if (entry.getNumArguments() != 3)
     return unpack.emitOpError(
-        "AutoCCZ unpack anchor provenance requires three entry owners");
+        "AutoCCZ unpack anchor provenance requires three entry patches");
   for (unsigned index = 0; index < 3; ++index)
     if (unpack.getAnchors()[index] != entry.getArgument(index))
       return unpack.emitOpError(
           "AutoCCZ unpack anchor provenance must bind the three main roles "
-          "to the ordered protocol owners");
+          "to the ordered protocol patches");
 
   SmallVector<Value, 6> routing(unpack.getAnchors().drop_front(3));
   SmallVector<Value, 6> orderedAllocations;
@@ -2604,7 +2605,7 @@ static LogicalResult verifyAutoCCZPackProvenance(PackResourceOp pack) {
     if (!uniqueRoots.insert(root).second)
       return pack.emitOpError(
           "AutoCCZ producer payload provenance must name nine distinct patch "
-          "owners");
+          "values");
 
   SmallVector<Value, 6> routing(roots.begin() + 3, roots.end());
   SmallVector<Value, 6> orderedAllocations;
@@ -2643,7 +2644,7 @@ static LogicalResult verifyAutoCCZPackProvenance(PackResourceOp pack) {
       continue;
     if (call.getNumOperands() != 2 || call.getNumResults() != 2)
       return pack.emitOpError(
-          "AutoCCZ ring CZ must preserve exactly two patch owners");
+          "AutoCCZ ring CZ must preserve exactly two patch values");
     auto left = rootIndex(call.getOperand(0));
     auto right = rootIndex(call.getOperand(1));
     if (!left || !right || *left == *right)
@@ -2761,10 +2762,10 @@ static bool isLogicalCXCall(CallOp call) {
 }
 
 /// Recognize one exact, boundary-preserving surface-code call box.  The
-/// analysis follows SSA ownership, never a helper spelling or an algorithm
-/// role. A valid box contains one layer of one or more authenticated AutoCCZ
-/// applications; exact CX calls may connect additional boundary owners to a
-/// three-owner reaction core. Each such external connection is one
+/// analysis follows SSI value threading, never a helper spelling or an
+/// algorithm role. A valid box contains one layer of one or more authenticated
+/// AutoCCZ applications; exact CX calls may connect additional boundary patches
+/// to a three-patch reaction core. Each such external connection is one
 /// alternating-access layer in the physical layout selected by the P3
 /// provider.
 static std::optional<qlx::spacetime::SurfaceSpacelikeShape>

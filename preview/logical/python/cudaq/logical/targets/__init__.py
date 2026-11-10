@@ -13,9 +13,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from cudaq.core.backends import (CompilationStage, CompileTarget, CostModel,
-                                 CustomTarget, LoopUnrolling, NoiseSupport,
-                                 QuakeUnmappedProfile)
+from cudaq.core._experimental import (CompilationStage, CompileTarget,
+                                      CostModel, CustomTarget, LoopUnrolling,
+                                      NoiseSupport, QuakeUnmappedProfile)
 from cudaq.util import trace
 
 from ..lower import (
@@ -399,7 +399,7 @@ def _cudaq_estimate_result(estimates):
     available); every tier, including LOGICAL, is also kept in ``annotations``.
     """
 
-    from cudaq.core.backends import EstimateResult
+    from cudaq.core.results import EstimateResult
     from .. import estimate
     from ..estimate.logical import logical_instruction_counts
 
@@ -1072,11 +1072,11 @@ def surface_target(*,
                    next_backend=None):
     """Build a surface-code target, optionally legalizing to Clifford+T."""
 
-    from . import recipes
+    from ..architectures import surface
 
     return qec_target(
         "surface",
-        architecture=recipes.surface_architecture(distance),
+        architecture=surface.architecture(distance),
         logical_capacity=logical_capacity,
         next_backend=next_backend,
         clifford_t_precision=clifford_t_precision,
@@ -1101,9 +1101,9 @@ def surface_physical_target(*,
 
     from .. import devices
     from ..architecture import physical_actions, physical_instruments
-    from . import recipes
+    from ..architectures import surface
 
-    architecture = recipes.surface_architecture(distance)
+    architecture = surface.architecture(distance)
     builder = devices.DeviceBuilder("surfacePhysicalDevice", source_module=None)
     compute = builder.logical.add_compute(capacity=logical_capacity)
     encoded = builder.qec.bind(compute, architecture=architecture)
@@ -1132,11 +1132,11 @@ def surface_physical_target(*,
 def steane_target(*, logical_capacity=3, next_backend=None):
     """Build a Steane-code QEC target with an estimation-only terminal."""
 
-    from . import recipes
+    from ..architectures import steane
 
     return qec_target(
         "steane",
-        architecture=recipes.steane_architecture(),
+        architecture=steane.architecture(),
         logical_capacity=logical_capacity,
         next_backend=next_backend,
     )
