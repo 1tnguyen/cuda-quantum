@@ -409,6 +409,437 @@ TEST(GraphSynthesis, HoldCheckpointScalarOnlyAndIdentityRotations) {
   }
 }
 
+TEST(GraphSynthesis, HoldOneWireCompletionRanksAfterCleanup) {
+  // Tdg H T H Tdg H Sdg H is stuck under ordinary native cleanup. Its normal
+  // form grows from eight to ten gates before cleanup reduces it to seven.
+  const std::vector<Gate> input{Gate::rotation({0, 16}, {-1, 4}),
+                                Gate::phase({-1, 8}),
+                                {Kind::H, 4},
+                                {Kind::H, 1},
+                                Gate::rotation({0, 16}, {1, 4}),
+                                {Kind::H, 4},
+                                Gate::rotation({0, 16}, {-1, 4}),
+                                {Kind::H, 4},
+                                {Kind::Sdg, 4},
+                                Gate::phase({0, 1, 7, true}),
+                                {Kind::H, 4}};
+  Options options;
+  options.algebraicCandidates = 4;
+  cudaq::pauli::SearchBudget budget(1000000000);
+  auto candidate = detail::normalizeHoldOneQubit(5, input, options, budget);
+  ASSERT_TRUE(candidate) << candidate.error;
+  assertUnitary(5, input, candidate.gates);
+  EXPECT_GT(cudaq::pauli::tcount::cost(5, candidate.gates).gates, 9u);
+  ASSERT_TRUE(detail::continueHoldNative(5, candidate, options, budget));
+  EXPECT_EQ(cudaq::pauli::tcount::cost(5, candidate.gates).gates, 8u);
+  EXPECT_EQ(cudaq::pauli::tcount::cost(5, candidate.gates).t, 3u);
+  assertUnitary(5, input, candidate.gates);
+}
+
+TEST(GraphSynthesis, HoldOneWireExactPhaseBarriersAndBounds) {
+  std::mt19937 rng(0x314354);
+  Options options;
+  for (unsigned trial = 0; trial < 12; ++trial) {
+    std::vector<Gate> input;
+    for (unsigned i = 0; i < 80; ++i) {
+      unsigned q = rng() % 2 ? 0 : 2;
+      if (i % 17 == 0)
+        input.push_back({Kind::CX, 0, 2});
+      if (i % 19 == 0) {
+        input.push_back(Gate::phase({0, 1, 3, true}));
+        input.push_back(Gate::rotation({0, 5}, {0, 1, 2}));
+      }
+      if (rng() % 2)
+        input.push_back({static_cast<Kind>(rng() % 6), q});
+      else {
+        unsigned axis = 1 + rng() % 3;
+        input.push_back(Gate::rotation(
+            {axis & 1 ? 1u << q : 0, axis & 2 ? 1u << q : 0, bool(rng() % 2)},
+            {int(rng() % 31) - 15, 4}));
+      }
+    }
+    cudaq::pauli::SearchBudget budget(1000000000);
+    auto candidate = detail::normalizeHoldOneQubit(3, input, options, budget);
+    ASSERT_TRUE(candidate) << candidate.error;
+    assertUnitary(3, input, candidate.gates);
+    auto reversed = detail::normalizeHoldOneQubit(
+        3, cudaq::pauli::tcount::detail::adjoint(input), options, budget);
+    ASSERT_TRUE(reversed) << reversed.error;
+    assertUnitary(3, input,
+                  cudaq::pauli::tcount::detail::adjoint(reversed.gates));
+    cudaq::pauli::SearchBudget none(0);
+    auto exhausted = detail::normalizeHoldOneQubit(3, input, options, none);
+    EXPECT_FALSE(exhausted);
+    EXPECT_EQ(exhausted.termination, SearchTermination::Exhausted);
+    EXPECT_TRUE(exhausted.gates.empty());
+    auto small = options;
+    small.maxGates = 1;
+    auto capped = detail::normalizeHoldOneQubit(3, input, small, budget);
+    EXPECT_FALSE(capped);
+    EXPECT_EQ(capped.termination, SearchTermination::Unsupported);
+  }
+  // A long uninterrupted chain must be cut without changing its full unitary.
+  std::vector<Gate> longWord;
+  for (unsigned i = 0; i < 300; ++i) {
+    longWord.push_back({Kind::H, 0});
+    longWord.push_back(Gate::rotation({0, 1}, {i % 2 ? 1 : -1, 4}));
+  }
+  cudaq::pauli::SearchBudget budget(1000000000);
+  auto split = detail::normalizeHoldOneQubit(1, longWord, options, budget);
+  ASSERT_TRUE(split) << split.error;
+  assertUnitary(1, longWord, split.gates);
+}
+
+TEST(GraphSynthesis, HoldLargeCompletionSeparatesScratchAndRetainedLimits) {
+  const auto phase = Gate::phase({0, 1, 7, true});
+  std::vector<Gate> source(40000, {Kind::CX, 0, 64});
+  source.insert(source.begin() + 20000, phase);
+  Options options;
+  options.algebraicCandidates = 4;
+  options.maxGates = 262144;
+  Result result;
+  result.gates = source;
+  cudaq::pauli::SearchBudget budget(1000000000);
+  ASSERT_TRUE(detail::completeHoldLargeNative(65, result, options, budget));
+  EXPECT_EQ(cudaq::pauli::tcount::cost(65, result.gates).gates, 0u);
+  EXPECT_EQ(cudaq::pauli::tcount::cost(65, result.gates).t, 0u);
+  std::vector<Gate> compactSource, compactResult;
+  for (const auto &gate : source)
+    compactSource.push_back(
+        detail::linear_window_detail::compact(gate, {0, 64}));
+  for (const auto &gate : result.gates)
+    compactResult.push_back(
+        detail::linear_window_detail::compact(gate, {0, 64}));
+  assertUnitary(2, compactSource, compactResult);
+  cudaq::pauli::SearchBudget none(0);
+  result.gates = source;
+  ASSERT_TRUE(detail::completeHoldLargeNative(65, result, options, none));
+  EXPECT_TRUE(detail::native_refinement_detail::sameWord(source, result.gates));
+
+  // Cleanup may introduce another entangler; lower it before admission.
+  for (bool useCX : {false, true}) {
+    options.nativeCX = useCX;
+    options.nativeCZ = !useCX;
+    options.nativeSwap = false;
+    std::vector<Gate> word{{Kind::H, 1},
+                           {Kind::CZ, 0, 1},
+                           {Kind::H, 1},
+                           {Kind::Swap, 0, 1},
+                           {Kind::Swap, 0, 1}};
+    word = detail::nativeWord(word, options);
+    result.gates = word;
+    cudaq::pauli::SearchBudget nativeBudget(1000000000);
+    ASSERT_TRUE(
+        detail::completeHoldLargeNative(2, result, options, nativeBudget));
+    assertUnitary(2, word, result.gates);
+    for (const auto &gate : result.gates) {
+      EXPECT_NE(gate.kind, useCX ? Kind::CZ : Kind::CX);
+      EXPECT_NE(gate.kind, Kind::Swap);
+    }
+  }
+}
+
+TEST(GraphSynthesis, HoldFineCheckpointsReconstructReverseAndScalarWitnesses) {
+  const std::vector<Gate> input{{Kind::H, 4},
+                                {Kind::CX, 4, 1},
+                                Gate::phase({3, 8}),
+                                Gate::rotation({0, 2}, {-1, 4}),
+                                Gate::phase({0, 1, 7, true}),
+                                {Kind::Swap, 1, 3},
+                                Gate::rotation({0b01010, 0b10000}, {1, 4})};
+  Options options;
+  options.algebraicCandidates = 4;
+  options.discrepancySteps = 0;
+  auto reconstruct = [](unsigned width, const std::vector<Gate> &word,
+                        const Options &settings,
+                        cudaq::pauli::SearchBudget *budget) {
+    auto local = settings;
+    local.holdCheckpoints = false;
+    return synthesizeUnitary(width, word, local, budget);
+  };
+  for (unsigned cap : {1u, 2u})
+    for (bool reverse : {false, true}) {
+      cudaq::pauli::SearchBudget budget(1000000000);
+      auto result = detail::synthesizeHoldFineBlocks(5, input, options, budget,
+                                                     cap, reverse, reconstruct);
+      ASSERT_TRUE(result) << result.error;
+      assertUnitary(5, input, result.gates);
+    }
+}
+
+TEST(GraphSynthesis, HoldOverlapRejectsInvalidProofAndRetainsExhaustedWord) {
+  auto input = holdThreeWireGadget(0, 2, 4);
+  Options options;
+  options.algebraicCandidates = 4;
+  for (auto status :
+       {SearchTermination::Exhausted, SearchTermination::InvalidProof}) {
+    auto callback = [&](unsigned, const std::vector<Gate> &, const Options &,
+                        cudaq::pauli::SearchBudget *) {
+      return detail::holdFailure("injected overlap failure", status);
+    };
+    Result result;
+    result.gates = input;
+    cudaq::pauli::SearchBudget budget(1000000);
+    bool valid =
+        detail::refineHoldOverlapping(5, result, options, budget, callback);
+    if (status == SearchTermination::InvalidProof) {
+      EXPECT_FALSE(valid);
+      EXPECT_EQ(result.termination, status);
+    } else {
+      ASSERT_TRUE(valid);
+      assertUnitary(5, input, result.gates);
+    }
+  }
+}
+
+TEST(GraphSynthesis, HoldFineCacheBindsCompleteCompactSource) {
+  const std::vector<Gate> input{{Kind::H, 0}, Gate::rotation({0, 1}, {1, 4}),
+                                {Kind::H, 4}, Gate::rotation({0, 16}, {1, 4}),
+                                {Kind::H, 0}, Gate::rotation({0, 1}, {1, 4}),
+                                {Kind::H, 4}, Gate::rotation({0, 16}, {-1, 4})};
+  Options options;
+  options.discrepancySteps = 0;
+  unsigned rebuilt = 0;
+  auto reconstruct = [&](unsigned width, const std::vector<Gate> &word,
+                         const Options &settings,
+                         cudaq::pauli::SearchBudget *budget) {
+    ++rebuilt;
+    return synthesizeUnitary(width, word, settings, budget);
+  };
+  cudaq::pauli::SearchBudget budget(100000000);
+  auto result = detail::synthesizeHoldFineBlocks(5, input, options, budget, 1,
+                                                 false, reconstruct);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_EQ(rebuilt, 2u); // Same local word on different wires; distinct angle.
+  assertUnitary(5, input, result.gates);
+}
+
+TEST(GraphSynthesis, HoldWindowCacheBindsSearchAndScalarWitnesses) {
+  detail::HoldReconstructionCache cache;
+  unsigned calls = 0;
+  detail::HoldSynthesis reconstruct =
+      [&](unsigned width, const std::vector<Gate> &word, const Options &options,
+          cudaq::pauli::SearchBudget *work) {
+        ++calls;
+        return synthesizeUnitary(width, word, options, work);
+      };
+  Options options;
+  options.holdCheckpoints = false;
+  options.discrepancySteps = 2;
+  cudaq::pauli::SearchBudget budget(100000000);
+  std::vector<Gate> word{
+      {Kind::CX, 0, 1}, {Kind::CX, 0, 1}, Gate::phase({1, 4})};
+  auto first = cache.reconstruct(2, word, options, &budget, reconstruct);
+  ASSERT_TRUE(first) << first.error;
+  auto reused = cache.reconstruct(2, word, options, &budget, reconstruct);
+  ASSERT_TRUE(reused) << reused.error;
+  EXPECT_EQ(calls, 1u);
+  assertUnitary(2, word, reused.gates);
+  options.discrepancySteps = 0;
+  auto otherSearch = cache.reconstruct(2, word, options, &budget, reconstruct);
+  ASSERT_TRUE(otherSearch) << otherSearch.error;
+  EXPECT_EQ(calls, 2u);
+  word.back() = Gate::phase({-1, 4});
+  auto otherPhase = cache.reconstruct(2, word, options, &budget, reconstruct);
+  ASSERT_TRUE(otherPhase) << otherPhase.error;
+  EXPECT_EQ(calls, 3u);
+  assertUnitary(2, word, otherPhase.gates);
+}
+
+TEST(GraphSynthesis, HoldCheckpointCacheRetainsReconstruction) {
+  std::vector<Gate> input;
+  for (unsigned i = 0; i < 64; ++i) {
+    input.push_back({Kind::H, 0});
+    input.push_back({Kind::CX, 0, 1});
+    input.push_back(Gate::rotation({0, 2}, {1, 4}));
+    input.push_back({Kind::Sdg, 1});
+  }
+  Options options;
+  options.algebraicCandidates = 0;
+  options.discrepancySteps = 0;
+  unsigned calls = 0;
+  auto reconstruct = [&](unsigned width, const std::vector<Gate> &word,
+                         const Options &settings,
+                         cudaq::pauli::SearchBudget *work) {
+    ++calls;
+    return synthesizeUnitary(width, word, settings, work);
+  };
+  cudaq::pauli::SearchBudget directBudget(100000000), cachedBudget(100000000);
+  auto direct = detail::synthesizeHoldBlocks(2, input, options, directBudget, 3,
+                                             reconstruct);
+  ASSERT_TRUE(direct) << direct.error;
+  EXPECT_EQ(calls, 4u);
+  calls = 0;
+  auto cached = detail::synthesizeHoldCachedBlocks(
+      2, input, options, cachedBudget, 3, reconstruct);
+  ASSERT_TRUE(cached) << cached.error;
+  EXPECT_EQ(calls, 1u);
+  EXPECT_TRUE(
+      detail::native_refinement_detail::sameWord(direct.gates, cached.gates));
+  assertUnitary(2, input, cached.gates);
+}
+
+TEST(GraphSynthesis, HoldWideReverseWindowsRetainTAndScalarWitnesses) {
+  auto t = [](unsigned q, int sign) {
+    return Gate::rotation({0, uint64_t(1) << q}, {sign, 4});
+  };
+  const std::vector<Gate> input{t(2, -1),
+                                {Kind::CZ, 1, 4},
+                                {Kind::CX, 1, 2},
+                                {Kind::CZ, 1, 5},
+                                {Kind::CX, 1, 5},
+                                {Kind::H, 1},
+                                {Kind::CX, 1, 2},
+                                {Kind::CX, 4, 2},
+                                t(1, -1),
+                                {Kind::H, 2},
+                                {Kind::CX, 2, 5},
+                                {Kind::CX, 0, 1},
+                                t(1, 1),
+                                {Kind::CX, 4, 1},
+                                t(1, -1),
+                                {Kind::CX, 0, 1},
+                                t(1, 1),
+                                {Kind::CZ, 0, 3},
+                                {Kind::CZ, 0, 4},
+                                {Kind::CX, 0, 4},
+                                {Kind::H, 0},
+                                t(0, -1),
+                                {Kind::CX, 0, 1},
+                                {Kind::CX, 3, 1},
+                                {Kind::H, 1},
+                                {Kind::CX, 1, 4},
+                                Gate::phase({-1, 4}),
+                                Gate::phase({0, 1, 19})};
+  Options options;
+  options.algebraicCandidates = 4;
+  options.candidateNodes = 1;
+  options.lookahead = 16;
+  auto reconstruct = [](unsigned width, const std::vector<Gate> &word,
+                        const Options &settings,
+                        cudaq::pauli::SearchBudget *work) {
+    return synthesizeUnitary(width, word, settings, work);
+  };
+  Result result;
+  result.gates = input;
+  cudaq::pauli::SearchBudget budget(1000000000);
+  ASSERT_TRUE(
+      detail::refineHoldWideReverse(6, result, options, budget, reconstruct));
+  ASSERT_TRUE(result) << result.error;
+  auto before = cudaq::pauli::tcount::cost(6, input);
+  auto after = cudaq::pauli::tcount::cost(6, result.gates);
+  EXPECT_LT(after.gates, before.gates);
+  EXPECT_LE(after.t, before.t);
+  assertUnitary(6, input, result.gates);
+}
+
+TEST(GraphSynthesis, HoldTRepairExploresInteriorCompletions) {
+  auto t = [](int sign) { return Gate::rotation({0, 2}, {sign, 4}); };
+  const std::vector<Gate> input{{Kind::CX, 1, 2},
+                                {Kind::CX, 1, 0},
+                                {Kind::H, 1},
+                                {Kind::CX, 2, 1},
+                                t(-1),
+                                {Kind::CX, 0, 1},
+                                t(1),
+                                {Kind::CX, 2, 1},
+                                t(-1),
+                                {Kind::CX, 0, 1},
+                                t(1),
+                                {Kind::H, 1},
+                                {Kind::CX, 1, 3},
+                                {Kind::H, 1},
+                                {Kind::CX, 2, 1},
+                                t(-1),
+                                {Kind::CX, 0, 1},
+                                t(1),
+                                {Kind::CX, 2, 1},
+                                t(-1),
+                                {Kind::CX, 0, 1},
+                                t(1),
+                                {Kind::CZ, 0, 2},
+                                {Kind::H, 1},
+                                {Kind::CX, 1, 0},
+                                {Kind::CX, 0, 2},
+                                {Kind::H, 0},
+                                Gate::phase({1, 8}),
+                                Gate::phase({0, 1, 19})};
+  Options options;
+  options.algebraicCandidates = 4;
+  options.candidateNodes = 1;
+  options.lookahead = 16;
+  auto reconstruct = [](unsigned width, const std::vector<Gate> &word,
+                        const Options &settings,
+                        cudaq::pauli::SearchBudget *work) {
+    EXPECT_EQ(settings.objective, SynthesisObjective::TCount);
+    EXPECT_EQ(settings.candidateNodes, 0u);
+    return synthesizeUnitary(width, word, settings, work);
+  };
+  Result result;
+  result.gates = input;
+  cudaq::pauli::SearchBudget budget(1000000000);
+  ASSERT_TRUE(detail::repairHoldT(4, result, 7, options, budget, reconstruct));
+  ASSERT_TRUE(result) << result.error;
+  const auto before = cudaq::pauli::tcount::cost(4, input);
+  const auto after = cudaq::pauli::tcount::cost(4, result.gates);
+  EXPECT_EQ(after.t, 7u);
+  EXPECT_LE(after.gates, before.gates + 3);
+  assertUnitary(4, input, result.gates);
+
+  Result exhausted;
+  exhausted.gates = input;
+  cudaq::pauli::SearchBudget noWork(0);
+  EXPECT_TRUE(
+      detail::repairHoldT(4, exhausted, 7, options, noWork, reconstruct));
+  EXPECT_TRUE(
+      detail::native_refinement_detail::sameWord(input, exhausted.gates));
+  Result invalid;
+  invalid.gates = input;
+  cudaq::pauli::SearchBudget proofWork(1000000);
+  auto reject = [](unsigned, const std::vector<Gate> &, const Options &,
+                   cudaq::pauli::SearchBudget *) {
+    return detail::holdFailure("injected T-repair proof failure",
+                               SearchTermination::InvalidProof);
+  };
+  EXPECT_FALSE(detail::repairHoldT(4, invalid, 7, options, proofWork, reject));
+  EXPECT_EQ(invalid.termination, SearchTermination::InvalidProof);
+  EXPECT_TRUE(invalid.gates.empty());
+}
+
+TEST(GraphSynthesis, HoldTotalGatesRetainsIncumbentTSavings) {
+  // Eight quarter turns give -I. Both proposed circuits implement that same
+  // full unitary: a long Clifford word versus two inverse T rotations.
+  std::vector<Gate> input(8, Gate::rotation({0, 1}, {1, 4}));
+  for (auto objective :
+       {SynthesisObjective::TotalGates, SynthesisObjective::TCount}) {
+    unsigned calls = 0;
+    auto callback = [&](unsigned, const std::vector<Gate> &, const Options &,
+                        cudaq::pauli::SearchBudget *) {
+      Result result;
+      result.gates.push_back(Gate::phase({1, 1}));
+      if (++calls == 1)
+        result.gates.insert(result.gates.end(), 60, {Kind::H, 0});
+      else {
+        result.gates.push_back(Gate::rotation({0, 1}, {1, 4}));
+        result.gates.push_back(Gate::rotation({0, 1}, {-1, 4}));
+      }
+      return result;
+    };
+    Options options;
+    options.objective = objective;
+    options.discrepancySteps = 0;
+    cudaq::pauli::SearchBudget budget(1000000);
+    auto result =
+        detail::synthesizeHoldPortfolio(1, input, options, budget, callback);
+    ASSERT_TRUE(result) << result.error;
+    assertUnitary(1, input, result.gates);
+    auto cost = cudaq::pauli::tcount::cost(1, result.gates);
+    EXPECT_EQ(cost.gates, 60u);
+    EXPECT_EQ(cost.t, 0u);
+    EXPECT_LE(cost.t, cudaq::pauli::tcount::cost(1, input).t);
+  }
+}
+
 TEST(GraphSynthesis, HoldCheckpointInvalidProofIsFatalAfterAnIncumbentExists) {
   const std::vector<Gate> input{{Kind::H, 0}};
   unsigned calls = 0;

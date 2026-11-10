@@ -49,6 +49,84 @@ Completion and final admission include the tail's native cost. Native and
 Clifford-window continuations compose their source-bound, phase-sensitive
 certificates with this proof.
 
+The research portfolio then explores one- and two-wire checkpoints in forward
+and adjoint traversal order. Each route rebuilds every graph and full frame;
+an operation wider than its checkpoint is reconstructed on its full support.
+Scalar witnesses are carried exactly. Each route receives at most 20B work
+and 12 seconds, subject to the parent budget. The checkpoint and overlapping-window routes use a bounded cache that reuses a local
+reconstruction only after exact compact-source and width comparison. Hashes
+alone never authorize proof reuse. Generated complete words receive up to four
+native refinement rounds before ranking, sharing their enclosing route deadline
+rather than imposing a second three-second cutoff, so boundary choices are judged after
+their cancellation opportunities have been realized.
+
+A final optional 30B-work/40-second search re-synthesizes overlapping windows
+of the generated incumbent, using 24/48-operation spans and three/four active
+wires. Local phase-sensitive proofs extend by identity to the other wires.
+Only a verified full-word improvement is admitted. These additions are bounded
+to 262,144 stored operations and preserve the earlier routes' order and slices.
+A separate six-wire adjoint-window route uses 48/96-operation spans and a
+20B-work/20-second allowance. It removes scalar operations from the scan quota
+and restores their exact witnesses before admission. Their additional runtime
+and current spot-validation status are recorded in
+[the research log](pbc_hold_research.md).
+
+Short complete reconstructions can still exceed an incumbent's T count. Keep
+at most two such alternatives (262,144 stored operations in aggregate) while
+finishing the incumbent's existing searches. A final bounded T-repair route
+then explores four-wire regions with at least seven T gates, all cheapest
+ready nodes, and a local T-count objective. It trims up to three trailing
+operations rather than considering only maximal windows. Local replacements
+may cost at most three extra gates per T saved. The enclosing circuit must
+still improve the incumbent's configured total-gate rank and must retain its
+T savings. This route has a separate 20B-work/10-second allowance and never
+uses the preserved-network result. Deferring admission protects improvements
+on the existing search trajectory.
+
+The last two alternatives normalize single-qubit Clifford+T chains of the
+generated incumbent in forward and adjoint order before native cleanup. It may temporarily increase Clifford gates:
+ranking the normal form before cleanup can discard a shorter completed word.
+Each chain is at most 512 operations. Normalization is checked by exact 2x2
+matrices over the cyclotomic ring, including scalar phase, independently of the
+normal-form rewrite tables. Entanglers and unsupported rotations are barriers
+on their touched wires; scalar witnesses commute and remain exact. A separate
+20B-work/12-second allowance per direction and a 262,144-operation cap bound
+these routes. Final
+admission still requires an improved objective and nonincreasing T count.
+
+A deferred large-word alternative follows all those searches. For inputs with
+32,769–262,144 stored operations it rebuilds one-wire checkpoints in adjoint
+order, then completes the native word and both one-wire normal forms before
+ranking. Native temporary expansion has its own allowance, bounded by
+2,101,256 operations for supported widths, while retained words remain capped
+at 262,144. This avoids rejecting cleanup solely because its temporary bound
+exceeds the retained-result cap. The route has at most 30B work/90 seconds,
+with 30-second native stages and the enclosing deadline still authoritative.
+Each native stage first runs the checked gate-count backend directly under its
+stage allowance, then composes the native adapter's T-merging and linear
+alternatives. This prevents successive budget reservations inside the adapter
+from discarding the initial large cleanup. Both paths retain the input on
+exhaustion; all comparisons require nonincreasing T.
+Only a completed objective improvement that retains incumbent T savings is admitted.
+
+```mermaid
+flowchart TD
+    S[Normalized hold source] --> R[Rebuild local graphs and complete Clifford frames]
+    S --> A[Alternate checkpoint widths and traversal directions]
+    A --> R
+    R --> C[Source-bound full-unitary candidate]
+    C --> N[Checked native cleanup and one-qubit completion]
+    C --> W[Bounded overlap and deferred T-repair proposals]
+    N --> G{Better completed objective and no T increase?}
+    G -->|yes| I[Retained hold circuit]
+    G -->|no| K[Keep incumbent]
+    I --> W
+    W --> N
+```
+
+The preserved-network output participates only in the external benchmark
+comparison. It is absent from the candidate-generation and admission paths.
+
 The generic planning view marks quantum-boundary requests explicitly; the
 measured candidate sink rejects those requests. No fictitious measurements are
 introduced to represent a quantum output. Release plans retain their original
@@ -82,8 +160,12 @@ The regional readout beam and the joint planner's partial readout-context scorer
 also remain release-specific. Hold uses exit-carrying regional sweeps and full
 Clifford completion when scoring complete joint plans. Its search remains
 bounded and heuristic; there is no promise that a cheap prefix has a cheap tail.
-Hold ranks complete proposals by the configured objective with a T-nonincreasing
-guard against its verified incumbent. The release portfolio's joint acceptance
+Hold ranks complete proposals by the configured objective, always retaining
+its verified incumbent's T savings. A total-gate improvement cannot trade back
+T saved by an earlier hold result. Depth and T-depth can trade off against total
+gates. Benchmark acceptance separately allows up to three extra total gates
+per T saved against preserved network; that reference is never a synthesis
+input or candidate. The release portfolio's joint acceptance
 and legacy scheduling policies remain release-specific. Exact native
 hold continuations rank source-bound generated words by the requested objective
 with nonincreasing T count, allowing explicitly visible secondary-metric
