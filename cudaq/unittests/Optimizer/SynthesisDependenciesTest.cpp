@@ -283,3 +283,67 @@ TEST(SynthesisDependencies, EmptyAndInvalidOccurrenceQueries) {
   EXPECT_EQ(one.value->consume(0).error, DependencyError::InvalidOccurrence);
   EXPECT_FALSE(*one.value->ready(0).value);
 }
+
+TEST(SynthesisDependencies, SparseConflictsFitLinearWorkBudget) {
+  std::vector<Pauli> word;
+  for (unsigned q = 0; q < 512; ++q) {
+    word.push_back({QubitSet::single(q), {}});
+    word.push_back({{}, QubitSet::single(q)});
+  }
+  // Pairwise discovery needs over 500,000 comparisons for this word.
+  SearchBudget budget(20000);
+  auto index = DependencyIndex::build(word, 512, &budget);
+  ASSERT_TRUE(index);
+  EXPECT_EQ(index.value->statistics().logicalEdges, 512u);
+  EXPECT_EQ(index.value->statistics().storedConflicts, 1024u);
+  auto cursor = DependencyCursor::create(*index.value);
+  ASSERT_TRUE(cursor);
+  std::vector<bool> active(word.size(), true);
+  checkReadySet(*cursor.value, word, active);
+  for (unsigned i = 0; i < word.size(); i += 2) {
+    ASSERT_TRUE(cursor.value->consume(i));
+    active[i] = false;
+  }
+  checkReadySet(*cursor.value, word, active);
+}
+
+TEST(SynthesisDependencies, IndexedOverlapsMatchDenseOracle) {
+  std::mt19937 random(20261113);
+  std::vector<Pauli> word;
+  for (unsigned q = 0; q < 80; ++q) {
+    auto support = QubitSet::single(q) | QubitSet::single((q + 1) % 80);
+    // XX and ZZ overlap twice and commute; YY exercises duplicate hits.
+    word.push_back({support, {}});
+    word.push_back({{}, support});
+    word.push_back({support, support, true});
+  }
+  word.push_back(word[0]); // Multiplicity affects logical edge counts.
+  SearchBudget budget(100000);
+  auto index = DependencyIndex::build(word, unlimited, &budget);
+  ASSERT_TRUE(index);
+  EXPECT_EQ(index.value->statistics().logicalEdges, referenceEdges(word));
+  auto cap = DependencyIndex::build(word, referenceEdges(word) - 1);
+  EXPECT_EQ(cap.error, DependencyError::DependencyLimit);
+  SearchBudget shortBudget(budget.work() - 1);
+  EXPECT_EQ(DependencyIndex::build(word, unlimited, &shortBudget).error,
+            DependencyError::WorkLimit);
+  // Force pairwise fallback by withholding optional index storage.
+  auto fallback = DependencyIndex::build(word, unlimited, nullptr, 400000);
+  ASSERT_TRUE(fallback);
+  EXPECT_EQ(fallback.value->statistics().logicalEdges, referenceEdges(word));
+  for (unsigned trial = 0; trial < 16; ++trial) {
+    auto cursor = DependencyCursor::create(*index.value);
+    auto dense = DependencyCursor::create(*fallback.value);
+    ASSERT_TRUE(cursor);
+    ASSERT_TRUE(dense);
+    std::vector<bool> active(word.size(), true);
+    for (unsigned i = word.size(); i-- > 0;)
+      if (random() & 1u) {
+        ASSERT_TRUE(cursor.value->consume(i));
+        ASSERT_TRUE(dense.value->consume(i));
+        active[i] = false;
+      }
+    checkReadySet(*cursor.value, word, active);
+    checkReadySet(*dense.value, word, active);
+  }
+}

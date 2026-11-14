@@ -8,15 +8,30 @@ from research_gate import compare
 
 
 class ResearchGateTest(unittest.TestCase):
+
     def setUp(self):
         metrics = dict(total=120, t=9, twoq=40, depth=80, tdepth=8)
-        self.baseline = {"cases": [dict(
-            case_id="adder", source_sha256="source", hold=metrics,
-            preserve={**metrics, "total": 100, "t": 10},
-            output_sha256="old")]}
-        self.candidate = {"cases": [dict(
-            case_id="adder", source_sha256="source", metrics=metrics.copy(),
-            output_sha256="new", hold_certificate_verified=True)]}
+        self.baseline = {
+            "cases": [
+                dict(case_id="adder",
+                     source_sha256="source",
+                     hold=metrics,
+                     preserve={
+                         **metrics, "total": 100,
+                         "t": 10
+                     },
+                     output_sha256="old")
+            ]
+        }
+        self.candidate = {
+            "cases": [
+                dict(case_id="adder",
+                     source_sha256="source",
+                     metrics=metrics.copy(),
+                     output_sha256="new",
+                     hold_certificate_verified=True)
+            ]
+        }
 
     def test_three_gates_per_saved_t_boundary(self):
         for saved_t in (1, 2):
@@ -33,7 +48,8 @@ class ResearchGateTest(unittest.TestCase):
         self.candidate["cases"][0]["metrics"].update(total=99, t=10)
         result = compare(self.baseline, self.candidate)
         self.assertFalse(result["admissible"])
-        self.assertTrue(any("T ceiling exceeded" in x for x in result["issues"]))
+        self.assertTrue(any(
+            "T ceiling exceeded" in x for x in result["issues"]))
 
     def test_evidence_and_coverage_are_mandatory(self):
         for mutation in ("missing", "duplicate", "binding", "proof", "failure"):
@@ -49,7 +65,8 @@ class ResearchGateTest(unittest.TestCase):
             else:
                 candidate["cases"][0]["metrics"] = None
             with self.subTest(mutation=mutation):
-                self.assertFalse(compare(self.baseline, candidate)["admissible"])
+                self.assertFalse(
+                    compare(self.baseline, candidate)["admissible"])
 
 
 if __name__ == "__main__":
