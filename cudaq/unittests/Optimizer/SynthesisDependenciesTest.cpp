@@ -347,3 +347,140 @@ TEST(SynthesisDependencies, IndexedOverlapsMatchDenseOracle) {
     checkReadySet(*dense.value, word, active);
   }
 }
+
+// Batched dense charging must record the same work as per-pair charging
+// when any limit stops the build.
+TEST(SynthesisDependencies, DenseBlockedChargingMatchesPerPairOrder) {
+  std::mt19937 random(7);
+  std::vector<Pauli> word;
+  for (unsigned i = 0; i < 110; ++i) {
+    if (i > 8 && random() % 6 == 0) {
+      word.push_back(word[random() % i]); // Repeats raise per-pair edges.
+      word.back().sign = random() & 1;
+      continue;
+    }
+    QubitSet x, z;
+    for (unsigned q = 0; q < 70; ++q) {
+      x.set(q, random() & 1);
+      z.set(q, random() & 1);
+    }
+    word.push_back({x, z});
+  }
+  std::vector<Pauli> axes;
+  std::vector<uint64_t> multiplicity;
+  for (auto pauli : word) {
+    pauli.sign = false;
+    auto found = std::find(axes.begin(), axes.end(), pauli);
+    if (found == axes.end()) {
+      axes.push_back(pauli);
+      multiplicity.push_back(1);
+    } else {
+      ++multiplicity[found - axes.begin()];
+    }
+  }
+  ASSERT_GT(axes.size(), 64 + 20); // Multiple and partial blocks per row.
+  struct Pair {
+    bool conflict;
+    uint64_t edges;
+  };
+  std::vector<Pair> pairs;
+  uint64_t conflicts = 0;
+  for (unsigned a = 0; a < axes.size(); ++a)
+    for (unsigned b = a + 1; b < axes.size(); ++b) {
+      bool anti = axes[a].anti(axes[b]);
+      pairs.push_back({anti, multiplicity[a] * multiplicity[b]});
+      conflicts += anti;
+    }
+  ASSERT_GT(conflicts, 0);
+
+  SearchBudget probe(unlimited);
+  auto full = DependencyIndex::build(word, unlimited, &probe);
+  ASSERT_TRUE(full);
+  uint64_t total = probe.work();
+  uint64_t prefixWork = total - pairs.size() - 2 * conflicts;
+  uint64_t prefixBytes = full.value->statistics().storageBytes - 32 * conflicts;
+  uint64_t edges = full.value->statistics().logicalEdges;
+
+  // Work charged when `stop` first fires.
+  auto replay = [&](auto stop) -> std::optional<uint64_t> {
+    uint64_t charged = prefixWork;
+    for (const auto &pair : pairs) {
+      if (stop(false, charged, 1, pair))
+        return charged;
+      charged += 1;
+      if (!pair.conflict)
+        continue;
+      if (stop(true, charged, 2, pair))
+        return charged;
+      charged += 2;
+    }
+    return std::nullopt;
+  };
+
+  for (uint64_t limit = prefixWork; limit <= total; ++limit) {
+    auto expected =
+        replay([&](bool, uint64_t charged, uint64_t cost, const Pair &) {
+          return charged + cost > limit;
+        });
+    SearchBudget plain(limit);
+    auto built = DependencyIndex::build(word, unlimited, &plain);
+    // Also limit through a parent budget.
+    SearchBudget root(limit);
+    SearchBudget child(root, unlimited);
+    auto nested = DependencyIndex::build(word, unlimited, &child);
+    if (!expected) {
+      ASSERT_TRUE(built) << limit;
+      ASSERT_TRUE(nested) << limit;
+      EXPECT_EQ(plain.work(), total);
+      continue;
+    }
+    ASSERT_EQ(built.error, DependencyError::WorkLimit) << limit;
+    ASSERT_EQ(plain.work(), *expected) << limit;
+    ASSERT_EQ(nested.error, DependencyError::WorkLimit) << limit;
+    ASSERT_EQ(child.work(), *expected) << limit;
+    ASSERT_EQ(root.work(), *expected) << limit;
+  }
+
+  for (uint64_t cap = 0; cap <= edges; ++cap) {
+    uint64_t accepted = 0;
+    auto expected =
+        replay([&](bool storing, uint64_t, uint64_t, const Pair &pair) {
+          if (!storing)
+            return false;
+          if (pair.edges > cap - accepted)
+            return true;
+          accepted += pair.edges;
+          return false;
+        });
+    SearchBudget budget(unlimited);
+    auto built = DependencyIndex::build(word, cap, &budget);
+    if (!expected) {
+      ASSERT_TRUE(built) << cap;
+      continue;
+    }
+    ASSERT_EQ(built.error, DependencyError::DependencyLimit) << cap;
+    ASSERT_EQ(budget.work(), *expected) << cap;
+  }
+
+  // Storage failures happen after take(2).
+  for (uint64_t bytes = prefixBytes; bytes <= prefixBytes + 32 * conflicts;
+       bytes += 8) {
+    uint64_t stored = prefixBytes;
+    auto expected = replay([&](bool storing, uint64_t, uint64_t, const Pair &) {
+      if (!storing)
+        return false;
+      if (32 > bytes - stored)
+        return true;
+      stored += 32;
+      return false;
+    });
+    SearchBudget budget(unlimited);
+    auto built = DependencyIndex::build(word, unlimited, &budget, bytes);
+    if (!expected) {
+      ASSERT_TRUE(built) << bytes;
+      continue;
+    }
+    ASSERT_EQ(built.error, DependencyError::StorageLimit) << bytes;
+    ASSERT_EQ(budget.work(), *expected + 2) << bytes;
+  }
+}

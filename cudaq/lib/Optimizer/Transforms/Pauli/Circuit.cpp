@@ -25,9 +25,6 @@ unsigned Pauli::axis(unsigned q) const {
   return unsigned(x.test(q)) | (unsigned(z.test(q)) << 1);
 }
 unsigned Pauli::weight() const { return x.unionCount(z); }
-bool Pauli::anti(const Pauli &p) const {
-  return (x.intersectionCount(p.z) + z.intersectionCount(p.x)) & 1;
-}
 Angle Angle::negated() const {
   Angle a = *this;
   if (a.symbol)

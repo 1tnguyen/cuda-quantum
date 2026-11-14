@@ -179,41 +179,96 @@ public:
     }
     result.counts.occurrences = word.size();
     result.counts.classes = axes.size();
+    // Store a conflicting pair. With `deferred`, its two work units are added
+    // there instead of being taken from the budget.
+    auto record = [&](unsigned a, unsigned b, uint64_t *deferred = nullptr) {
+      uint64_t na = result.occurrences[a].size();
+      uint64_t nb = result.occurrences[b].size();
+      // Every pair of occurrences in distinct conflicting classes
+      // contributes exactly one directed edge, regardless of their order.
+      if (na > std::numeric_limits<uint64_t>::max() / nb)
+        return DependencyError::SizeOverflow;
+      uint64_t edges = na * nb;
+      if (edges > maxLogicalDependencies - result.counts.logicalEdges)
+        return DependencyError::DependencyLimit;
+      if (result.counts.storedConflicts >
+          std::numeric_limits<uint64_t>::max() - 2)
+        return DependencyError::SizeOverflow;
+      if (deferred)
+        *deferred += 2;
+      else if (!take(2))
+        return DependencyError::WorkLimit;
+      if (!reserve(32))
+        return DependencyError::StorageLimit;
+      result.conflicts[a].push_back(b);
+      result.conflicts[b].push_back(a);
+      result.counts.logicalEdges += edges;
+      result.counts.storedConflicts += 2;
+      return DependencyError::None;
+    };
     auto compare = [&](unsigned a, const auto &others) {
       for (unsigned b : others) {
         if (!take())
           return DependencyError::WorkLimit;
         if (!axes[a].anti(axes[b]))
           continue;
-        uint64_t na = result.occurrences[a].size();
-        uint64_t nb = result.occurrences[b].size();
-        // Every pair of occurrences in distinct conflicting classes
-        // contributes exactly one directed edge, regardless of their order.
-        if (na > std::numeric_limits<uint64_t>::max() / nb)
-          return DependencyError::SizeOverflow;
-        uint64_t edges = na * nb;
-        if (edges > maxLogicalDependencies - result.counts.logicalEdges)
-          return DependencyError::DependencyLimit;
-        if (result.counts.storedConflicts >
-            std::numeric_limits<uint64_t>::max() - 2)
-          return DependencyError::SizeOverflow;
-        if (!take(2))
-          return DependencyError::WorkLimit;
-        if (!reserve(32))
-          return DependencyError::StorageLimit;
-        result.conflicts[a].push_back(b);
-        result.conflicts[b].push_back(a);
-        result.counts.logicalEdges += edges;
-        result.counts.storedConflicts += 2;
+        if (auto error = record(a, b); error != DependencyError::None)
+          return error;
       }
       return DependencyError::None;
     };
     if (!sparse) {
-      for (unsigned a = 0; a < axes.size(); ++a)
-        if (auto error =
-                compare(a, std::views::iota(a + 1, unsigned(axes.size())));
-            error != DependencyError::None)
-          return {std::nullopt, error};
+      // Charge n units at once, or one at a time when the budget may run out
+      // so failures record the same work as per-pair charging.
+      auto charge = [&](uint64_t n) {
+        if (!budget || !n)
+          return true;
+        if (budget->remaining() >= n)
+          return budget->take(n);
+        for (; n; --n)
+          if (!budget->take())
+            return false;
+        return true;
+      };
+      // Test pairs in blocks of 64, then store conflicts in pair order. A
+      // block costs at most 3 units per pair; if the budget covers that,
+      // charge it once at the end.
+      for (unsigned a = 0; a < axes.size(); ++a) {
+        const Pauli &left = axes[a];
+        for (unsigned base = a + 1; base < axes.size(); base += 64) {
+          unsigned end = std::min<unsigned>(axes.size(), base + 64);
+          uint64_t mask = 0;
+          for (unsigned b = base; b < end; ++b)
+            mask |= uint64_t(left.anti(axes[b])) << (b - base);
+          unsigned charged = base;
+          if (!budget || budget->remaining() >= 3 * uint64_t(end - base)) {
+            uint64_t pending = 0;
+            for (; mask; mask &= mask - 1) {
+              unsigned b = base + std::countr_zero(mask);
+              pending += b + 1 - charged;
+              charged = b + 1;
+              if (auto error = record(a, b, &pending);
+                  error != DependencyError::None) {
+                charge(pending);
+                return {std::nullopt, error};
+              }
+            }
+            if (!charge(pending + (end - charged)))
+              return {std::nullopt, DependencyError::WorkLimit};
+            continue;
+          }
+          for (; mask; mask &= mask - 1) {
+            unsigned b = base + std::countr_zero(mask);
+            if (!charge(b + 1 - charged))
+              return {std::nullopt, DependencyError::WorkLimit};
+            charged = b + 1;
+            if (auto error = record(a, b); error != DependencyError::None)
+              return {std::nullopt, error};
+          }
+          if (!charge(end - charged))
+            return {std::nullopt, DependencyError::WorkLimit};
+        }
+      }
       return {std::move(result), DependencyError::None};
     }
     for (unsigned a = 0; a < axes.size(); ++a) {
