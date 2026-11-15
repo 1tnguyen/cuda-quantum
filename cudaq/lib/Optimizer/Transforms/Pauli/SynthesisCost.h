@@ -98,7 +98,7 @@ inline std::vector<Gate> nativeWord(const std::vector<Gate> &input,
 inline NativeCost evaluateNativeCost(const std::vector<Gate> &gates,
                                      const Options &options) {
   NativeCost result;
-  for (Gate gate : nativeWord(gates, options)) {
+  auto accumulate = [&](const Gate &gate) {
     switch (gate.kind) {
     case Kind::Phase:
       break;
@@ -140,7 +140,10 @@ inline NativeCost evaluateNativeCost(const std::vector<Gate> &gates,
       result.value += options.singleQubitCost;
       break;
     }
-  }
+  };
+  // Score the native expansion in emission order without retaining it.
+  for (const Gate &gate : gates)
+    emitNativeGate(gate, options, accumulate);
   return result;
 }
 
