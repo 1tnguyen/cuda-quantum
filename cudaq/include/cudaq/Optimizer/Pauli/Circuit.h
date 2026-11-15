@@ -70,7 +70,11 @@ public:
     result.set(q, value);
     return result;
   }
-  bool test(unsigned q) const { return q < bits.getBitWidth() && bits[q]; }
+  /// Read the raw word directly. APInt::operator[] is not reliably inlined.
+  bool test(unsigned q) const {
+    return q < bits.getBitWidth() &&
+           ((bits.getRawData()[q / 64] >> (q % 64)) & 1);
+  }
   void set(unsigned q, bool value = true) {
     if (value) {
       assert(q < std::numeric_limits<unsigned>::max() &&

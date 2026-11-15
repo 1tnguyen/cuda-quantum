@@ -1518,14 +1518,17 @@ static Result buildReadout(unsigned width,
   }
   auto words = observables;
   std::vector<bool> fixed(width);
+  // Words before `index` are never read again once processed, so only the
+  // current and pending words need to be transported through new gates.
+  unsigned index = 0;
   auto append = [&](Gate gate) {
     for (Gate native : nativeWord({gate}, options)) {
       result.gates.push_back(native);
-      for (Pauli &word : words)
-        word = conjugate(word, native);
+      for (unsigned j = index; j < words.size(); ++j)
+        words[j] = conjugate(std::move(words[j]), native);
     }
   };
-  for (unsigned index = 0; index < words.size(); ++index) {
+  for (; index < words.size(); ++index) {
     unsigned target = readoutWires[index];
     if (target >= width)
       return fail("readout wire is out of range");
