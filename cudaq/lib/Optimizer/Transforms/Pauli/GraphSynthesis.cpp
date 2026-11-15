@@ -761,7 +761,8 @@ class Synthesizer {
       // evaluates fine tuning, rather than specifying this fractional credit.
       auto ds = depths;
       unsigned next = depth;
-      for (const Gate &g : action(c)) {
+      const auto actionGates = action(c);
+      for (const Gate &g : actionGates) {
         if (g.kind == Kind::Phase)
           continue;
         if (g.kind == Kind::CZ || g.kind == Kind::CX || g.kind == Kind::Swap)
@@ -770,7 +771,6 @@ class Synthesizer {
           ++ds[g.a];
         next = std::max(next, ds[g.a]);
       }
-      const auto actionGates = action(c);
       unsigned serial =
           std::count_if(actionGates.begin(), actionGates.end(),
                         [](const Gate &g) { return g.kind != Kind::Phase; });
@@ -781,7 +781,7 @@ class Synthesizer {
       score += options.actionWeight * nativeGateCost(actionGates, options);
       if (measuredMode && measurementCost && options.readoutWeight) {
         auto next = measurementWords;
-        for (const Gate &gate : action(c))
+        for (const Gate &gate : actionGates)
           for (Pauli &observable : next)
             observable = conjugate(observable, gate);
         if (!charge(llvm::SaturatingAdd<uint64_t>(
