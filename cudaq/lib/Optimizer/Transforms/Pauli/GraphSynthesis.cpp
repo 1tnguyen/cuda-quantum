@@ -97,7 +97,7 @@ Gate inverse(Gate g) {
 }
 /// Compute g*p*g^dagger for a supported primitive Clifford, including its sign.
 /// Callers validate gate kinds and wire indices before using this algebra.
-Pauli conjugate(Pauli p, const Gate &g) {
+void conjugateInPlace(Pauli &p, const Gate &g) {
   bool x = p.x.test(g.a), z = p.z.test(g.a);
   switch (g.kind) {
   case Kind::H:
@@ -130,8 +130,9 @@ Pauli conjugate(Pauli p, const Gate &g) {
   }
   case Kind::CZ:
     // Reuse the signed CX rule through CZ = H(target) CX H(target).
-    p = conjugate(conjugate(conjugate(p, {Kind::H, g.b}), {Kind::CX, g.a, g.b}),
-                  {Kind::H, g.b});
+    conjugateInPlace(p, {Kind::H, g.b});
+    conjugateInPlace(p, {Kind::CX, g.a, g.b});
+    conjugateInPlace(p, {Kind::H, g.b});
     break;
   case Kind::Swap: {
     auto mask = (QubitSet::single(g.a, 1)) | (QubitSet::single(g.b, 1));
@@ -142,6 +143,10 @@ Pauli conjugate(Pauli p, const Gate &g) {
   default:
     break;
   }
+}
+
+Pauli conjugate(Pauli p, const Gate &g) {
+  conjugateInPlace(p, g);
   return p;
 }
 
@@ -1557,7 +1562,7 @@ buildReadout(unsigned width, const std::vector<Pauli> &observables,
         result.gates.push_back(native);
       }
       for (unsigned j = index; j < words.size(); ++j)
-        words[j] = conjugate(std::move(words[j]), native);
+        conjugateInPlace(words[j], native);
     }
   };
   for (; index < words.size(); ++index) {
