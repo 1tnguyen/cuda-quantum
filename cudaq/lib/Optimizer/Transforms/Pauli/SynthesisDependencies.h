@@ -66,7 +66,8 @@ class DependencyCursor;
 /// Classification uses hashing; sparse conflict discovery indexes X/Z support
 /// overlaps, with pairwise discovery for dense axes. Work units count
 /// operations, not elapsed time or Pauli bits: classification, support scans,
-/// posting insertion/inspection, class-pair comparisons and stored conflicts.
+/// posting insertion/inspection/retirement, class-pair comparisons and stored
+/// conflicts.
 /// Sorting c candidates costs c*bit_width(c) units. Hashing and Pauli
 /// comparisons can themselves depend on the support width.
 class DependencyIndex {
@@ -159,6 +160,7 @@ public:
       sparse = reserve(256 * supportBits + 16 * axes.size());
     struct Posting {
       std::vector<unsigned> x, z;
+      size_t xBegin = 0, zBegin = 0;
     };
     std::unordered_map<unsigned, Posting> postings;
     std::vector<unsigned> seen, candidates;
@@ -273,29 +275,48 @@ public:
     }
     for (unsigned a = 0; a < axes.size(); ++a) {
       candidates.clear();
-      uint64_t hits = 0;
-      for (unsigned q : axes[a].x.set_bits())
-        hits += postings[q].z.size();
-      for (unsigned q : axes[a].z.set_bits())
-        hits += postings[q].x.size();
-      if (!take(uint64_t(axes[a].x.count()) + axes[a].z.count()))
+      // Retire processed classes only when their posting list is queried.
+      // Each entry is skipped at most once across the complete build.
+      uint64_t hits = 0, retired = 0;
+      auto inspect = [&](const std::vector<unsigned> &list, size_t &begin) {
+        size_t previous = begin;
+        while (begin < list.size() && list[begin] <= a)
+          ++begin;
+        retired += begin - previous;
+        hits += list.size() - begin;
+      };
+      for (unsigned q : axes[a].x.set_bits()) {
+        auto &posting = postings[q];
+        inspect(posting.z, posting.zBegin);
+      }
+      for (unsigned q : axes[a].z.set_bits()) {
+        auto &posting = postings[q];
+        inspect(posting.x, posting.xBegin);
+      }
+      if (!take(uint64_t(axes[a].x.count()) + axes[a].z.count() + retired))
         return {std::nullopt, DependencyError::WorkLimit};
       // Avoid enumerating repeated overlaps when a pairwise scan is cheaper.
       bool indexed = hits < axes.size() - a - 1;
       if (indexed) {
-        auto collect = [&](const std::vector<unsigned> &list) {
-          for (unsigned b : list)
-            if (b > a && seen[b] != a) {
+        auto collect = [&](const std::vector<unsigned> &list, size_t begin) {
+          for (size_t i = begin; i < list.size(); ++i) {
+            unsigned b = list[i];
+            if (seen[b] != a) {
               seen[b] = a;
               candidates.push_back(b);
             }
+          }
         };
         if (!take(hits))
           return {std::nullopt, DependencyError::WorkLimit};
-        for (unsigned q : axes[a].x.set_bits())
-          collect(postings[q].z);
-        for (unsigned q : axes[a].z.set_bits())
-          collect(postings[q].x);
+        for (unsigned q : axes[a].x.set_bits()) {
+          const auto &posting = postings[q];
+          collect(posting.z, posting.zBegin);
+        }
+        for (unsigned q : axes[a].z.set_bits()) {
+          const auto &posting = postings[q];
+          collect(posting.x, posting.xBegin);
+        }
         // Preserve the legacy conflict order, including budgeted readiness
         // queries. Charge n log n work for sorting the candidate IDs.
         if (!take(uint64_t(candidates.size()) *

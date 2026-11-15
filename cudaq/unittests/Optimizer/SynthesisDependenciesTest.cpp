@@ -348,6 +348,42 @@ TEST(SynthesisDependencies, IndexedOverlapsMatchDenseOracle) {
   }
 }
 
+TEST(SynthesisDependencies, RetiredPostingsPreserveConflictsAndBudgetLimits) {
+  std::vector<Pauli> word;
+  for (unsigned i = 0; i < 128; ++i) {
+    auto support = QubitSet::single(0) | QubitSet::single(1) |
+                   QubitSet::single(i % 96 + 2);
+    word.push_back(i < 32 ? Pauli{support, {}} : Pauli{{}, support});
+  }
+  // The two shared wires commute across X/Z classes. Only matching local
+  // wires conflict. Later Z rows must not revisit the retired X postings.
+  SearchBudget full(unlimited);
+  auto index = DependencyIndex::build(word, unlimited, &full);
+  ASSERT_TRUE(index);
+  EXPECT_EQ(index.value->statistics().logicalEdges, 32);
+  EXPECT_EQ(index.value->statistics().logicalEdges, referenceEdges(word));
+  auto cursor = DependencyCursor::create(*index.value);
+  ASSERT_TRUE(cursor);
+  std::vector<bool> active(word.size(), true);
+  for (unsigned i = 0; i < 32; ++i) {
+    checkReadySet(*cursor.value, word, active);
+    ASSERT_TRUE(cursor.value->consume(i));
+    active[i] = false;
+  }
+  checkReadySet(*cursor.value, word, active);
+  SearchBudget exact(full.work());
+  EXPECT_TRUE(DependencyIndex::build(word, unlimited, &exact));
+  for (uint64_t limit : {uint64_t(0), full.work() / 2, full.work() - 1}) {
+    SearchBudget limited(limit);
+    auto failed = DependencyIndex::build(word, unlimited, &limited);
+    EXPECT_EQ(failed.error, DependencyError::WorkLimit);
+    EXPECT_FALSE(failed.value);
+    EXPECT_LE(limited.work(), limit);
+  }
+  EXPECT_EQ(DependencyIndex::build(word, 31).error,
+            DependencyError::DependencyLimit);
+}
+
 // Batched dense charging must record the same work as per-pair charging
 // when any limit stops the build.
 TEST(SynthesisDependencies, DenseBlockedChargingMatchesPerPairOrder) {
