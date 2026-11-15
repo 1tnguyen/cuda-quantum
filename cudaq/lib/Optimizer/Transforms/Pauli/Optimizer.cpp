@@ -297,7 +297,9 @@ OptimizerResult cudaq::pauli::optimize(unsigned width, const Circuit &input,
     // A graph proposal may help the selected portfolio objective even when it
     // would lose under the graph synthesizer's standalone ranking.
     settings.acceptOnlyImprovement = false; // The shared objective decides.
-    auto candidate = graph::synthesize(width, parent.gates, settings, &budget,
+    // Cap each call at half the remaining work so it cannot starve the rest.
+    SearchBudget slice(budget, budget.remaining() / 2);
+    auto candidate = graph::synthesize(width, parent.gates, settings, &slice,
                                        observation.verificationTime());
     if (telemetry) {
       observation.event.work = budget.work() - initialWork;

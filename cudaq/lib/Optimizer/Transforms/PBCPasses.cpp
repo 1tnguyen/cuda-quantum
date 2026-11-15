@@ -1622,6 +1622,10 @@ public:
       report.unresolvedInput = cudaq::pauli::unsynthesizedRotations(plan.gates);
     }
     cudaq::pauli::SearchBudget budget(options.maxWork, options.timeoutMs);
+    // Search in 3/4 of the budget so running out keeps the best result found
+    // and leaves the rest for normalization.
+    cudaq::pauli::SearchBudget searchBudget(budget, budget.remaining() -
+                                                        budget.remaining() / 4);
     bool measuredSynthesis = false;
     if constexpr (Optional)
       measuredSynthesis = !hold && options.enableGraphSynthesis &&
@@ -1643,7 +1647,7 @@ public:
         return source;
       }
       return cudaq::pauli::optimize(plan.inputs.size(), plan.gates,
-                                    portfolioOptions, &budget,
+                                    portfolioOptions, &searchBudget,
                                     report.collector());
     });
     report.recordStatistics(result.stats);
@@ -1785,7 +1789,11 @@ public:
         !(score(after) < score(before)) ||
         after.twoQubit > before.twoQubit + options.maxTwoQubitGrowth ||
         after.depth > before.depth + options.maxDepthGrowth) {
-      skip(function, "no admissible improvement", report);
+      // Still report when the search ran out of work.
+      skip(function,
+           searchBudget.stopped() ? "search size/work/deadline limit"
+                                  : "no admissible improvement",
+           report);
       return;
     }
     if constexpr (Optional) {
