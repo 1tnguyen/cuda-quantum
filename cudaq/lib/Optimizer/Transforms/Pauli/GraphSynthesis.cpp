@@ -1535,6 +1535,8 @@ buildReadout(unsigned width, const std::vector<Pauli> &observables,
   }
   auto words = observables;
   std::vector<bool> fixed(width);
+  // Reuse support storage while advancing through the pending observables.
+  std::vector<unsigned> support;
   // Words before `index` are never read again once processed, so only the
   // current and pending words need to be transported through new gates.
   unsigned index = 0;
@@ -1575,7 +1577,7 @@ buildReadout(unsigned width, const std::vector<Pauli> &observables,
         return fail("conflicting repeated readout");
       continue;
     }
-    std::vector<unsigned> support;
+    support.clear();
     auto wordSupport = words[index].x | words[index].z;
     for (unsigned wire : wordSupport.set_bits())
       support.push_back(wire);
