@@ -35,6 +35,12 @@ struct NativeCost {
   bool exact = true;
 };
 
+/// Exact support-cost change for the symmetric two-wire candidate. Wires i/j
+/// must be distinct, local axes a/b in 1..3. Frame factors require p/q to
+/// anticommute, singlets ignore q. Signs do not contribute to this cost.
+int candidateSupportCostDelta(const Pauli &p, const Pauli &q, bool factor,
+                              unsigned i, unsigned j, unsigned a, unsigned b);
+
 /// Score terminal reconstruction without retaining its native gates. Options,
 /// dimensions and commuting, in-range observables must already be validated.
 /// Unsupported reconstruction or a gate-limit failure returns infinity.

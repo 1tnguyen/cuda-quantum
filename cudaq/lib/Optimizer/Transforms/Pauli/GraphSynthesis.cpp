@@ -508,39 +508,42 @@ std::vector<Gate> sequence(Candidate c, bool asymmetric) {
 using cudaq::pauli::graph::detail::circuitScore;
 using cudaq::pauli::graph::detail::nativeWord;
 
-/// Conjugate an axis by the complete symmetric candidate using a local table.
+/// Score the complete symmetric candidate using only its two local axes.
 /// Local bases omitted by asymmetric emission do not change support weight or
 /// local anticommutation, so this same transform suffices for candidate costs.
 /// Actual residual updates use the emitted sequence, including its signs.
-Pauli transformedPauli(Pauli p, Candidate c) {
-  // The complete local Clifford action, including signs, is only 9 x 16.
+int candidateCostDelta(const Pauli &p, const Pauli &q, bool factor,
+                       Candidate c) {
+  // Signs do not affect support cost. Encode the two output axes in four bits.
   static const auto tables = [] {
-    std::array<std::array<Pauli, 16>, 9> tables;
+    std::array<std::array<unsigned char, 16>, 9> tables;
     for (unsigned a = 1; a <= 3; ++a)
       for (unsigned b = 1; b <= 3; ++b)
         for (unsigned k = 0; k < 16; ++k) {
           Pauli p{(k & 1) | ((k >> 1) & 2), ((k >> 1) & 1) | ((k >> 2) & 2)};
           for (const Gate &g : sequence({0, 1, a, b}, false))
             p = conjugate(p, g);
-          tables[(a - 1) * 3 + b - 1][k] = p;
+          tables[(a - 1) * 3 + b - 1][k] = p.axis(0) | (p.axis(1) << 2);
         }
     return tables;
   }();
-  unsigned first = p.axis(c.i), second = p.axis(c.j);
-  Pauli local = tables[(c.a - 1) * 3 + c.b - 1][first | (second << 2)];
-  p.x.flip(c.i, local.x.test(0) ^ bool(first & 1));
-  p.x.flip(c.j, local.x.test(1) ^ bool(second & 1));
-  p.z.flip(c.i, local.z.test(0) ^ bool(first >> 1));
-  p.z.flip(c.j, local.z.test(1) ^ bool(second >> 1));
-  p.sign ^= local.sign;
-  return p;
-}
-/// Transform a singlet axis, or both axes of a frame factor, for cost scoring.
-Node transformed(Node v, Candidate c) {
-  v.p = transformedPauli(v.p, c);
-  if (v.factor)
-    v.q = transformedPauli(v.q, c);
-  return v;
+  const auto &table = tables[(c.a - 1) * 3 + c.b - 1];
+  unsigned beforeP = p.axis(c.i) | (p.axis(c.j) << 2);
+  unsigned afterP = table[beforeP];
+  auto support = [](unsigned axes) {
+    return int(bool(axes & 3)) + int(bool(axes >> 2));
+  };
+  if (!factor)
+    return support(afterP) - support(beforeP);
+  unsigned beforeQ = q.axis(c.i) | (q.axis(c.j) << 2);
+  unsigned afterQ = table[beforeQ];
+  auto anti = [](unsigned p, unsigned q) { return int(p && q && p != q); };
+  int deltaAnti =
+      anti(afterP & 3, afterQ & 3) + anti(afterP >> 2, afterQ >> 2) -
+      anti(beforeP & 3, beforeQ & 3) - anti(beforeP >> 2, beforeQ >> 2);
+  // Clifford conjugation preserves symplectic parity. The change is even,
+  // so the frame-factor (anticommutations - 1) / 2 term changes by delta / 2.
+  return support(afterP | afterQ) - support(beforeP | beforeQ) + deltaAnti / 2;
 }
 
 /// View each logical wire's signed Z/X frame images as an anticommuting pair.
@@ -688,7 +691,7 @@ class Synthesizer {
                   if (!charge())
                     return std::nullopt;
                   Candidate c{i, j, a, b};
-                  if (transformed(v, c).cost() < minimum) {
+                  if (candidateCostDelta(v.p, v.q, v.factor, c) < 0) {
                     candidates.insert(c);
                     c.native = true;
                     candidates.insert(c);
@@ -705,8 +708,6 @@ class Synthesizer {
     const size_t populationCount = std::min<size_t>(
         population.size(),
         options.lookahead ? options.lookahead : population.size());
-    std::vector<int> populationCosts, frameCosts;
-    bool costsCached = false;
     const double currentReadoutCost =
         measuredMode && measurementCost && options.readoutWeight
             ? measurementCost(measurementWords)
@@ -714,34 +715,20 @@ class Synthesizer {
     for (Candidate c : candidates) {
       if (!charge(populationCount + front.size() + 4 * n + 1))
         return std::nullopt;
-      // Node costs are invariant for this selection step. Populate the caches
-      // only after the first candidate's work is admitted, and preserve the
-      // original scoring order and per-candidate work charges.
-      if (!costsCached) {
-        populationCosts.reserve(populationCount);
-        for (size_t i = 0; i < populationCount; ++i)
-          populationCosts.push_back(population[i].cost());
-        if (penalizeFrame && !measuredMode) {
-          frameCosts.reserve(frameFactors.size());
-          for (const Node &node : frameFactors)
-            frameCosts.push_back(node.cost());
-        }
-        costsCached = true;
-      }
       double score = 0, norm = 0;
-      auto include = [&](const Node &v, int cost, double weight) {
-        score += weight * (transformed(v, c).cost() - cost);
+      auto include = [&](const Node &v, double weight) {
+        score += weight * candidateCostDelta(v.p, v.q, v.factor, c);
         norm += weight;
       };
       // Sample remaining nodes in graph order. lookahead bounds this scoring
       // sample; it does not explore that many future synthesis steps.
       for (size_t i = 0; i < populationCount; ++i)
-        include(population[i], populationCosts[i], 1);
+        include(population[i], 1);
       // Ready nodes receive extra weight scaled by population/frontier size,
       // so a small frontier can still influence the normalized average.
       // PCOAST Sec. V-C1, footnote 12.
       for (size_t i = 0; i < front.size(); ++i)
-        include(front[i], frontCosts[i],
+        include(front[i],
                 options.frontierWeight * population.size() / front.size());
       score /= std::max(1.0, norm);
       if (penalizeFrame && !measuredMode) {
@@ -750,8 +737,8 @@ class Synthesizer {
         // enabled.
         // PCOAST Sec. V-C1, terminating-frame penalty discussion.
         double delta = 0;
-        for (size_t i = 0; i < frameFactors.size(); ++i)
-          delta += transformed(frameFactors[i], c).cost() - frameCosts[i];
+        for (const Node &v : frameFactors)
+          delta += candidateCostDelta(v.p, v.q, v.factor, c);
         score += options.frameWeight * delta / n;
       }
       // Explicit ASAP policy: credit the fraction of this candidate's depth
@@ -1306,6 +1293,12 @@ bool cudaq::pauli::graph::equivalent(unsigned n, const std::vector<Gate> &input,
   return symbolic.empty() && (__int128(difference.numerator) %
                                   (__int128(2) * difference.denominator) ==
                               0);
+}
+
+int cudaq::pauli::graph::detail::candidateSupportCostDelta(
+    const Pauli &p, const Pauli &q, bool factor, unsigned i, unsigned j,
+    unsigned a, unsigned b) {
+  return candidateCostDelta(p, q, factor, {i, j, a, b});
 }
 
 double cudaq::pauli::graph::nativeGateCost(const std::vector<Gate> &gates,

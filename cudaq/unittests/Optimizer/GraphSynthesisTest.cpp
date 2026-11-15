@@ -18,6 +18,7 @@
 
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
 #include "Pauli/SignedCliffordFrames.h"
+#include "Pauli/SynthesisCost.h"
 #include "Pauli/SynthesisHold.h"
 #include "gtest/gtest.h"
 #include <bit>
@@ -27,6 +28,68 @@
 #include <random>
 
 using namespace cudaq::pauli::graph;
+
+TEST(GraphSynthesis, LocalCostDeltaMatchesFullWordConjugation) {
+  namespace pauli = cudaq::pauli;
+  auto cost = [](const Pauli &p, const Pauli &q, bool factor) {
+    int support = 0, anti = 0;
+    for (unsigned wire = 0; wire <= 200; ++wire) {
+      unsigned a = p.axis(wire), b = factor ? q.axis(wire) : 0;
+      support += bool(a || b);
+      anti += a && b && a != b;
+    }
+    return factor ? support - 1 + (anti - 1) / 2 : std::max(0, support - 1);
+  };
+  for (auto [i, j] : {std::pair{0, 1}, std::pair{63, 130}})
+    for (unsigned a = 1; a <= 3; ++a)
+      for (unsigned b = 1; b <= 3; ++b) {
+        std::vector<Gate> gates;
+        auto basis = [&](unsigned axis, unsigned wire) {
+          if (axis == 1) {
+            gates.push_back({Kind::H, wire});
+            gates.push_back({Kind::Z, wire});
+          } else if (axis == 3) {
+            gates.push_back({Kind::H, wire});
+            gates.push_back({Kind::S, wire});
+            gates.push_back({Kind::H, wire});
+          }
+        };
+        basis(a, i);
+        basis(b, j);
+        auto prefix = gates;
+        gates.push_back({Kind::CZ, i, j});
+        auto inverse = pauli::tcount::detail::adjoint(prefix);
+        gates.insert(gates.end(), inverse.begin(), inverse.end());
+        auto word = [&](unsigned axes) {
+          Pauli p;
+          p.x.set(i, axes & 1);
+          p.z.set(i, axes & 2);
+          p.x.set(j, axes & 4);
+          p.z.set(j, axes & 8);
+          p.sign = axes & 1;
+          return p;
+        };
+        for (unsigned x = 0; x < 16; ++x)
+          for (unsigned z = 0; z < 16; ++z)
+            for (bool factor : {false, true}) {
+              auto p = word(x), q = word(z);
+              // Complete even local parity to an anticommuting frame pair
+              // using an untouched wire. This also exercises costs above one.
+              if (factor && !p.anti(q)) {
+                p.x.set(200);
+                q.z.set(200);
+              }
+              auto changedP = p, changedQ = q;
+              for (const auto &gate : gates) {
+                changedP = pauli::tcount::detail::conjugate(changedP, gate);
+                changedQ = pauli::tcount::detail::conjugate(changedQ, gate);
+              }
+              EXPECT_EQ(pauli::graph::detail::candidateSupportCostDelta(
+                            p, q, factor, i, j, a, b),
+                        cost(changedP, changedQ, factor) - cost(p, q, factor));
+            }
+      }
+}
 
 TEST(GraphSynthesis, NativeNormalizationBindingChecksOrderedSigns) {
   const std::vector<Gate> input{
