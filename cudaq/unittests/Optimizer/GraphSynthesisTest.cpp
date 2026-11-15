@@ -40,7 +40,8 @@ TEST(GraphSynthesis, LocalCostDeltaMatchesFullWordConjugation) {
     }
     return factor ? support - 1 + (anti - 1) / 2 : std::max(0, support - 1);
   };
-  for (auto [i, j] : {std::pair{0, 1}, std::pair{63, 130}})
+  for (auto [i, j] : {std::pair<unsigned, unsigned>{0, 1},
+                      std::pair<unsigned, unsigned>{63, 130}})
     for (unsigned a = 1; a <= 3; ++a)
       for (unsigned b = 1; b <= 3; ++b) {
         std::vector<Gate> gates;
