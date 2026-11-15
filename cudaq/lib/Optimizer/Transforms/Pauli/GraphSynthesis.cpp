@@ -1539,7 +1539,7 @@ buildReadout(unsigned width, const std::vector<Pauli> &observables,
   // current and pending words need to be transported through new gates.
   unsigned index = 0;
   auto append = [&](Gate gate) {
-    for (Gate native : nativeWord({gate}, options)) {
+    detail::emitNativeGate(gate, options, [&](const Gate &native) {
       if constexpr (CostOnly) {
         ++gateCount;
         // These are already lowered primitive Cliffords. Accumulate in the
@@ -1563,7 +1563,7 @@ buildReadout(unsigned width, const std::vector<Pauli> &observables,
       }
       for (unsigned j = index; j < words.size(); ++j)
         conjugateInPlace(words[j], native);
-    }
+    });
   };
   for (; index < words.size(); ++index) {
     unsigned target = readoutWires[index];
