@@ -35,6 +35,14 @@ struct NativeCost {
   bool exact = true;
 };
 
+/// Score terminal reconstruction without retaining its native gates. Options,
+/// dimensions and commuting, in-range observables must already be validated.
+/// Unsupported reconstruction or a gate-limit failure returns infinity.
+double evaluateReadoutCost(unsigned width,
+                           const std::vector<Pauli> &observables,
+                           const std::vector<unsigned> &readoutWires,
+                           const Options &options);
+
 /// Five integral metrics in the existing mechanical-lowering model.
 using CostVector = tcount::Cost;
 struct CircuitCost {

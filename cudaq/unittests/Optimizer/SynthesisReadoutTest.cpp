@@ -12,6 +12,7 @@
 #include <bit>
 #include <cmath>
 #include <complex>
+#include <limits>
 
 using namespace cudaq::pauli;
 using namespace cudaq::pauli::graph;
@@ -138,6 +139,48 @@ TEST(SynthesisReadout, EveryNativeProfilePreservesOrderedSignedJointEffects) {
       checkEffects(observables, wires, candidate.gates());
     }
   }
+}
+
+TEST(SynthesisReadout, StreamingCostMatchesEmittedReadoutAndGateLimits) {
+  // Exhaust ordered signed commuting two-qubit words, including dependent
+  // outcomes that cannot be reconstructed on separate physical wires.
+  for (unsigned profile = 1; profile < 4; ++profile)
+    for (bool swap : {false, true}) {
+      Options options;
+      options.nativeCX = profile & 1;
+      options.nativeCZ = profile & 2;
+      options.nativeSwap = swap;
+      options.singleQubitCost = 0.3;
+      options.cxCost = 1.7;
+      options.czCost = 2.1;
+      options.swapCost = 3.9;
+      for (unsigned a = 1; a < 16; ++a)
+        for (unsigned b = 1; b < 16; ++b)
+          for (unsigned signs = 0; signs < 4; ++signs) {
+            std::vector<Pauli> words{{a & 3, a >> 2, bool(signs & 1)},
+                                     {b & 3, b >> 2, bool(signs & 2)}};
+            if (words[0].anti(words[1]))
+              continue;
+            for (uint64_t cap : {1, 2, 4, 100}) {
+              options.maxGates = cap;
+              auto emitted = synthesizeReadout(2, words, {1, 0}, options);
+              double streamed =
+                  synthesis::evaluateReadoutCost(2, words, {1, 0}, options);
+              if (emitted)
+                EXPECT_EQ(streamed, nativeGateCost(emitted.gates, options));
+              else
+                EXPECT_EQ(streamed, std::numeric_limits<double>::infinity());
+            }
+          }
+    }
+  // Dynamic support and repeated physical outputs use the same reconstruction.
+  Options options;
+  auto z = QubitSet::single(130);
+  std::vector<Pauli> words{{{}, z, true}, {{}, z, true}};
+  auto emitted = synthesizeReadout(131, words, {65, 65}, options);
+  ASSERT_TRUE(emitted) << emitted.error;
+  EXPECT_EQ(synthesis::evaluateReadoutCost(131, words, {65, 65}, options),
+            nativeGateCost(emitted.gates, options));
 }
 
 TEST(SynthesisReadout,

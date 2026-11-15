@@ -528,10 +528,10 @@ Pauli transformedPauli(Pauli p, Candidate c) {
   }();
   unsigned first = p.axis(c.i), second = p.axis(c.j);
   Pauli local = tables[(c.a - 1) * 3 + c.b - 1][first | (second << 2)];
-  p.x ^= QubitSet::single(c.i, local.x.test(0) ^ bool(first & 1));
-  p.x ^= QubitSet::single(c.j, local.x.test(1) ^ bool(second & 1));
-  p.z ^= QubitSet::single(c.i, local.z.test(0) ^ bool(first >> 1));
-  p.z ^= QubitSet::single(c.j, local.z.test(1) ^ bool(second >> 1));
+  p.x.flip(c.i, local.x.test(0) ^ bool(first & 1));
+  p.x.flip(c.j, local.x.test(1) ^ bool(second & 1));
+  p.z.flip(c.i, local.z.test(0) ^ bool(first >> 1));
+  p.z.flip(c.j, local.z.test(1) ^ bool(second >> 1));
   p.sign ^= local.sign;
   return p;
 }
@@ -1494,11 +1494,13 @@ Result cudaq::pauli::graph::synthesize(unsigned width,
   return best;
 }
 
-static Result buildReadout(unsigned width,
-                           const std::vector<Pauli> &observables,
-                           const std::vector<unsigned> &readoutWires,
-                           const Options &options, bool validate = true) {
+template <bool CostOnly = false>
+static Result
+buildReadout(unsigned width, const std::vector<Pauli> &observables,
+             const std::vector<unsigned> &readoutWires, const Options &options,
+             bool validate = true, double *cost = nullptr) {
   Result result;
+  uint64_t gateCount = 0;
   auto fail = [&](std::string error) {
     result.gates.clear();
     result.error = std::move(error);
@@ -1523,7 +1525,27 @@ static Result buildReadout(unsigned width,
   unsigned index = 0;
   auto append = [&](Gate gate) {
     for (Gate native : nativeWord({gate}, options)) {
-      result.gates.push_back(native);
+      if constexpr (CostOnly) {
+        ++gateCount;
+        // These are already lowered primitive Cliffords. Accumulate in the
+        // same order as nativeGateCost, without retaining a gate vector.
+        switch (native.kind) {
+        case Kind::CX:
+          *cost += options.cxCost;
+          break;
+        case Kind::CZ:
+          *cost += options.czCost;
+          break;
+        case Kind::Swap:
+          *cost += options.swapCost;
+          break;
+        default:
+          *cost += options.singleQubitCost;
+          break;
+        }
+      } else {
+        result.gates.push_back(native);
+      }
       for (unsigned j = index; j < words.size(); ++j)
         words[j] = conjugate(std::move(words[j]), native);
     }
@@ -1569,7 +1591,7 @@ static Result buildReadout(unsigned width,
     if (words[index] != wanted)
       return fail("terminal observable reconstruction failed");
     fixed[target] = true;
-    if (result.gates.size() > options.maxGates) {
+    if ((CostOnly ? gateCount : result.gates.size()) > options.maxGates) {
       result.stats.budgetExhausted = true;
       return fail("terminal readout gate limit exceeded");
     }
@@ -1581,6 +1603,15 @@ Result cudaq::pauli::graph::synthesizeReadout(
     unsigned width, const std::vector<Pauli> &observables,
     const std::vector<unsigned> &readoutWires, const Options &options) {
   return buildReadout(width, observables, readoutWires, options);
+}
+
+double cudaq::pauli::graph::detail::evaluateReadoutCost(
+    unsigned width, const std::vector<Pauli> &observables,
+    const std::vector<unsigned> &readoutWires, const Options &options) {
+  double cost = 0;
+  auto result = buildReadout<true>(width, observables, readoutWires, options,
+                                   false, &cost);
+  return result ? cost : std::numeric_limits<double>::infinity();
 }
 
 namespace {
@@ -1807,9 +1838,7 @@ runMeasuredSearch(unsigned width, const std::vector<Gate> &input,
     // Clifford conjugation preserves the already validated commutation,
     // support range and dimensions. Avoid redoing Gaussian validation for
     // every heuristic candidate; final emission and replay remain checked.
-    auto readout = buildReadout(width, words, readoutWires, options, false);
-    return readout ? nativeGateCost(readout.gates, options)
-                   : std::numeric_limits<double>::infinity();
+    return detail::evaluateReadoutCost(width, words, readoutWires, options);
   };
   std::string exhaustionError;
   unsigned alternatives = options.discrepancySteps;
