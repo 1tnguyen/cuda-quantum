@@ -200,7 +200,7 @@ struct Frame {
   /// g^dagger. Its inverse action on F conjugates every stored row by g.
   void carry(Gate g) {
     for (auto &p : rows)
-      p = conjugate(p, g);
+      conjugateInPlace(p, g);
   }
 };
 
@@ -312,7 +312,7 @@ struct StabilizerState {
     }
     phase &= 7;
     for (auto &p : stabilizers)
-      p = conjugate(p, g);
+      conjugateInPlace(p, g);
   }
 };
 
@@ -527,7 +527,7 @@ int candidateCostDelta(const Pauli &p, const Pauli &q, bool factor,
         for (unsigned k = 0; k < 16; ++k) {
           Pauli p{(k & 1) | ((k >> 1) & 2), ((k >> 1) & 1) | ((k >> 2) & 2)};
           for (const Gate &g : sequence({0, 1, a, b}, false))
-            p = conjugate(p, g);
+            conjugateInPlace(p, g);
           tables[(a - 1) * 3 + b - 1][k] = p.axis(0) | (p.axis(1) << 2);
         }
     return tables;
@@ -647,10 +647,10 @@ class Synthesizer {
         return false;
       for (unsigned i = 0; i < graph.nodes.size(); ++i)
         if (active[i])
-          graph.nodes[i].p = conjugate(graph.nodes[i].p, native);
+          conjugateInPlace(graph.nodes[i].p, native);
       graph.frame.carry(native);
       for (Pauli &observable : measurementWords)
-        observable = conjugate(observable, native);
+        conjugateInPlace(observable, native);
     }
     return true;
   }
@@ -779,7 +779,7 @@ class Synthesizer {
         auto next = measurementWords;
         for (const Gate &gate : actionGates)
           for (Pauli &observable : next)
-            observable = conjugate(observable, gate);
+            conjugateInPlace(observable, gate);
         if (!charge(llvm::SaturatingAdd<uint64_t>(
                 llvm::SaturatingMultiply<uint64_t>(uint64_t(n) * n,
                                                    measurementWords.size()),
