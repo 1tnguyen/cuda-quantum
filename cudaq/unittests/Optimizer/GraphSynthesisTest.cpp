@@ -268,6 +268,32 @@ TEST(GraphSynthesis, ExactPhaseAndPermutation) {
   EXPECT_FALSE(equivalent(3, gates, corrupted));
 }
 
+TEST(GraphSynthesis, CZOnlySynthesisPreservesAxesSignsAndSpectators) {
+  Options options;
+  options.nativeCX = false;
+  options.acceptOnlyImprovement = false;
+  options.simplify = false;
+  options.discrepancySteps = 0;
+  for (unsigned axes = 0; axes < 16; ++axes)
+    for (bool sign : {false, true})
+      for (unsigned a : {0, 1}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "axes=" << axes << " sign=" << sign << " a=" << a);
+        // Enumerate all local X/Z combinations, with an untouched Y spectator
+        // so that even the local identity remains a nontrivial rotation.
+        Pauli p{4 | (axes & 3), 4 | (axes >> 2), sign};
+        std::vector<Gate> input{Gate::rotation({1, 2}, {1, 8}),
+                                {Kind::CZ, a, 1 - a},
+                                Gate::rotation(p, {1, 7}),
+                                {Kind::CZ, a, 1 - a}};
+        auto result = synthesize(3, input, options);
+        ASSERT_TRUE(result) << result.error;
+        // Independent state-vector simulation checks the complete unitary,
+        // including the signs introduced by overlapping X/Y factors.
+        assertUnitary(3, input, result.gates);
+      }
+}
+
 TEST(GraphSynthesis, LosslessPauliNormalizationRetainsFrameAndScalar) {
   std::vector<Gate> input{{Kind::H, 0},
                           {Kind::CX, 0, 1},

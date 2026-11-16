@@ -128,12 +128,15 @@ void conjugateInPlace(Pauli &p, const Gate &g) {
     p.z.flip(g.a, zb);
     break;
   }
-  case Kind::CZ:
-    // Reuse the signed CX rule through CZ = H(target) CX H(target).
-    conjugateInPlace(p, {Kind::H, g.b});
-    conjugateInPlace(p, {Kind::CX, g.a, g.b});
-    conjugateInPlace(p, {Kind::H, g.b});
+  case Kind::CZ: {
+    bool xb = p.x.test(g.b), zb = p.z.test(g.b);
+    // Each X adds Z on the other wire. The sign is the H-CX-H correction
+    // simplified in the Hermitian Pauli convention Y=iXZ.
+    p.sign ^= x && xb && (z ^ zb);
+    p.z.flip(g.a, xb);
+    p.z.flip(g.b, x);
     break;
+  }
   case Kind::Swap: {
     auto mask = (QubitSet::single(g.a, 1)) | (QubitSet::single(g.b, 1));
     p.x ^= (p.x.test(g.a) != p.x.test(g.b)) ? mask : 0;
