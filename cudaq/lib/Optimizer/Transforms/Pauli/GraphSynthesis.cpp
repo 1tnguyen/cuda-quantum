@@ -751,23 +751,27 @@ class Synthesizer {
       // not a claim to reproduce Intel SDK's unpublished tie-breaking policy.
       // See PCOAST Sec. V-C1, schedule search and footnote 13; Sec. VI-C
       // evaluates fine tuning, rather than specifying this fractional credit.
-      auto ds = depths;
-      unsigned next = depth;
       const auto actionGates = action(c);
-      for (const Gate &g : actionGates) {
-        if (g.kind == Kind::Phase)
-          continue;
-        if (g.kind == Kind::CZ || g.kind == Kind::CX || g.kind == Kind::Swap)
-          ds[g.a] = ds[g.b] = std::max(ds[g.a], ds[g.b]) + 1;
-        else
-          ++ds[g.a];
-        next = std::max(next, ds[g.a]);
+      // With no scheduling credit, the trial depths cannot affect the score.
+      // Avoid copying the wire depths and simulating every candidate's gates.
+      if (options.parallelizationCredit != 0) {
+        auto ds = depths;
+        unsigned next = depth;
+        for (const Gate &g : actionGates) {
+          if (g.kind == Kind::Phase)
+            continue;
+          if (g.kind == Kind::CZ || g.kind == Kind::CX || g.kind == Kind::Swap)
+            ds[g.a] = ds[g.b] = std::max(ds[g.a], ds[g.b]) + 1;
+          else
+            ++ds[g.a];
+          next = std::max(next, ds[g.a]);
+        }
+        unsigned serial =
+            std::count_if(actionGates.begin(), actionGates.end(),
+                          [](const Gate &g) { return g.kind != Kind::Phase; });
+        score -= options.parallelizationCredit *
+                 (1.0 - double(next - depth) / serial);
       }
-      unsigned serial =
-          std::count_if(actionGates.begin(), actionGates.end(),
-                        [](const Gate &g) { return g.kind != Kind::Phase; });
-      score -=
-          options.parallelizationCredit * (1.0 - double(next - depth) / serial);
       // Charge the primitive implementation, including local basis changes.
       // Support reduction alone does not price the gates that will be emitted.
       score += options.actionWeight * nativeGateCost(actionGates, options);
