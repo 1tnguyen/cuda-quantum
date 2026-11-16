@@ -90,6 +90,13 @@ output interpretation. The PBC pass preserves the original physical readouts.
 
 <!-- END PASS MEASUREMENTS -->
 
+A 2026-11-15 rerun at commit `8ae81c2` reproduces all ten rows exactly and
+measures pass runtime and other option sets; see
+[Appendix I](#appendix-i-rerun-at-8ae81c2-2026-11-15).
+The subsequent rerun at `ef6e03310d`, including dense synthesis timings and
+fresh equivalence checks for all three option sets, is recorded in
+[Appendix J](#appendix-j-rerun-at-ef6e03310d-2026-11-15).
+
 ## Benchmark configuration and evidence
 
 Every benchmark configuration must record the following **before running a
@@ -2389,7 +2396,210 @@ and `no_information` are retained as unverified unless a separate saved check
 proves that exact output. The stopped full-suite matrix hash remains
 `2a09dc276228c8b495da37cc44aa8f689463ba228e2c250276f7ee3fae31be8f`.
 
+## Appendix I. Rerun at 8ae81c2 (2026-11-15)
+
+This rerun repeats the Appendix D procedure for the ten measured-pass cases
+with three Release builds of `cudaq-opt`:
+
+| Build | Commit | Executable SHA-256 prefix |
+|---|---|---|
+| main | `345c435` | `88f5a57b23e3` |
+| report | `40928e5` | `82d61187b393` |
+| head | `8ae81c2` | `9a0a73addb56` |
+
+Since the report commit, the branch has added faster dense dependency
+discovery (`d5bf6ca`, `73264b0`), a faster terminal readout
+(`5fa86b3`), and bounded budget slices (`8ae81c2`). The budget-slice change
+runs each graph-synthesis call in at most half of the remaining work and the
+portfolio search in three quarters of the allowance. A search that runs out of
+work now commits its verified best candidate instead of skipping the function.
+A deadline or exhaustion of the full allowance still skips. If the search
+exhausts its share without an admissible improvement, the remark still reports
+the work limit.
+
+### I.1 Inputs
+
+The original input bundle was not available on this machine, so the inputs were
+re-imported with Qiskit 2.6.0 `qasm2` and `cudaq.contrib.from_qiskit`:
+
+- The six adders and `multiply_n13` use the QASMBench `*_transpiled.qasm`
+  files.
+- `rc_adder_6` and `csla_mux_3` use the Qiskit benchpress Feynman files. Their
+  SHA-256 hashes match the cudaq-bench `3b9b703` corpus index (`b7fff226…`
+  and `197f68bf…`).
+- `qft_n002` is not in that cudaq-bench revision. It is rebuilt as the textbook
+  two-qubit QFT (`h; cp(pi/2); h; swap`), which reproduces the recorded
+  baseline of 8 gates, 3 T, 3 two-qubit gates and depth 6. Qiskit's library
+  `QFT(2)` gives depth 8 instead.
+
+All ten CUDA-Q baselines match the main table exactly and are byte-identical
+across the three builds.
+
+### I.2 total-gates-v1 results
+
+The Appendix B configuration produces byte-identical output at the report
+commit and at `8ae81c2`, so every count in the main table is unchanged.
+MQT QCEC 3.11.0 reports every output equivalent or equivalent up to global
+phase. Times are the `quake-try-pbc` pass time from `--mlir-timing`, median of
+five runs on one pinned core.
+
+| Case | CUDA-Q total | Clifford+T optimization total | Pass time at `40928e5` (ms) | Pass time at `8ae81c2` (ms) | Change |
+|---|---:|---:|---:|---:|---:|
+| adder_n4_transpiled | 24 | 22 | 17.4 | 17.2 | −1.1% |
+| adder_n10_transpiled | 140 | 106 | 26.1 | 25.4 | −2.7% |
+| adder_n28_transpiled | 418 | 316 | 45.5 | 43.7 | −4.0% |
+| adder_n64_transpiled | 974 | 736 | 86.3 | 82.6 | −4.3% |
+| adder_n118_transpiled | 1808 | 1366 | 191.4 | 184.0 | −3.9% |
+| adder_n433_transpiled | 6673 | 5041 | 1471.0 | 1448.8 | −1.5% |
+| multiply_n13_transpiled | 105 | 91 | 23.1 | 22.5 | −2.6% |
+| rc_adder_6 | 191 | 147 | 44.3 | 43.3 | −2.3% |
+| csla_mux_3 | 161 | 156 | 41.1 | 39.8 | −3.2% |
+| qft_n002 | 8 | 8 (skipped) | 16.1 | 15.4 | −4.3% |
+
+These are Release timings. The original measurements used a Debug build, so
+they are not comparable with the absolute times here.
+
+### I.3 Other option sets
+
+Total gates over the same ten cases, after the common cleanup:
+
+| Options | `40928e5` | `8ae81c2` |
+|---|---:|---:|
+| total-gates-v1 (Appendix B) | 7,989 | 7,989 |
+| total-gates-v1 with `graph-synthesis=true` | 10,401 | **7,987** |
+| `objective=total-gates gate-count=true preserve-clifford-network=true`, other options default | 10,502 | **9,621** |
+| All defaults | 10,214 | 10,214 |
+
+At the report commit, the second and third rows lose finished results to
+budget exhaustion. For example, `rc_adder_6` finds the 147-gate circuit but
+emits the 191-gate input. At `8ae81c2`, the third row matches total-gates-v1
+on nine cases, and its T count falls from 2,474 to 2,456. `adder_n433` still
+exceeds the default `max-gates=8192` and is skipped. With graph synthesis
+enabled, `adder_n4` improves from 22 to 20 gates. MQT QCEC reports every new
+third-row output equivalent to its baseline.
+
+A sweep of the total-gates-v1 search settings (`rounds`, `beam-width`,
+`max-candidates`, `gate-count-rounds`, `gate-commutation-window`, `reverse`,
+`merge-window`, `synthesis-lookahead`, `max-block-gates` and the two-qubit
+growth limits) leaves the 7,989 total unchanged. Only
+`portfolio-rounds=4 portfolio-beam-width=4` changes it, saving two gates on
+`rc_adder_6`. On these ten cases the configuration has reached a search fixed
+point.
+
+## Appendix J. Rerun at ef6e03310d (2026-11-15)
+
+This rerun measures the current branch after sparse-posting traversal,
+candidate scoring and terminal-readout optimizations. Candidate support-cost
+deltas use only the affected local axes; native gate costing and readout
+construction stream gates, conjugate readout words in place, and reuse support
+storage. These changes reduce synthesis runtime without changing the measured
+outputs.
+
+### J.1 Method and baselines
+
+All timings below are fresh measurements on the same Intel Core i9-13900K,
+pinned to logical CPU 0, with MLIR threading disabled. Both timed configurations
+use one warmup pair followed by five measured pairs, reversing binary order on
+alternate pairs. Tables report the median MLIR pass time, excluding lowering
+and cleanup. No other benchmark or verification workload ran concurrently with
+timing. These are Release builds; `hold` and `release` below name semantic
+modes, not build types.
+
+The original PR used different baselines for the report table and the dense
+benchmark. This rerun preserves those comparisons explicitly:
+
+| Build | Saved source revision | Executable SHA-256 prefix |
+|---|---|---|
+| Report baseline | `40928e5` (Appendix I) | `82d61187b393` |
+| Dense baseline | `73264b0` (before the readout change) | `37a57167a709` |
+| Current branch | `ef6e03310d` | `53f11ae97819` |
+
+The baseline labels are the historical revisions recorded with the saved
+executables, before the branch was rebased. Inputs are the saved Appendix I
+reconstructed corpus, including the manually reconstructed two-qubit QFT.
+Their synthesized baselines are reused verbatim for both compilers.
+
+### J.2 total-gates-v1 results
+
+All ten current outputs are byte-identical to the freshly rerun report outputs
+and to the archived report outputs. Gate counts remain unchanged. Fresh MQT
+QCEC 3.11.0 checks report equivalence or equivalence up to global phase for
+both binaries, with identical readout order.
+
+| Case | CUDA-Q total | PBC total | Report baseline (ms) | Current branch (ms) |
+|---|---:|---:|---:|---:|
+| adder_n4 | 24 | 22 | 18.0 | 18.0 |
+| adder_n10 | 140 | 106 | 27.0 | 25.9 |
+| adder_n28 | 418 | 316 | 46.0 | 43.7 |
+| adder_n64 | 974 | 736 | 88.3 | 82.2 |
+| adder_n118 | 1808 | 1366 | 193.4 | 181.8 |
+| adder_n433 | 6673 | 5041 | 1477.7 | 1446.8 |
+| multiply_n13 | 105 | 91 | 23.0 | 22.9 |
+| rc_adder_6 | 191 | 147 | 44.4 | 43.4 |
+| csla_mux_3 | 161 | 156 | 41.3 | 40.0 |
+| qft_n002 | 8 | 8 (skipped) | 15.6 | 15.8 |
+
+Runtime improvements in this configuration are modest; the smallest cases
+are essentially unchanged. The dense synthesis improvements below should not
+be generalized to the application corpus.
+
+### J.3 Dense 32-qubit synthesis
+
+The saved synthetic 32-qubit, 16-rotation inputs are passed directly to
+`quake-synthesize-pbc` with `synthesis-simplify=false`,
+`synthesis-discrepancy-steps=0`, `max-work=100000000000000`, `timeout-ms=0`,
+and the indicated `semantics` value.
+
+| Semantics | Dense baseline (s) | Current branch (s) | Runtime reduction | Speedup |
+|---|---:|---:|---:|---:|
+| release | 7.1975 | 2.1701 | 69.8% | 3.32x |
+| hold | 9.3419 | 1.2917 | 86.2% | 7.23x |
+
+All twelve outputs in each mode, including warmups, are byte-identical.
+This is an output comparison against the saved baseline; the dense inputs
+were not independently checked with QCEC in this rerun. Hold preserves the
+complete unitary, including phase and wire identities. Release preserves the
+ordered joint terminal-measurement distribution for arbitrary inputs and
+allows no escaping quantum state.
+
+### J.4 Other option sets and validation
+
+Total gates over the same ten cases after the common cleanup:
+
+| Options | Report baseline | Current branch |
+|---|---:|---:|
+| total-gates-v1 | 7989 | 7989 |
+| total-gates-v1 with graph synthesis | 10401 | 7987 |
+| `objective=total-gates gate-count=true preserve-clifford-network=true`, other options default | 10502 | 9621 |
+
+Fresh QCEC checks pass for all 60 outputs: ten cases, three option sets, and
+two binaries. The graph/default-budget rows were run once per binary and case
+to check gate totals; no repeated timing claim is made for those rows.
+`adder_n433` still exceeds the default native-gate limit and is skipped in
+the third row. The current build passes all 443 optimizer unit tests and all
+16 PBC lit tests.
+
+The budget-slice behavior is unchanged: exhausting a child work allowance can
+retain a verified incumbent; observed parent work/deadline exhaustion still
+skips. Deadline checks are cooperative at budget charges, not a hard wall-time
+guarantee.
+
+The local evidence bundle is `pbc-progress-2026-11-15-pr-rerun/`:
+`run.py` records the exact commands, `metadata.json` records full binary/input
+hashes and options, `corpus.json` and `dense.json` retain all timing samples,
+and each corpus result has its QCEC report and generated circuits. The runner
+uses the saved binaries and input archive described above and the Qiskit/QCEC
+environment recorded in its metadata.
+
 ## Changelog
+
+- **2026-11-15:** Added Appendix J: fresh measurements at `ef6e03310d`,
+  explicit report/dense baselines, all ten report rows, dense runtime
+  reductions, and QCEC validation of all three option sets.
+
+- **2026-11-15:** Added Appendix I: the ten measured-pass cases reproduce
+  exactly at `8ae81c2`, with pass runtime, other option sets, and the
+  budget-slice fix that commits a work-limited search's best candidate.
 
 - **2026-11-07:** Added the phase-exact three-wire equal-T hold rewrite and
   restarted all 197 previously measured synthesis cases on 10.117.10.135.

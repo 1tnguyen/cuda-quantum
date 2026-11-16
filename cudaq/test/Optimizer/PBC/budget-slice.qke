@@ -1,0 +1,67 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                        //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+//===----------------------------------------------------------------------===//
+/// \file
+/// \brief A search that runs out of work keeps its best result.
+///
+/// QASMBench adder_n4. With default options the search runs out of work after
+/// finding an improvement, which must still be committed.
+//===----------------------------------------------------------------------===//
+
+// RUN: cudaq-opt %s --quake-try-pbc='objective=total-gates gate-count=true preserve-clifford-network=true emit-remarks=true' 2>&1 | FileCheck %s
+// RUN: cudaq-opt %s --quake-try-pbc='objective=total-gates gate-count=true preserve-clifford-network=true emit-remarks=true max-work=1000' 2>&1 | FileCheck %s --check-prefix=LIMIT
+
+// CHECK-NOT: PBC optimization skipped
+// CHECK-LABEL: func.func @adder_n4
+// CHECK-COUNT-8: quake.t
+// CHECK-NOT: quake.t
+// LIMIT: remark: PBC optimization skipped: search size/work/deadline limit
+
+module {
+  func.func @adder_n4() attributes {"cudaq-entrypoint", "cudaq-kernel"} {
+    %0 = quake.null_wire
+    %1 = quake.null_wire
+    %2 = quake.null_wire
+    %3 = quake.null_wire
+    %4 = quake.x %0 : (!quake.wire) -> !quake.wire
+    %5 = quake.t %4 : (!quake.wire) -> !quake.wire
+    %6 = quake.x %1 : (!quake.wire) -> !quake.wire
+    %7 = quake.t %6 : (!quake.wire) -> !quake.wire
+    %8:2 = quake.x [%5] %7 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %9 = quake.x %3 : (!quake.wire) -> !quake.wire
+    %10 = quake.h %9 : (!quake.wire) -> !quake.wire
+    %11:2 = quake.x [%2] %10 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %12 = quake.t %11#0 : (!quake.wire) -> !quake.wire
+    %13 = quake.t<adj> %11#1 : (!quake.wire) -> !quake.wire
+    %14:2 = quake.x [%12] %13 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %15:2 = quake.x [%8#1] %14#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %16:2 = quake.x [%14#1] %8#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %17:2 = quake.x [%16#1] %15#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %18 = quake.t<adj> %17#0 : (!quake.wire) -> !quake.wire
+    %19 = quake.t<adj> %17#1 : (!quake.wire) -> !quake.wire
+    %20:2 = quake.x [%18] %19 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %21:2 = quake.x [%15#1] %16#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %22 = quake.t<adj> %21#0 : (!quake.wire) -> !quake.wire
+    %23 = quake.t %21#1 : (!quake.wire) -> !quake.wire
+    %24:2 = quake.x [%22] %23 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %25:2 = quake.x [%24#1] %20#0 : (!quake.wire, !quake.wire) -> (!quake.wire, !quake.wire)
+    %26 = quake.s<adj> %25#0 : (!quake.wire) -> !quake.wire
+    %27 = quake.h %26 : (!quake.wire) -> !quake.wire
+    %measOut, %wires = quake.mz %25#1 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %measOut_0, %wires_1 = quake.mz %20#1 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %measOut_2, %wires_3 = quake.mz %24#0 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    %measOut_4, %wires_5 = quake.mz %27 : (!quake.wire) -> (!cc.measure_handle, !quake.wire)
+    quake.sink %wires : !quake.wire
+    quake.sink %wires_1 : !quake.wire
+    quake.sink %wires_3 : !quake.wire
+    quake.sink %wires_5 : !quake.wire
+    return
+  }
+}
+

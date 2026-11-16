@@ -318,7 +318,8 @@ Circuit windows(const Circuit &input, SearchBudget &budget,
     while (j < input.size() && input[j].kind != Kind::Rotate &&
            (bits | support(input[j])).count() <= 2) {
       bits |= support(input[j]);
-      (input[j].kind == Kind::Phase ? scalars : chunk).push_back(input[j++]);
+      (input[j].kind == Kind::Phase ? scalars : chunk).push_back(input[j]);
+      ++j;
     }
     std::vector<unsigned> qs;
     for (unsigned q : bits.set_bits())

@@ -97,7 +97,7 @@ Gate inverse(Gate g) {
 }
 /// Compute g*p*g^dagger for a supported primitive Clifford, including its sign.
 /// Callers validate gate kinds and wire indices before using this algebra.
-Pauli conjugate(Pauli p, const Gate &g) {
+void conjugateInPlace(Pauli &p, const Gate &g) {
   bool x = p.x.test(g.a), z = p.z.test(g.a);
   switch (g.kind) {
   case Kind::H:
@@ -128,11 +128,15 @@ Pauli conjugate(Pauli p, const Gate &g) {
     p.z.flip(g.a, zb);
     break;
   }
-  case Kind::CZ:
-    // Reuse the signed CX rule through CZ = H(target) CX H(target).
-    p = conjugate(conjugate(conjugate(p, {Kind::H, g.b}), {Kind::CX, g.a, g.b}),
-                  {Kind::H, g.b});
+  case Kind::CZ: {
+    bool xb = p.x.test(g.b), zb = p.z.test(g.b);
+    // Each X adds Z on the other wire. The sign is the H-CX-H correction
+    // simplified in the Hermitian Pauli convention Y=iXZ.
+    p.sign ^= x && xb && (z ^ zb);
+    p.z.flip(g.a, xb);
+    p.z.flip(g.b, x);
     break;
+  }
   case Kind::Swap: {
     auto mask = (QubitSet::single(g.a, 1)) | (QubitSet::single(g.b, 1));
     p.x ^= (p.x.test(g.a) != p.x.test(g.b)) ? mask : 0;
@@ -142,6 +146,10 @@ Pauli conjugate(Pauli p, const Gate &g) {
   default:
     break;
   }
+}
+
+Pauli conjugate(Pauli p, const Gate &g) {
+  conjugateInPlace(p, g);
   return p;
 }
 
@@ -195,7 +203,7 @@ struct Frame {
   /// g^dagger. Its inverse action on F conjugates every stored row by g.
   void carry(Gate g) {
     for (auto &p : rows)
-      p = conjugate(p, g);
+      conjugateInPlace(p, g);
   }
 };
 
@@ -307,7 +315,7 @@ struct StabilizerState {
     }
     phase &= 7;
     for (auto &p : stabilizers)
-      p = conjugate(p, g);
+      conjugateInPlace(p, g);
   }
 };
 
@@ -508,39 +516,42 @@ std::vector<Gate> sequence(Candidate c, bool asymmetric) {
 using cudaq::pauli::graph::detail::circuitScore;
 using cudaq::pauli::graph::detail::nativeWord;
 
-/// Conjugate an axis by the complete symmetric candidate using a local table.
+/// Score the complete symmetric candidate using only its two local axes.
 /// Local bases omitted by asymmetric emission do not change support weight or
 /// local anticommutation, so this same transform suffices for candidate costs.
 /// Actual residual updates use the emitted sequence, including its signs.
-Pauli transformedPauli(Pauli p, Candidate c) {
-  // The complete local Clifford action, including signs, is only 9 x 16.
+int candidateCostDelta(const Pauli &p, const Pauli &q, bool factor,
+                       Candidate c) {
+  // Signs do not affect support cost. Encode the two output axes in four bits.
   static const auto tables = [] {
-    std::array<std::array<Pauli, 16>, 9> tables;
+    std::array<std::array<unsigned char, 16>, 9> tables;
     for (unsigned a = 1; a <= 3; ++a)
       for (unsigned b = 1; b <= 3; ++b)
         for (unsigned k = 0; k < 16; ++k) {
           Pauli p{(k & 1) | ((k >> 1) & 2), ((k >> 1) & 1) | ((k >> 2) & 2)};
           for (const Gate &g : sequence({0, 1, a, b}, false))
-            p = conjugate(p, g);
-          tables[(a - 1) * 3 + b - 1][k] = p;
+            conjugateInPlace(p, g);
+          tables[(a - 1) * 3 + b - 1][k] = p.axis(0) | (p.axis(1) << 2);
         }
     return tables;
   }();
-  unsigned first = p.axis(c.i), second = p.axis(c.j);
-  Pauli local = tables[(c.a - 1) * 3 + c.b - 1][first | (second << 2)];
-  p.x ^= QubitSet::single(c.i, local.x.test(0) ^ bool(first & 1));
-  p.x ^= QubitSet::single(c.j, local.x.test(1) ^ bool(second & 1));
-  p.z ^= QubitSet::single(c.i, local.z.test(0) ^ bool(first >> 1));
-  p.z ^= QubitSet::single(c.j, local.z.test(1) ^ bool(second >> 1));
-  p.sign ^= local.sign;
-  return p;
-}
-/// Transform a singlet axis, or both axes of a frame factor, for cost scoring.
-Node transformed(Node v, Candidate c) {
-  v.p = transformedPauli(v.p, c);
-  if (v.factor)
-    v.q = transformedPauli(v.q, c);
-  return v;
+  const auto &table = tables[(c.a - 1) * 3 + c.b - 1];
+  unsigned beforeP = p.axis(c.i) | (p.axis(c.j) << 2);
+  unsigned afterP = table[beforeP];
+  auto support = [](unsigned axes) {
+    return int(bool(axes & 3)) + int(bool(axes >> 2));
+  };
+  if (!factor)
+    return support(afterP) - support(beforeP);
+  unsigned beforeQ = q.axis(c.i) | (q.axis(c.j) << 2);
+  unsigned afterQ = table[beforeQ];
+  auto anti = [](unsigned p, unsigned q) { return int(p && q && p != q); };
+  int deltaAnti =
+      anti(afterP & 3, afterQ & 3) + anti(afterP >> 2, afterQ >> 2) -
+      anti(beforeP & 3, beforeQ & 3) - anti(beforeP >> 2, beforeQ >> 2);
+  // Clifford conjugation preserves symplectic parity. The change is even,
+  // so the frame-factor (anticommutations - 1) / 2 term changes by delta / 2.
+  return support(afterP | afterQ) - support(beforeP | beforeQ) + deltaAnti / 2;
 }
 
 /// View each logical wire's signed Z/X frame images as an anticommuting pair.
@@ -639,10 +650,10 @@ class Synthesizer {
         return false;
       for (unsigned i = 0; i < graph.nodes.size(); ++i)
         if (active[i])
-          graph.nodes[i].p = conjugate(graph.nodes[i].p, native);
+          conjugateInPlace(graph.nodes[i].p, native);
       graph.frame.carry(native);
       for (Pauli &observable : measurementWords)
-        observable = conjugate(observable, native);
+        conjugateInPlace(observable, native);
     }
     return true;
   }
@@ -659,18 +670,22 @@ class Synthesizer {
                                   bool penalizeFrame) {
     if (front.empty())
       return std::nullopt;
-    int minimum =
-        std::min_element(front.begin(), front.end(), [](auto a, auto b) {
-          return a.cost() < b.cost();
-        })->cost();
+    std::vector<int> frontCosts;
+    frontCosts.reserve(front.size());
+    int minimum = std::numeric_limits<int>::max();
+    for (const Node &node : front) {
+      frontCosts.push_back(node.cost());
+      minimum = std::min(minimum, frontCosts.back());
+    }
     std::set<Candidate> candidates;
     unsigned eligible = 0;
     // Restrict generation to the cheapest ready nodes, optionally capped by
     // candidateNodes. A candidate must reduce its generating node's cost;
     // other remaining nodes may become more expensive. The set deduplicates
     // actions generated by several nodes and fixes their tie-break order.
-    for (Node v : front) {
-      if (v.cost() != minimum)
+    for (size_t i = 0; i < front.size(); ++i) {
+      const Node &v = front[i];
+      if (frontCosts[i] != minimum)
         continue;
       if (options.candidateNodes && eligible++ >= options.candidateNodes)
         break;
@@ -684,7 +699,7 @@ class Synthesizer {
                   if (!charge())
                     return std::nullopt;
                   Candidate c{i, j, a, b};
-                  if (transformed(v, c).cost() < minimum) {
+                  if (candidateCostDelta(v.p, v.q, v.factor, c) < 0) {
                     candidates.insert(c);
                     c.native = true;
                     candidates.insert(c);
@@ -698,34 +713,31 @@ class Synthesizer {
     std::optional<Candidate> chosen;
     std::vector<std::pair<double, Candidate>> alternatives;
     auto frameFactors = factors(graph.frame);
+    const size_t populationCount = std::min<size_t>(
+        population.size(),
+        options.lookahead ? options.lookahead : population.size());
     const double currentReadoutCost =
         measuredMode && measurementCost && options.readoutWeight
             ? measurementCost(measurementWords)
             : 0;
     for (Candidate c : candidates) {
-      if (!charge(std::min<size_t>(population.size(), options.lookahead
-                                                          ? options.lookahead
-                                                          : population.size()) +
-                  front.size() + 4 * n + 1))
+      if (!charge(populationCount + front.size() + 4 * n + 1))
         return std::nullopt;
       double score = 0, norm = 0;
-      auto include = [&](Node v, double weight) {
-        score += weight * (transformed(v, c).cost() - v.cost());
+      auto include = [&](const Node &v, double weight) {
+        score += weight * candidateCostDelta(v.p, v.q, v.factor, c);
         norm += weight;
       };
-      unsigned count = 0;
       // Sample remaining nodes in graph order. lookahead bounds this scoring
       // sample; it does not explore that many future synthesis steps.
-      for (Node v : population) {
-        if (options.lookahead && count++ >= options.lookahead)
-          break;
-        include(v, 1);
-      }
+      for (size_t i = 0; i < populationCount; ++i)
+        include(population[i], 1);
       // Ready nodes receive extra weight scaled by population/frontier size,
       // so a small frontier can still influence the normalized average.
       // PCOAST Sec. V-C1, footnote 12.
-      for (Node v : front)
-        include(v, options.frontierWeight * population.size() / front.size());
+      for (size_t i = 0; i < front.size(); ++i)
+        include(front[i],
+                options.frontierWeight * population.size() / front.size());
       score /= std::max(1.0, norm);
       if (penalizeFrame && !measuredMode) {
         // Rotations can shrink while the residual Clifford becomes expensive.
@@ -733,8 +745,8 @@ class Synthesizer {
         // enabled.
         // PCOAST Sec. V-C1, terminating-frame penalty discussion.
         double delta = 0;
-        for (Node v : frameFactors)
-          delta += transformed(v, c).cost() - v.cost();
+        for (const Node &v : frameFactors)
+          delta += candidateCostDelta(v.p, v.q, v.factor, c);
         score += options.frameWeight * delta / n;
       }
       // Explicit ASAP policy: credit the fraction of this candidate's depth
@@ -742,31 +754,35 @@ class Synthesizer {
       // not a claim to reproduce Intel SDK's unpublished tie-breaking policy.
       // See PCOAST Sec. V-C1, schedule search and footnote 13; Sec. VI-C
       // evaluates fine tuning, rather than specifying this fractional credit.
-      auto ds = depths;
-      unsigned next = depth;
-      for (const Gate &g : action(c)) {
-        if (g.kind == Kind::Phase)
-          continue;
-        if (g.kind == Kind::CZ || g.kind == Kind::CX || g.kind == Kind::Swap)
-          ds[g.a] = ds[g.b] = std::max(ds[g.a], ds[g.b]) + 1;
-        else
-          ++ds[g.a];
-        next = std::max(next, ds[g.a]);
-      }
       const auto actionGates = action(c);
-      unsigned serial =
-          std::count_if(actionGates.begin(), actionGates.end(),
-                        [](const Gate &g) { return g.kind != Kind::Phase; });
-      score -=
-          options.parallelizationCredit * (1.0 - double(next - depth) / serial);
+      // With no scheduling credit, the trial depths cannot affect the score.
+      // Avoid copying the wire depths and simulating every candidate's gates.
+      if (options.parallelizationCredit != 0) {
+        auto ds = depths;
+        unsigned next = depth;
+        for (const Gate &g : actionGates) {
+          if (g.kind == Kind::Phase)
+            continue;
+          if (g.kind == Kind::CZ || g.kind == Kind::CX || g.kind == Kind::Swap)
+            ds[g.a] = ds[g.b] = std::max(ds[g.a], ds[g.b]) + 1;
+          else
+            ++ds[g.a];
+          next = std::max(next, ds[g.a]);
+        }
+        unsigned serial =
+            std::count_if(actionGates.begin(), actionGates.end(),
+                          [](const Gate &g) { return g.kind != Kind::Phase; });
+        score -= options.parallelizationCredit *
+                 (1.0 - double(next - depth) / serial);
+      }
       // Charge the primitive implementation, including local basis changes.
       // Support reduction alone does not price the gates that will be emitted.
       score += options.actionWeight * nativeGateCost(actionGates, options);
       if (measuredMode && measurementCost && options.readoutWeight) {
         auto next = measurementWords;
-        for (const Gate &gate : action(c))
+        for (const Gate &gate : actionGates)
           for (Pauli &observable : next)
-            observable = conjugate(observable, gate);
+            conjugateInPlace(observable, gate);
         if (!charge(llvm::SaturatingAdd<uint64_t>(
                 llvm::SaturatingMultiply<uint64_t>(uint64_t(n) * n,
                                                    measurementWords.size()),
@@ -1291,6 +1307,12 @@ bool cudaq::pauli::graph::equivalent(unsigned n, const std::vector<Gate> &input,
                               0);
 }
 
+int cudaq::pauli::graph::detail::candidateSupportCostDelta(
+    const Pauli &p, const Pauli &q, bool factor, unsigned i, unsigned j,
+    unsigned a, unsigned b) {
+  return candidateCostDelta(p, q, factor, {i, j, a, b});
+}
+
 double cudaq::pauli::graph::nativeGateCost(const std::vector<Gate> &gates,
                                            const Options &options) {
   return detail::evaluateNativeCost(gates, options).value;
@@ -1494,11 +1516,13 @@ Result cudaq::pauli::graph::synthesize(unsigned width,
   return best;
 }
 
-static Result buildReadout(unsigned width,
-                           const std::vector<Pauli> &observables,
-                           const std::vector<unsigned> &readoutWires,
-                           const Options &options, bool validate = true) {
+template <bool CostOnly = false>
+static Result
+buildReadout(unsigned width, const std::vector<Pauli> &observables,
+             const std::vector<unsigned> &readoutWires, const Options &options,
+             bool validate = true, double *cost = nullptr) {
   Result result;
+  uint64_t gateCount = 0;
   auto fail = [&](std::string error) {
     result.gates.clear();
     result.error = std::move(error);
@@ -1518,14 +1542,39 @@ static Result buildReadout(unsigned width,
   }
   auto words = observables;
   std::vector<bool> fixed(width);
+  // Reuse support storage while advancing through the pending observables.
+  std::vector<unsigned> support;
+  // Words before `index` are never read again once processed, so only the
+  // current and pending words need to be transported through new gates.
+  unsigned index = 0;
   auto append = [&](Gate gate) {
-    for (Gate native : nativeWord({gate}, options)) {
-      result.gates.push_back(native);
-      for (Pauli &word : words)
-        word = conjugate(word, native);
-    }
+    detail::emitNativeGate(gate, options, [&](const Gate &native) {
+      if constexpr (CostOnly) {
+        ++gateCount;
+        // These are already lowered primitive Cliffords. Accumulate in the
+        // same order as nativeGateCost, without retaining a gate vector.
+        switch (native.kind) {
+        case Kind::CX:
+          *cost += options.cxCost;
+          break;
+        case Kind::CZ:
+          *cost += options.czCost;
+          break;
+        case Kind::Swap:
+          *cost += options.swapCost;
+          break;
+        default:
+          *cost += options.singleQubitCost;
+          break;
+        }
+      } else {
+        result.gates.push_back(native);
+      }
+      for (unsigned j = index; j < words.size(); ++j)
+        conjugateInPlace(words[j], native);
+    });
   };
-  for (unsigned index = 0; index < words.size(); ++index) {
+  for (; index < words.size(); ++index) {
     unsigned target = readoutWires[index];
     if (target >= width)
       return fail("readout wire is out of range");
@@ -1535,7 +1584,7 @@ static Result buildReadout(unsigned width,
         return fail("conflicting repeated readout");
       continue;
     }
-    std::vector<unsigned> support;
+    support.clear();
     auto wordSupport = words[index].x | words[index].z;
     for (unsigned wire : wordSupport.set_bits())
       support.push_back(wire);
@@ -1566,7 +1615,7 @@ static Result buildReadout(unsigned width,
     if (words[index] != wanted)
       return fail("terminal observable reconstruction failed");
     fixed[target] = true;
-    if (result.gates.size() > options.maxGates) {
+    if ((CostOnly ? gateCount : result.gates.size()) > options.maxGates) {
       result.stats.budgetExhausted = true;
       return fail("terminal readout gate limit exceeded");
     }
@@ -1578,6 +1627,15 @@ Result cudaq::pauli::graph::synthesizeReadout(
     unsigned width, const std::vector<Pauli> &observables,
     const std::vector<unsigned> &readoutWires, const Options &options) {
   return buildReadout(width, observables, readoutWires, options);
+}
+
+double cudaq::pauli::graph::detail::evaluateReadoutCost(
+    unsigned width, const std::vector<Pauli> &observables,
+    const std::vector<unsigned> &readoutWires, const Options &options) {
+  double cost = 0;
+  auto result = buildReadout<true>(width, observables, readoutWires, options,
+                                   false, &cost);
+  return result ? cost : std::numeric_limits<double>::infinity();
 }
 
 namespace {
@@ -1804,9 +1862,7 @@ runMeasuredSearch(unsigned width, const std::vector<Gate> &input,
     // Clifford conjugation preserves the already validated commutation,
     // support range and dimensions. Avoid redoing Gaussian validation for
     // every heuristic candidate; final emission and replay remain checked.
-    auto readout = buildReadout(width, words, readoutWires, options, false);
-    return readout ? nativeGateCost(readout.gates, options)
-                   : std::numeric_limits<double>::infinity();
+    return detail::evaluateReadoutCost(width, words, readoutWires, options);
   };
   std::string exhaustionError;
   unsigned alternatives = options.discrepancySteps;

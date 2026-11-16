@@ -10,9 +10,12 @@
 
 #include "cudaq/Optimizer/Pauli/Circuit.h"
 #include "cudaq/Optimizer/Pauli/SearchBudget.h"
+#include <algorithm>
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <ranges>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -60,11 +63,13 @@ class DependencyCursor;
 /// algebraic rewrites and suffix-only conjugation require a new index.
 ///
 /// Storage is O(m+K+A): m occurrences, K unsigned axes, A directed conflicts.
-/// Classification uses hashing; conflict discovery makes K*(K-1)/2 Pauli
-/// comparisons. Work units count operations, not elapsed time or Pauli bits:
-/// one build entry, one classified occurrence, one initialized conflict list,
-/// one class-pair comparison, and one stored directed conflict each. Hashing
-/// and Pauli comparisons can themselves depend on the support width.
+/// Classification uses hashing; sparse conflict discovery indexes X/Z support
+/// overlaps, with pairwise discovery for dense axes. Work units count
+/// operations, not elapsed time or Pauli bits: classification, support scans,
+/// posting insertion/inspection/retirement, class-pair comparisons and stored
+/// conflicts.
+/// Sorting c candidates costs c*bit_width(c) units. Hashing and Pauli
+/// comparisons can themselves depend on the support width.
 class DependencyIndex {
   friend class DependencyCursor;
   struct AxisHash {
@@ -140,35 +145,192 @@ public:
     if (!take(axes.size()))
       return {std::nullopt, DependencyError::WorkLimit};
     result.conflicts.resize(axes.size());
-    for (unsigned a = 0; a < axes.size(); ++a)
-      for (unsigned b = a + 1; b < axes.size(); ++b) {
-        if (!take())
-          return {std::nullopt, DependencyError::WorkLimit};
-        if (!axes[a].anti(axes[b]))
-          continue;
-        uint64_t na = result.occurrences[a].size();
-        uint64_t nb = result.occurrences[b].size();
-        // Every pair of occurrences in distinct conflicting classes
-        // contributes exactly one directed edge, regardless of their order.
-        if (na > std::numeric_limits<uint64_t>::max() / nb)
-          return {std::nullopt, DependencyError::SizeOverflow};
-        uint64_t edges = na * nb;
-        if (edges > maxLogicalDependencies - result.counts.logicalEdges)
-          return {std::nullopt, DependencyError::DependencyLimit};
-        if (result.counts.storedConflicts >
-            std::numeric_limits<uint64_t>::max() - 2)
-          return {std::nullopt, DependencyError::SizeOverflow};
-        if (!take(2))
-          return {std::nullopt, DependencyError::WorkLimit};
-        if (!reserve(32))
-          return {std::nullopt, DependencyError::StorageLimit};
-        result.conflicts[a].push_back(b);
-        result.conflicts[b].push_back(a);
-        result.counts.logicalEdges += edges;
-        result.counts.storedConflicts += 2;
+    // An anticommuting pair must overlap in X/Z or Z/X support. Index these
+    // overlaps to avoid quadratic comparisons for spatially local words.
+    // Restrict scratch to O(K); dense words retain the pairwise path. Admission
+    // failure for optional scratch also retains that path.
+    uint64_t supportBits = 0;
+    for (const auto &axis : axes) {
+      if (!take())
+        return {std::nullopt, DependencyError::WorkLimit};
+      supportBits += uint64_t(axis.x.count()) + axis.z.count();
+    }
+    bool sparse = axes.size() >= 64 && supportBits <= 8 * axes.size();
+    if (sparse)
+      sparse = reserve(256 * supportBits + 16 * axes.size());
+    struct Posting {
+      std::vector<unsigned> x, z;
+      size_t xBegin = 0, zBegin = 0;
+    };
+    std::unordered_map<unsigned, Posting> postings;
+    std::vector<unsigned> seen, candidates;
+    if (sparse) {
+      seen.assign(axes.size(), std::numeric_limits<unsigned>::max());
+      for (unsigned a = 0; a < axes.size(); ++a) {
+        for (unsigned q : axes[a].x.set_bits()) {
+          if (!take())
+            return {std::nullopt, DependencyError::WorkLimit};
+          postings[q].x.push_back(a);
+        }
+        for (unsigned q : axes[a].z.set_bits()) {
+          if (!take())
+            return {std::nullopt, DependencyError::WorkLimit};
+          postings[q].z.push_back(a);
+        }
       }
+    }
     result.counts.occurrences = word.size();
     result.counts.classes = axes.size();
+    // Store a conflicting pair. With `deferred`, its two work units are added
+    // there instead of being taken from the budget.
+    auto record = [&](unsigned a, unsigned b, uint64_t *deferred = nullptr) {
+      uint64_t na = result.occurrences[a].size();
+      uint64_t nb = result.occurrences[b].size();
+      // Every pair of occurrences in distinct conflicting classes
+      // contributes exactly one directed edge, regardless of their order.
+      if (na > std::numeric_limits<uint64_t>::max() / nb)
+        return DependencyError::SizeOverflow;
+      uint64_t edges = na * nb;
+      if (edges > maxLogicalDependencies - result.counts.logicalEdges)
+        return DependencyError::DependencyLimit;
+      if (result.counts.storedConflicts >
+          std::numeric_limits<uint64_t>::max() - 2)
+        return DependencyError::SizeOverflow;
+      if (deferred)
+        *deferred += 2;
+      else if (!take(2))
+        return DependencyError::WorkLimit;
+      if (!reserve(32))
+        return DependencyError::StorageLimit;
+      result.conflicts[a].push_back(b);
+      result.conflicts[b].push_back(a);
+      result.counts.logicalEdges += edges;
+      result.counts.storedConflicts += 2;
+      return DependencyError::None;
+    };
+    auto compare = [&](unsigned a, const auto &others) {
+      for (unsigned b : others) {
+        if (!take())
+          return DependencyError::WorkLimit;
+        if (!axes[a].anti(axes[b]))
+          continue;
+        if (auto error = record(a, b); error != DependencyError::None)
+          return error;
+      }
+      return DependencyError::None;
+    };
+    if (!sparse) {
+      // Charge n units at once, or one at a time when the budget may run out
+      // so failures record the same work as per-pair charging.
+      auto charge = [&](uint64_t n) {
+        if (!budget || !n)
+          return true;
+        if (budget->remaining() >= n)
+          return budget->take(n);
+        for (; n; --n)
+          if (!budget->take())
+            return false;
+        return true;
+      };
+      // Test pairs in blocks of 64, then store conflicts in pair order. A
+      // block costs at most 3 units per pair; if the budget covers that,
+      // charge it once at the end.
+      for (unsigned a = 0; a < axes.size(); ++a) {
+        const Pauli &left = axes[a];
+        for (unsigned base = a + 1; base < axes.size(); base += 64) {
+          unsigned end = std::min<unsigned>(axes.size(), base + 64);
+          uint64_t mask = 0;
+          for (unsigned b = base; b < end; ++b)
+            mask |= uint64_t(left.anti(axes[b])) << (b - base);
+          unsigned charged = base;
+          if (!budget || budget->remaining() >= 3 * uint64_t(end - base)) {
+            uint64_t pending = 0;
+            for (; mask; mask &= mask - 1) {
+              unsigned b = base + std::countr_zero(mask);
+              pending += b + 1 - charged;
+              charged = b + 1;
+              if (auto error = record(a, b, &pending);
+                  error != DependencyError::None) {
+                charge(pending);
+                return {std::nullopt, error};
+              }
+            }
+            if (!charge(pending + (end - charged)))
+              return {std::nullopt, DependencyError::WorkLimit};
+            continue;
+          }
+          for (; mask; mask &= mask - 1) {
+            unsigned b = base + std::countr_zero(mask);
+            if (!charge(b + 1 - charged))
+              return {std::nullopt, DependencyError::WorkLimit};
+            charged = b + 1;
+            if (auto error = record(a, b); error != DependencyError::None)
+              return {std::nullopt, error};
+          }
+          if (!charge(end - charged))
+            return {std::nullopt, DependencyError::WorkLimit};
+        }
+      }
+      return {std::move(result), DependencyError::None};
+    }
+    for (unsigned a = 0; a < axes.size(); ++a) {
+      candidates.clear();
+      // Retire processed classes only when their posting list is queried.
+      // Each entry is skipped at most once across the complete build.
+      uint64_t hits = 0, retired = 0;
+      auto inspect = [&](const std::vector<unsigned> &list, size_t &begin) {
+        size_t previous = begin;
+        while (begin < list.size() && list[begin] <= a)
+          ++begin;
+        retired += begin - previous;
+        hits += list.size() - begin;
+      };
+      for (unsigned q : axes[a].x.set_bits()) {
+        auto &posting = postings[q];
+        inspect(posting.z, posting.zBegin);
+      }
+      for (unsigned q : axes[a].z.set_bits()) {
+        auto &posting = postings[q];
+        inspect(posting.x, posting.xBegin);
+      }
+      if (!take(uint64_t(axes[a].x.count()) + axes[a].z.count() + retired))
+        return {std::nullopt, DependencyError::WorkLimit};
+      // Avoid enumerating repeated overlaps when a pairwise scan is cheaper.
+      bool indexed = hits < axes.size() - a - 1;
+      if (indexed) {
+        auto collect = [&](const std::vector<unsigned> &list, size_t begin) {
+          for (size_t i = begin; i < list.size(); ++i) {
+            unsigned b = list[i];
+            if (seen[b] != a) {
+              seen[b] = a;
+              candidates.push_back(b);
+            }
+          }
+        };
+        if (!take(hits))
+          return {std::nullopt, DependencyError::WorkLimit};
+        for (unsigned q : axes[a].x.set_bits()) {
+          const auto &posting = postings[q];
+          collect(posting.z, posting.zBegin);
+        }
+        for (unsigned q : axes[a].z.set_bits()) {
+          const auto &posting = postings[q];
+          collect(posting.x, posting.xBegin);
+        }
+        // Preserve the legacy conflict order, including budgeted readiness
+        // queries. Charge n log n work for sorting the candidate IDs.
+        if (!take(uint64_t(candidates.size()) *
+                  std::bit_width(candidates.size())))
+          return {std::nullopt, DependencyError::WorkLimit};
+        std::sort(candidates.begin(), candidates.end());
+      }
+
+      auto error =
+          indexed ? compare(a, candidates)
+                  : compare(a, std::views::iota(a + 1, unsigned(axes.size())));
+      if (error != DependencyError::None)
+        return {std::nullopt, error};
+    }
     return {std::move(result), DependencyError::None};
   }
 

@@ -46,7 +46,8 @@ def compare(baseline, candidate, *, all_metrics=False):
     tradeoffs = []
     for key in sorted(old.keys() & new.keys()):
         a, b = old[key], new[key]
-        if not a.get("source_sha256") or b.get("source_sha256") != a["source_sha256"]:
+        if not a.get("source_sha256") or b.get(
+                "source_sha256") != a["source_sha256"]:
             issues.append(f"input binding mismatch: {key}")
         before, after = a.get("hold"), b.get("metrics")
         if after is None:
@@ -59,48 +60,63 @@ def compare(baseline, candidate, *, all_metrics=False):
             issues.append(f"invalid metric vector: {key}")
             continue
         unchanged = bool(a.get("output_sha256")) and (
-            b.get("output_sha256") == a["output_sha256"] and after == before
-        )
+            b.get("output_sha256") == a["output_sha256"] and after == before)
         if not unchanged and b.get("hold_certificate_verified") is not True:
-            issues.append(f"changed output lacks verified hold certificate: {key}")
+            issues.append(
+                f"changed output lacks verified hold certificate: {key}")
         if not b.get("output_sha256"):
             issues.append(f"missing output hash: {key}")
         if before is not None:
             for metric in METRICS if all_metrics else ("total",):
                 if after[metric] > before[metric]:
-                    issues.append(f"{metric} regression: {key}: {before[metric]} -> {after[metric]}")
+                    issues.append(
+                        f"{metric} regression: {key}: {before[metric]} -> {after[metric]}"
+                    )
             ceiling = before
             if not ceiling or type(ceiling.get("t")) is not int:
                 issues.append(f"missing T ceiling evidence: {key}")
             elif after["t"] > ceiling["t"]:
-                issues.append(f"T ceiling exceeded: {key}: {after['t']} > {ceiling['t']}")
-            changes = {m: [before[m], after[m]] for m in METRICS[1:]
-                       if after[m] > before[m]}
+                issues.append(
+                    f"T ceiling exceeded: {key}: {after['t']} > {ceiling['t']}")
+            changes = {
+                m: [before[m], after[m]]
+                for m in METRICS[1:]
+                if after[m] > before[m]
+            }
             if changes:
                 tradeoffs.append({"case_id": key, "increases": changes})
             if after["total"] < before["total"]:
                 improved.append(key)
         target = a["preserve"]["total"]
-        relation = "win" if after["total"] < target else "tie" if after["total"] == target else "loss"
+        relation = "win" if after[
+            "total"] < target else "tie" if after["total"] == target else "loss"
         comparisons[relation] += 1
         saved_t = a["preserve"]["t"] - after["t"]
-        allowed_tradeoff = (relation == "loss" and saved_t > 0
-                            and after["total"] - target <= 3 * saved_t)
+        allowed_tradeoff = (relation == "loss" and saved_t > 0 and
+                            after["total"] - target <= 3 * saved_t)
         target_comparisons["t_tradeoff" if allowed_tradeoff else relation] += 1
-    return {"admissible": not issues, "issues": issues,
-            "t_ceiling": "hold", "all_metrics": all_metrics,
-            "versus_target": dict(target_comparisons),
-            "secondary_tradeoffs": tradeoffs,
-            "improved_cases": improved, "versus_preserve": dict(comparisons),
-            "baseline_cases": len(old), "candidate_cases": len(new)}
+    return {
+        "admissible": not issues,
+        "issues": issues,
+        "t_ceiling": "hold",
+        "all_metrics": all_metrics,
+        "versus_target": dict(target_comparisons),
+        "secondary_tradeoffs": tradeoffs,
+        "improved_cases": improved,
+        "versus_preserve": dict(comparisons),
+        "baseline_cases": len(old),
+        "candidate_cases": len(new)
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("baseline", type=Path)
     parser.add_argument("candidate", type=Path)
-    parser.add_argument("--all-metrics", action="store_true",
-                        help="also reject entangler, depth and T-depth increases")
+    parser.add_argument(
+        "--all-metrics",
+        action="store_true",
+        help="also reject entangler, depth and T-depth increases")
     args = parser.parse_args()
     result = compare(json.loads(args.baseline.read_text()),
                      json.loads(args.candidate.read_text()),

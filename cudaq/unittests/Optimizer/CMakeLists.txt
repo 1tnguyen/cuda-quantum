@@ -59,6 +59,7 @@ add_cudaq_unittest("OptimizerUnitTests" "optimizer-unit-tests"
         CCDialect
         OptTransforms
         OptimBuilder
+        cudaq-synth
     COMPILE_OPTS
       -fno-rtti
 )

@@ -70,7 +70,11 @@ public:
     result.set(q, value);
     return result;
   }
-  bool test(unsigned q) const { return q < bits.getBitWidth() && bits[q]; }
+  /// Read the raw word directly. APInt::operator[] is not reliably inlined.
+  bool test(unsigned q) const {
+    return q < bits.getBitWidth() &&
+           ((bits.getRawData()[q / 64] >> (q % 64)) & 1);
+  }
   void set(unsigned q, bool value = true) {
     if (value) {
       assert(q < std::numeric_limits<unsigned>::max() &&
@@ -102,6 +106,22 @@ public:
          i < std::min(bits.getNumWords(), rhs.bits.getNumWords()); ++i)
       count += std::popcount(left[i] & right[i]);
     return count;
+  }
+  /// Parity of the intersection size, without a popcount libcall.
+  bool intersectionParity(const QubitSet &rhs) const {
+    auto left = bits.getRawData(), right = rhs.bits.getRawData();
+    uint64_t folded = 0;
+    for (unsigned i = 0;
+         i < std::min(bits.getNumWords(), rhs.bits.getNumWords()); ++i)
+      folded ^= left[i] & right[i];
+    return wordParity(folded);
+  }
+  static bool wordParity(uint64_t v) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_parityll(v);
+#else
+    return std::popcount(v) & 1;
+#endif
   }
   unsigned unionCount(const QubitSet &rhs) const {
     return count() + rhs.count() - intersectionCount(rhs);
@@ -213,7 +233,10 @@ struct Pauli {
   bool sign = false;
   unsigned axis(unsigned q) const;
   unsigned weight() const;
-  bool anti(const Pauli &other) const;
+  /// True if the two Paulis anticommute.
+  bool anti(const Pauli &other) const {
+    return x.intersectionParity(other.z) != z.intersectionParity(other.x);
+  }
   bool operator==(const Pauli &) const = default;
 };
 

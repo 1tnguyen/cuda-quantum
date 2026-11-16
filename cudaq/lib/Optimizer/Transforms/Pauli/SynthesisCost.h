@@ -35,6 +35,20 @@ struct NativeCost {
   bool exact = true;
 };
 
+/// Exact support-cost change for the symmetric two-wire candidate. Wires i/j
+/// must be distinct, local axes a/b in 1..3. Frame factors require p/q to
+/// anticommute, singlets ignore q. Signs do not contribute to this cost.
+int candidateSupportCostDelta(const Pauli &p, const Pauli &q, bool factor,
+                              unsigned i, unsigned j, unsigned a, unsigned b);
+
+/// Score terminal reconstruction without retaining its native gates. Options,
+/// dimensions and commuting, in-range observables must already be validated.
+/// Unsupported reconstruction or a gate-limit failure returns infinity.
+double evaluateReadoutCost(unsigned width,
+                           const std::vector<Pauli> &observables,
+                           const std::vector<unsigned> &readoutWires,
+                           const Options &options);
+
 /// Five integral metrics in the existing mechanical-lowering model.
 using CostVector = tcount::Cost;
 struct CircuitCost {
@@ -43,40 +57,48 @@ struct CircuitCost {
 };
 using CostRank = std::array<double, 5>;
 
+/// Visit one gate's native expansion in emission order, without a temporary
+/// gate vector. The callback must consume or copy each gate before returning.
+template <typename Emit>
+inline void emitNativeGate(const Gate &gate, const Options &options,
+                           Emit &&emit) {
+  auto cx = [&](unsigned a, unsigned b) {
+    if (options.nativeCX)
+      emit(Gate{Kind::CX, a, b});
+    else {
+      emit(Gate{Kind::H, b});
+      emit(Gate{Kind::CZ, a, b});
+      emit(Gate{Kind::H, b});
+    }
+  };
+  if (gate.kind == Kind::CX)
+    cx(gate.a, gate.b);
+  else if (gate.kind == Kind::CZ && !options.nativeCZ) {
+    emit(Gate{Kind::H, gate.b});
+    cx(gate.a, gate.b);
+    emit(Gate{Kind::H, gate.b});
+  } else if (gate.kind == Kind::Swap && !options.nativeSwap) {
+    cx(gate.a, gate.b);
+    cx(gate.b, gate.a);
+    cx(gate.a, gate.b);
+  } else
+    emit(gate);
+}
+
 /// Translate an action into the configured native entangling basis.
 inline std::vector<Gate> nativeWord(const std::vector<Gate> &input,
                                     const Options &options) {
   std::vector<Gate> result;
-  auto cx = [&](unsigned a, unsigned b) {
-    if (options.nativeCX)
-      result.push_back({Kind::CX, a, b});
-    else {
-      result.push_back({Kind::H, b});
-      result.push_back({Kind::CZ, a, b});
-      result.push_back({Kind::H, b});
-    }
-  };
-  for (Gate gate : input) {
-    if (gate.kind == Kind::CX)
-      cx(gate.a, gate.b);
-    else if (gate.kind == Kind::CZ && !options.nativeCZ) {
-      result.push_back({Kind::H, gate.b});
-      cx(gate.a, gate.b);
-      result.push_back({Kind::H, gate.b});
-    } else if (gate.kind == Kind::Swap && !options.nativeSwap) {
-      cx(gate.a, gate.b);
-      cx(gate.b, gate.a);
-      cx(gate.a, gate.b);
-    } else
-      result.push_back(gate);
-  }
+  for (const Gate &gate : input)
+    emitNativeGate(gate, options,
+                   [&](const Gate &native) { result.push_back(native); });
   return result;
 }
 
 inline NativeCost evaluateNativeCost(const std::vector<Gate> &gates,
                                      const Options &options) {
   NativeCost result;
-  for (Gate gate : nativeWord(gates, options)) {
+  auto accumulate = [&](const Gate &gate) {
     switch (gate.kind) {
     case Kind::Phase:
       break;
@@ -118,7 +140,10 @@ inline NativeCost evaluateNativeCost(const std::vector<Gate> &gates,
       result.value += options.singleQubitCost;
       break;
     }
-  }
+  };
+  // Score the native expansion in emission order without retaining it.
+  for (const Gate &gate : gates)
+    emitNativeGate(gate, options, accumulate);
   return result;
 }
 
