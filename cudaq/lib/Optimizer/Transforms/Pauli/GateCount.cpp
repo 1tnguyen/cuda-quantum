@@ -18,6 +18,8 @@
 
 #include "cudaq/Optimizer/Pauli/GateCount.h"
 #include "CliffordDictionary.h"
+#include "HoldAssertions.h"
+#include "PhaseConstruction.h"
 #include "TCountInternal.h"
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
 #include <algorithm>
@@ -212,12 +214,7 @@ bool commute(const Gate &g, const Gate &h, SearchBudget &budget) {
     return conjugate(g.pauli, h) == g.pauli;
   if (h.kind == Kind::Rotate)
     return conjugate(h.pauli, g) == h.pauli;
-  auto bits = support(g) | support(h);
-  std::vector<unsigned> qs;
-  for (unsigned q : bits.set_bits())
-    qs.push_back(q);
-  auto pair = localize({g, h}, qs);
-  return graph::equivalent(qs.size(), pair, {pair[1], pair[0]});
+  return construction::commuteCliffords(g, h);
 }
 
 /// Return the exact Rz coefficient of a supported diagonal operation.
@@ -334,8 +331,11 @@ Circuit windows(const Circuit &input, SearchBudget &budget,
     const auto &db = n == 1 ? one : two;
     auto local = localize(chunk, qs);
     Key key = identity(n);
-    for (auto g : local)
+    construction::CliffordPhase inputPhase(n);
+    for (auto g : local) {
       key = advance(key, g, n);
+      inputPhase.append(g);
+    }
     Circuit replacement;
     for (Key k = key; k != identity(n); k = db.at(k).previous)
       replacement.push_back(db.at(k).gate);
@@ -350,29 +350,27 @@ Circuit windows(const Circuit &input, SearchBudget &budget,
     // retry keeps such a window intact while still improving other windows.
     if (replacement.size() < chunk.size() &&
         (!preserveEntanglers || entanglers(replacement) <= entanglers(chunk))) {
-      for (int scalar = 0; scalar < 8; ++scalar) {
-        if (!budget.take(1 + local.size() + replacement.size()))
-          return input;
-        auto corrected = replacement;
-        phase(corrected, scalar);
-        bool equivalent;
-        {
-          TelemetryTimer proof(verificationNs);
-          equivalent = graph::equivalent(n, local, corrected);
-        }
-        if (equivalent) {
-          for (auto g : corrected) {
-            if (g.kind != Kind::Phase) {
-              g.a = qs[g.a];
-              if (g.kind == Kind::CX || g.kind == Kind::CZ ||
-                  g.kind == Kind::Swap)
-                g.b = qs[g.b];
-            }
-            out.push_back(g);
+      if (!budget.take(1 + local.size() + replacement.size()))
+        return input;
+      auto corrected = replacement;
+      phase(corrected, inputPhase.relativeTo(db.at(key).phase));
+      bool equivalent;
+      {
+        TelemetryTimer proof(verificationNs);
+        equivalent = construction::check(
+            [&] { return graph::equivalent(n, local, corrected); });
+      }
+      if (equivalent) {
+        for (auto g : corrected) {
+          if (g.kind != Kind::Phase) {
+            g.a = qs[g.a];
+            if (g.kind == Kind::CX || g.kind == Kind::CZ ||
+                g.kind == Kind::Swap)
+              g.b = qs[g.b];
           }
-          accepted = true;
-          break;
+          out.push_back(g);
         }
+        accepted = true;
       }
     }
     if (accepted)
@@ -479,27 +477,29 @@ Circuit relocate(unsigned width, const Circuit &input, bool last,
     }
     // Replay the new network and coefficients rather than trusting the chosen
     // locations. Equality modulo 16 preserves rotation scalar signs as well.
-    TelemetryTimer proof(verificationNs);
-    std::vector<QubitSet> rows;
-    for (unsigned q = 0; q < width; ++q)
-      rows.push_back(QubitSet::single(q));
-    auto remaining = signature.coefficients;
-    for (const auto &g : rebuilt) {
-      if (!budget.take(1 + width / 64))
+    if (construction::checksEnabled()) {
+      TelemetryTimer proof(verificationNs);
+      std::vector<QubitSet> rows;
+      for (unsigned q = 0; q < width; ++q)
+        rows.push_back(QubitSet::single(q));
+      auto remaining = signature.coefficients;
+      for (const auto &g : rebuilt) {
+        if (!budget.take(1 + width / 64))
+          return input;
+        if (g.kind == Kind::Rotate)
+          remaining[{0, rows[g.pauli.z.first()]}] -= *quarters(g.angle);
+        else if (g.kind == Kind::CX)
+          rows[g.b] ^= rows[g.a];
+        else
+          std::swap(rows[g.a], rows[g.b]);
+      }
+      bool valid =
+          rows == signature.rows &&
+          std::all_of(remaining.begin(), remaining.end(),
+                      [](const auto &item) { return item.second % 16 == 0; });
+      if (!construction::check([&] { return valid; }))
         return input;
-      if (g.kind == Kind::Rotate)
-        remaining[{0, rows[g.pauli.z.first()]}] -= *quarters(g.angle);
-      else if (g.kind == Kind::CX)
-        rows[g.b] ^= rows[g.a];
-      else
-        std::swap(rows[g.a], rows[g.b]);
     }
-    bool valid =
-        rows == signature.rows &&
-        std::all_of(remaining.begin(), remaining.end(),
-                    [](const auto &item) { return item.second % 16 == 0; });
-    if (!valid)
-      return input;
     out.insert(out.end(), rebuilt.begin(), rebuilt.end());
     out.insert(out.end(), scalars.begin(), scalars.end());
     i = j;

@@ -31,7 +31,7 @@ std::vector<Gate> merge(const std::vector<Gate> &input, unsigned width,
   Frame frame(width);
   // Store only the latest candidate for each unsigned axis. This bounds the
   // matching search; an older valid partner can be missed without affecting
-  // correctness. Signs are recovered by verifyMerge, not by this hash key.
+  // correctness. Signs are recovered by transportMerge, not by this hash key.
   std::unordered_map<Axis, size_t, AxisHash> latest;
   for (size_t i = 0; i < gates.size(); ++i) {
     if (!budget.take(width))
@@ -54,9 +54,10 @@ std::vector<Gate> merge(const std::vector<Gate> &input, unsigned width,
       size_t previous = it->second;
       auto old = quarters(gates[previous].angle);
       if (old && (*old & 1)) {
-        // Matching transported axes is only a proposal: intervening rotations
-        // may obstruct it. Replay the current gate sequence before mutating it.
-        if (auto transported = verifyMerge(gates, previous, i, budget, stats)) {
+        // Build the move with signed local conjugation rules. Stop at an
+        // anticommuting barrier; only then combine the coefficients.
+        if (auto transported =
+                transportMerge(gates, previous, i, budget, stats)) {
           // Exact rotation convention retains the scalar automatically; never
           // reduce modulo 2*pi (a 2*pi rotation is -I).
           gates[previous].angle = {0, 1};

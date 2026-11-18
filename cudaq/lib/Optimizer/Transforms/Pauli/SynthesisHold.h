@@ -5,6 +5,7 @@
  ******************************************************************************/
 
 #pragma once
+#include "HoldAssertions.h"
 
 #include "SynthesisHoldOneQubit.h"
 #include "SynthesisNativeRefinement.h"
@@ -120,9 +121,10 @@ inline bool refineHoldThreeWireTemplates(unsigned width, Result &result,
       }
       local.push_back(std::move(mapped));
     }
-    if (!budget.take(10000))
+    if (construction::checksEnabled() && !budget.take(10000))
       break;
-    if (!graph::equivalent(3, local, replacement)) {
+    if (!construction::check(
+            [&] { return graph::equivalent(3, local, replacement); })) {
       result = holdFailure("hold three-wire template phase replay failed",
                            SearchTermination::InvalidProof);
       return false;

@@ -8,7 +8,7 @@
 
 //===----------------------------------------------------------------------===//
 /// \file
-/// \brief Exact witness checks for Pauli rotation rewrites.
+/// \brief Exact rotation transport and optional phase-expression assertions.
 ///
 /// Replays the transport of a proposed merged axis and compares decoded phase
 /// functions, including scalar corrections, on every generator assignment.
@@ -19,12 +19,13 @@
 #include <bit>
 
 namespace cudaq::pauli::tcount::detail {
-/// Prove the first rotation can move to the last and return its coefficient
-/// in the last axis's sign convention. An empty result means no proof,
+/// Transport the first rotation to the last using local identities, returning
+/// its signed coefficient. An empty result means the move is unavailable,
 /// including budget exhaustion; it must never authorize a partial merge.
-std::optional<int> verifyMerge(const std::vector<Gate> &gates, size_t first,
-                               size_t last, Budget &budget, Statistics &stats) {
-  TelemetryTimer timer(budget.verificationNs);
+std::optional<int> transportMerge(const std::vector<Gate> &gates, size_t first,
+                                  size_t last, Budget &budget,
+                                  Statistics &stats) {
+
   if (first >= last || last >= gates.size() ||
       gates[first].kind != Kind::Rotate || gates[last].kind != Kind::Rotate)
     return {};

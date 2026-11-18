@@ -17,6 +17,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
+#include "Pauli/HoldAssertions.h"
+#include "Pauli/PhaseConstruction.h"
 #include "Pauli/SignedCliffordFrames.h"
 #include "Pauli/SynthesisCost.h"
 #include "Pauli/SynthesisHold.h"
@@ -1428,4 +1430,138 @@ TEST(GraphSynthesis, NativeReadoutUsesDynamicSupportStorage) {
                   {Gate::rotation({QubitSet::single(last), 0}, {1, 4})}, {}),
               3);
   }
+}
+
+namespace {
+struct HoldAssertionEnvironment {
+  std::optional<std::string> previous;
+  explicit HoldAssertionEnvironment(const char *value) {
+    if (const char *old = std::getenv("CUDAQ_PBC_HOLD_ASSERT"))
+      previous = old;
+    setenv("CUDAQ_PBC_HOLD_ASSERT", value, 1);
+  }
+  ~HoldAssertionEnvironment() {
+    if (previous)
+      setenv("CUDAQ_PBC_HOLD_ASSERT", previous->c_str(), 1);
+    else
+      unsetenv("CUDAQ_PBC_HOLD_ASSERT");
+  }
+};
+std::vector<Gate> constructionGenerators(unsigned width) {
+  std::vector<Gate> gates;
+  for (unsigned q = 0; q < width; ++q)
+    for (Kind k : {Kind::H, Kind::S, Kind::Sdg, Kind::X, Kind::Y, Kind::Z})
+      gates.push_back({k, q});
+  for (unsigned a = 0; a < width; ++a)
+    for (unsigned b = 0; b < width; ++b)
+      if (a != b) {
+        gates.push_back({Kind::CX, a, b});
+        if (a < b) {
+          gates.push_back({Kind::CZ, a, b});
+          gates.push_back({Kind::Swap, a, b});
+        }
+      }
+  return gates;
+}
+} // namespace
+TEST(HoldConstruction, PrimitiveRulesMatchIndependentPhaseSensitiveReplay) {
+  auto gates = constructionGenerators(4);
+  for (auto a : gates)
+    for (auto b : gates)
+      EXPECT_EQ(cudaq::pauli::construction::commuteCliffords(a, b),
+                equivalent(4, {a, b}, {b, a}))
+          << int(a.kind) << "," << a.a << "," << a.b << " vs " << int(b.kind)
+          << "," << b.a << "," << b.b;
+}
+TEST(HoldConstruction, IncrementalTwoSidedPhaseKeepsScalarAndConjugateY) {
+  using cudaq::pauli::construction::CliffordPhase;
+  CliffordPhase scalar(1, true);
+  for (unsigned i = 0; i < 3; ++i) {
+    scalar.append({Kind::H, 0});
+    scalar.append({Kind::S, 0});
+  }
+  EXPECT_EQ(scalar.identityPhase(), 1);
+  std::mt19937 rng(1719);
+  for (unsigned n : {1u, 2u, 4u, 65u}) {
+    auto generators = constructionGenerators(n == 65 ? 2 : n);
+    for (unsigned trial = 0; trial < 12; ++trial) {
+      CliffordPhase frame(n, true);
+      std::vector<Gate> source;
+      for (unsigned i = 0; i < 40; ++i) {
+        auto gate = generators[rng() % generators.size()];
+        if (n == 65) {
+          if (gate.a == 1)
+            gate.a = 64;
+          if (gate.b == 1)
+            gate.b = 64;
+        }
+        source.push_back(gate);
+        frame.append(gate);
+      }
+      for (auto gate : source)
+        frame.removePrefix(gate);
+      EXPECT_EQ(frame.identityPhase(), 0);
+    }
+  }
+}
+TEST(HoldConstruction, BothAssertionModesPreserveDenseUnitaryAndGateCounts) {
+  std::mt19937 rng(1911);
+  for (unsigned n : {1u, 2u, 4u}) {
+    auto generators = constructionGenerators(n);
+    for (unsigned trial = 0; trial < 8; ++trial) {
+      std::vector<Gate> source{Gate::phase({1, 8})};
+      for (unsigned i = 0; i < 24; ++i) {
+        if (i % 3)
+          source.push_back(generators[rng() % generators.size()]);
+        else {
+          unsigned q = rng() % n;
+          unsigned axis = 1 + rng() % 3;
+          source.push_back(
+              Gate::rotation({cudaq::pauli::QubitSet::single(q, axis & 1),
+                              cudaq::pauli::QubitSet::single(q, axis & 2)},
+                             trial % 2 ? Angle{0, 1, i + 1} : Angle{1, 4}));
+        }
+      }
+      std::vector<Gate> without;
+      for (const char *mode : {"0", "1"}) {
+        HoldAssertionEnvironment environment(mode);
+        Options options;
+        options.discrepancySteps = 2;
+        options.holdCheckpoints = trial % 2;
+        options.algebraicCandidates = 4;
+        cudaq::pauli::SearchBudget budget(1000000000);
+        auto result = synthesizeUnitary(n, source, options, &budget);
+        ASSERT_TRUE(result) << result.error;
+        assertUnitary(n, source, result.gates);
+        if (*mode == '0')
+          without = result.gates;
+        else {
+          assertUnitary(n, without, result.gates);
+          EXPECT_EQ(result.gates.size(), without.size());
+        }
+      }
+    }
+  }
+}
+TEST(HoldConstruction, AssertionsAreOptionalAndFailLoudlyWhenEnabled) {
+  namespace c = cudaq::pauli::construction;
+  {
+    HoldAssertionEnvironment environment("0");
+    c::HoldScope scope;
+    bool called = false;
+    EXPECT_TRUE(c::check([&] {
+      called = true;
+      return false;
+    }));
+    EXPECT_FALSE(called);
+    // The public verifier is never replaced with an always-true stub.
+    EXPECT_FALSE(equivalent(1, {{Kind::X, 0}}, {{Kind::Y, 0}}));
+  }
+  EXPECT_DEATH(
+      {
+        HoldAssertionEnvironment environment("1");
+        c::HoldScope scope;
+        c::check([] { return false; });
+      },
+      "unitary construction assertion failed");
 }

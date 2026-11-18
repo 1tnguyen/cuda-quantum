@@ -7,6 +7,8 @@
  ******************************************************************************/
 
 #pragma once
+#include "HoldAssertions.h"
+#include "PhaseConstruction.h"
 
 #include "SynthesisLinearWindows.h"
 #include <bit>
@@ -378,14 +380,10 @@ inline LinearFourResult optimizeLinearFourWindows(
       return true;
     if (a.kind == Kind::CX && b.kind == Kind::CX)
       return a.a != b.b && a.b != b.a;
-    if (!take(256))
-      return false;
-    auto support = left | right;
-    std::vector<unsigned> wires;
-    for (unsigned q : support.set_bits())
-      wires.push_back(q);
-    auto x = lw::compact(a, wires), y = lw::compact(b, wires);
-    return graph::equivalent(wires.size(), {x, y}, {y, x});
+    // Exact local rules retain scalar signs without comparing gate words.
+    if (b.kind == Kind::Rotate)
+      return tcount::detail::conjugate(b.pauli, a) == b.pauli;
+    return construction::commuteCliffords(a, b);
   };
   unsigned lookahead = std::min(limits.maxLookahead, 256u);
   unsigned setCap = std::min(limits.maxWireSets, 64u);
@@ -478,7 +476,8 @@ inline LinearFourResult optimizeLinearFourWindows(
         if (!(lw::rank(replacement, options) < lw::rank(local, options)))
           continue;
         uint64_t size = local.size() + replacement.size();
-        if (!take(llvm::SaturatingAdd<uint64_t>(
+        if (construction::checksEnabled() &&
+            !take(llvm::SaturatingAdd<uint64_t>(
                 512, llvm::SaturatingMultiply<uint64_t>(size, 3 * size + 17))))
           return finish();
         // Truth-table replay is independent of the dictionary's GF(2) row
@@ -495,11 +494,13 @@ inline LinearFourResult optimizeLinearFourWindows(
           return bits;
         };
         bool equivalent = true;
-        for (unsigned bits = 0; bits < 16; ++bits)
+        for (unsigned bits = 0; construction::checksEnabled() && bits < 16;
+             ++bits)
           equivalent &=
               evaluate(bits, local) == evaluate(bits, implementation->logical);
-        equivalent &= graph::equivalent(4, local, replacement);
-        if (!equivalent) {
+        equivalent &= construction::check(
+            [&] { return graph::equivalent(4, local, replacement); });
+        if (!construction::check([&] { return equivalent; })) {
           result.status = LinearFourStatus::InvalidProof;
           result.error = "four-wire map or native-unitary proof failed";
           return finish();

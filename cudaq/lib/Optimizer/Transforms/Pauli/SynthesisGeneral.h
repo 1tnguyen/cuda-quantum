@@ -7,6 +7,7 @@
  ******************************************************************************/
 
 #pragma once
+#include "HoldAssertions.h"
 
 #include "SynthesisMacros.h"
 #include "SynthesisRegions.h"
@@ -317,7 +318,8 @@ generateGeneralCandidates(const MeasuredProblem &source, const Options &options,
       // exact compact input/body before mapping or publishing any cached
       // result.
       uint64_t size = llvm::SaturatingAdd<uint64_t>(local.size(), body.size());
-      if (!charge(general_detail::proofWork(width, size)))
+      if (construction::checksEnabled() &&
+          !charge(general_detail::proofWork(width, size)))
         return result;
       for (const auto &gate : body) {
         if (!general_detail::validNative(width, gate, options)) {
@@ -326,7 +328,8 @@ generateGeneralCandidates(const MeasuredProblem &source, const Options &options,
           return result;
         }
       }
-      if (!graph::equivalent(width, local, body)) {
+      if (!construction::check(
+              [&] { return graph::equivalent(width, local, body); })) {
         fail(RegionStatus::InvalidProof,
              "general-region full-unitary replay failed");
         return result;
@@ -380,10 +383,13 @@ generateGeneralCandidates(const MeasuredProblem &source, const Options &options,
             uint64_t scoreWork = llvm::SaturatingAdd<uint64_t>(
                 width, llvm::SaturatingMultiply<uint64_t>(
                            16, closedSize + body.size() + 1));
-            if (!proof.take(llvm::SaturatingAdd<uint64_t>(
-                    scoreWork, general_detail::proofWork(
-                                   width, llvm::SaturatingAdd<uint64_t>(
-                                              local.size(), closedSize)))))
+            uint64_t checkWork = construction::checksEnabled()
+                                     ? general_detail::proofWork(
+                                           width, llvm::SaturatingAdd<uint64_t>(
+                                                      local.size(), closedSize))
+                                     : 0;
+            if (!proof.take(
+                    llvm::SaturatingAdd<uint64_t>(scoreWork, checkWork)))
               break;
             for (const auto &gate : proposal.body)
               if (!general_detail::validNative(width, gate, options))
@@ -402,7 +408,8 @@ generateGeneralCandidates(const MeasuredProblem &source, const Options &options,
             if (!(circuitScore(width, closed, options) <
                   circuitScore(width, body, options)))
               continue;
-            if (!graph::equivalent(width, local, closed))
+            if (!construction::check(
+                    [&] { return graph::equivalent(width, local, closed); }))
               return "macro region full-unitary replay failed";
             body = std::move(closed);
             ++result.macroImprovements;

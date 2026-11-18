@@ -19,8 +19,9 @@
 /// simplify their partially commuting word; build ordering edges between
 /// anticommuting rotations; emit ready single-wire rotations while greedily
 /// reducing wider supports; reconstruct the residual frame and scalar phase.
-/// Synthesis heuristics propose a circuit. A separate replay must accept that
-/// circuit before callers may use it.
+/// HOLD transformations maintain exact frame/phase invariants. Independent
+/// replay can be enabled with CUDAQ_PBC_HOLD_ASSERT=1; other contracts retain
+/// their existing mandatory replay policy.
 ///
 /// References below use the extended v2 of Paykin et al., "PCOAST: A
 /// Pauli-based Quantum Circuit Optimization Framework":
@@ -31,6 +32,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "cudaq/Optimizer/Pauli/GraphSynthesis.h"
+#include "HoldAssertions.h"
+#include "PhaseConstruction.h"
 #include "SignedCliffordFrames.h"
 #include "SynthesisAlgebra.h"
 #include "SynthesisBootstrap.h"
@@ -358,7 +361,8 @@ struct Graph {
 /// imported axes are unsigned and equal-axis merging can compare them directly.
 /// See PCOAST Lemma 30 and Sec. V-A, Fig. 9 (circuit-to-graph conversion).
 Graph import(unsigned n, const std::vector<Gate> &gates,
-             bool retainCliffords = true) {
+             bool retainCliffords = true,
+             construction::CliffordPhase *phase = nullptr) {
   Graph graph(n);
   for (const Gate &g : gates) {
     if (g.kind == Kind::Phase)
@@ -370,6 +374,8 @@ Graph import(unsigned n, const std::vector<Gate> &gates,
       graph.nodes.push_back({p, {}, a});
     } else {
       graph.frame.append(g);
+      if (phase)
+        phase->append(g);
       if (retainCliffords)
         graph.cliffords.push_back(g);
     }
@@ -572,6 +578,7 @@ class Synthesizer {
   /// Borrowed scoring, semantic, and resource controls for this invocation.
   const Options &options;
   /// Mutable residual rotations and Clifford frame.
+  std::optional<construction::CliffordPhase> phaseFrame;
   Graph graph;
   /// Accumulated output, counters, and sticky failure diagnostic.
   Result result;
@@ -581,7 +588,7 @@ class Synthesizer {
   unsigned deviationStep = 0;
   std::vector<Pauli> measurementWords;
   std::function<double(const std::vector<Pauli> &)> measurementCost;
-  /// Emitted Clifford subsequence used to recover the exact scalar phase.
+  /// Emitted Clifford subsequence for open exits and legacy phase replay.
   std::vector<Gate> emittedCliffords;
   /// Current ASAP finish depth on each wire.
   std::vector<unsigned> depths;
@@ -641,17 +648,27 @@ class Synthesizer {
   /// PCOAST Eq. (153), ADDGATE; Lemma 18 gives commutation preservation.
   bool carry(Gate g, const std::vector<bool> &active) {
     for (Gate native : nativeWord({g}, options)) {
-      // Dictionary scalar phases are irrelevant to conjugation. Hold-mode
-      // finalization recovers the required phase from the actual emitted
-      // Clifford skeleton; emitting these as well would count them twice.
+      // Dictionary scalars do not affect conjugation. The residual phase
+      // tracks the actual emitted primitives (legacy callers recover it at
+      // finalization); adding these scalars too would count them twice.
       if (native.kind == Kind::Phase)
         continue;
-      if (!charge(graph.nodes.size() + 2 * n) || !emit(native))
+      uint64_t phaseWork =
+          phaseFrame
+              ? (native.kind == Kind::H
+                     ? llvm::SaturatingMultiply<uint64_t>(8 * uint64_t(n), n)
+                     : 4 * uint64_t(n))
+              : 0;
+      if (!charge(llvm::SaturatingAdd<uint64_t>(
+              graph.nodes.size() + 2 * uint64_t(n), phaseWork)) ||
+          !emit(native))
         return false;
       for (unsigned i = 0; i < graph.nodes.size(); ++i)
         if (active[i])
           conjugateInPlace(graph.nodes[i].p, native);
       graph.frame.carry(native);
+      if (phaseFrame)
+        phaseFrame->removePrefix(native);
       for (Pauli &observable : measurementWords)
         conjugateInPlace(observable, native);
     }
@@ -945,6 +962,12 @@ class Synthesizer {
       result.error = "Terminal Clifford factorization failed";
       return false;
     }
+    // HOLD carries exact phase during import and every prefix update. At an
+    // identity tableau this is the residual scalar, not a replay comparison.
+    if (phaseFrame) {
+      int correction = phaseFrame->identityPhase();
+      return !correction || emit(Gate::phase({correction, 4}));
+    }
     // F and the emitted Clifford skeleton have the same signed tableau.
     // Recover the exact eighth-root phase using polynomial stabilizer replay.
     if (!charge(llvm::SaturatingMultiply<uint64_t>(
@@ -979,7 +1002,12 @@ public:
               const std::vector<Pauli> &observables = {},
               std::function<double(const std::vector<Pauli> &)> cost = {},
               unsigned deviation = 0, QuantumExit exit = QuantumExit::Restore)
-      : n(n), options(options), graph(import(n, input)),
+      : n(n), options(options),
+        phaseFrame(construction::holdDepth && exit == QuantumExit::Restore
+                       ? std::optional<construction::CliffordPhase>(
+                             std::in_place, n, true)
+                       : std::nullopt),
+        graph(import(n, input, true, phaseFrame ? &*phaseFrame : nullptr)),
         measuredMode(!observables.empty()), quantumExit(exit),
         deviationStep(deviation), measurementCost(std::move(cost)), depths(n),
         budget(budget) {
@@ -1365,12 +1393,13 @@ detail::OpenRegionResult cudaq::pauli::graph::detail::synthesizeOpenRegion(
       llvm::SaturatingMultiply<uint64_t>(
           3, llvm::SaturatingMultiply<uint64_t>(size, size)),
       llvm::SaturatingMultiply<uint64_t>(size, uint64_t(width) * width + 1));
-  if (!budget.take(work))
+  if (construction::checksEnabled() && !budget.take(work))
     return fail(OpenRegionStatus::Exhausted,
                 "open quantum region replay work limit exceeded");
   auto target = rotations;
   target.insert(target.end(), exit.begin(), exit.end());
-  if (!equivalent(width, target, candidate.gates))
+  if (!construction::check(
+          [&] { return equivalent(width, target, candidate.gates); }))
     return fail(OpenRegionStatus::InvalidProof,
                 "open quantum region exact replay failed");
   result.body = std::move(candidate.gates);
@@ -1455,7 +1484,7 @@ static Result synthesizeOne(unsigned n, const std::vector<Gate> &input,
       llvm::SaturatingMultiply<uint64_t>(
           3, llvm::SaturatingMultiply(replaySize, replaySize)),
       llvm::SaturatingMultiply<uint64_t>(replaySize, uint64_t(n) * n + 1));
-  if (budget && !budget->take(replayWork)) {
+  if (construction::checksEnabled() && budget && !budget->take(replayWork)) {
     result.error = "Pauli graph synthesis replay work limit exceeded";
     result.stats.budgetExhausted = true;
     return result;
@@ -1463,7 +1492,8 @@ static Result synthesizeOne(unsigned n, const std::vector<Gate> &input,
   bool verified;
   {
     TelemetryTimer timer(verificationNs);
-    verified = equivalent(n, target, result.gates);
+    verified = construction::check(
+        [&] { return equivalent(n, target, result.gates); });
   }
   if (!verified) {
     result.error =
@@ -3069,10 +3099,10 @@ static Result synthesizeUnitaryWhole(unsigned width,
           3, llvm::SaturatingMultiply(sourceSize, sourceSize)),
       llvm::SaturatingMultiply<uint64_t>(sourceSize,
                                          uint64_t(width) * width + 1));
-  if (!shared.take(sourceProofWork))
+  if (construction::checksEnabled() && !shared.take(sourceProofWork))
     return invalid("hold normalization replay work budget exhausted",
                    SearchTermination::Exhausted);
-  if (!equivalent(width, input, source))
+  if (!construction::check([&] { return equivalent(width, input, source); }))
     return invalid("hold normalization full-unitary replay failed");
   Options quantum = options;
   quantum.acceptOnlyImprovement = false;
@@ -3114,9 +3144,9 @@ static Result synthesizeUnitaryWhole(unsigned width,
         llvm::SaturatingMultiply<uint64_t>(
             3, llvm::SaturatingMultiply(size, size)),
         llvm::SaturatingMultiply<uint64_t>(size, uint64_t(width) * width + 1));
-    if (!work.take(replay))
+    if (construction::checksEnabled() && !work.take(replay))
       return std::nullopt;
-    if (!equivalent(width, source, word)) {
+    if (!construction::check([&] { return equivalent(width, source, word); })) {
       proofError = "hold synthesis full-unitary completion replay failed";
       return std::nullopt;
     }
@@ -3217,6 +3247,7 @@ Result cudaq::pauli::graph::synthesizeUnitary(unsigned width,
                                               const std::vector<Gate> &input,
                                               const Options &options,
                                               SearchBudget *budget) {
+  construction::HoldScope holdScope;
   if (auto error = invalidOptions(options); !error.empty())
     return detail::holdFailure(std::move(error),
                                SearchTermination::Unsupported);

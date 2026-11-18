@@ -1741,3 +1741,67 @@ being substituted with original-circuit counts.
 - **2026-11-04:** Documented production synthesis, ten-case outcomes, native-SWAP QFT proof, runtime findings, and safe synthesis-limit fallback.
 - **2026-11-05:** Integrated exact signed Clifford-frame refinement and recorded independently verified results for nine original and five additional cases.
 - **2026-11-05:** Added the synthesis architecture proposal, literature review, fifteen-case structural inventory, reference-free frame experiments and dependency-oracle checks.
+
+
+### HOLD construction assertions (2026-11-19)
+
+The HOLD entry point now maintains exact scalar phase during synthesis instead
+of reconstructing it with a final original-versus-emitted Clifford replay.
+Its phase-bearing stabilizer representation supports both incoming Clifford
+composition and removal of emitted prefixes. Clifford-window dictionaries also
+retain each representative's phase; source and representative phase conventions
+supply the correction directly, replacing the former eight-phase trial loop.
+Native gate motion uses signed primitive commutation rules. Rotation merging
+still checks local commutation barriers while transporting its signed axis;
+those conditions are part of the construction and are never disabled.
+T decoding constructs its diagonal-Clifford/scalar correction algebraically.
+Single-qubit normalization uses exact Clifford+T rewrite identities, and block
+results are embedded through the same injective wire map.
+
+Independent unitary replay is available as an assertion mode:
+
+```sh
+CUDAQ_PBC_HOLD_ASSERT=1 cudaq-opt input.qke \
+  --pass-pipeline='builtin.module(func.func(quake-to-pbc{semantics=hold},quake-synthesize-pbc{semantics=hold}))'
+```
+
+`CUDAQ_PBC_HOLD_ASSERT=0` (also the unset default) omits the independent HOLD
+assertions, including the optional single-qubit matrix comparison. It does not
+skip input validation, rewrite preconditions, exact phase updates, wire mapping,
+native-basis checks, or resource limits. An invalid environment value or failed
+enabled construction assertion is a fatal compiler error, including in release
+builds. The value is read once per outer `synthesizeUnitary` invocation and is
+scoped per thread through its child refinements. Other entry points retain their
+existing verification policy; explicitly calling `graph::equivalent` still
+performs a real check. Assertion work/time is included when enabled, so finite
+resource limits can produce different search coverage in the two modes.
+
+The assertion mode uses symbolic Pauli/Clifford replay and exact local checks;
+it does not introduce dense whole-circuit unitary decomposition. Independent
+dense-matrix tests remain part of the test suite, not production synthesis.
+
+Validation used a freshly rebuilt baseline from `pbc-opt` commit
+`9a231c12961e` and the same frozen original ten inputs and checkpoint profile
+in both assertion modes. All ten enabled runs completed without assertion
+failure, and neither mode exhausted the top-level budget. Every five-metric
+vector (gates, T, entanglers, depth, T depth) matched the baseline exactly.
+
+| Case | Baseline gates | Assertions on | Assertions off |
+|---|---:|---:|---:|
+| adder4 | 20 | 20 | 20 |
+| adder10 | 105 | 105 | 105 |
+| adder28 | 316 | 316 | 316 |
+| adder64 | 736 | 736 | 736 |
+| adder118 | 1366 | 1366 | 1366 |
+| adder433 | 5041 | 5041 | 5041 |
+| multiply13 | 91 | 91 | 91 |
+| rc_adder_6 | 147 | 147 | 147 |
+| csla_mux_3 | 152 | 152 | 152 |
+| qft_n002 | 8 | 8 | 8 |
+
+The native suite passed 404 tests, including primitive commutation rules,
+phase-sensitive dense unitary tests with assertions on/off, sparse wire support,
+and a failed-assertion death test. All 16 PBC lit tests passed in both modes.
+Artifacts, frozen compiler hashes, exact commands, input hashes and comparisons
+are in `build/pbc-hold-construction-2026-11-19/` (`manifest.json`,
+`comparison.json`, `comparison.csv`, `all-tests-final.json`, and per-case IR).

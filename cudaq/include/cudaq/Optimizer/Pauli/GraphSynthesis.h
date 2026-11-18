@@ -66,8 +66,12 @@ struct Diagnostics {
 /// Start with the defaults and compare emitted entanglers, depth, total gates,
 /// and runtime on the intended workload. Larger search limits or weights do not
 /// guarantee better circuits, particularly under a fixed shared work budget.
-/// These are native API defaults; pass wrappers may override them. No option
-/// disables correctness checking. Check Result before using its gate vector:
+/// These are native API defaults; pass wrappers may override them. HOLD uses
+/// exact construction rules; CUDAQ_PBC_HOLD_ASSERT=1 additionally enables
+/// independent unitary assertions throughout synthesizeUnitary and its child
+/// routes. Unset or 0 omits that replay; legality and scalar tracking remain
+/// active. Other entry points retain their verification policy.
+/// Check Result before using its gate vector:
 /// an exhausted graph search/replay can return an error with a partial
 /// candidate.
 struct Options {
@@ -307,6 +311,10 @@ Result synthesize(unsigned width, const std::vector<Gate> &, const Options &,
 /// information. Uses graph reconstruction and the enabled regional/joint-phase
 /// providers; measured-only transformations cannot certify a result of this
 /// entry point.
+/// CUDAQ_PBC_HOLD_ASSERT=1 enables independent construction assertions, even
+/// in release builds. Unset/0 disables that additional replay. Invalid values
+/// and failed enabled assertions are fatal errors. The setting is read once
+/// per outer invocation and scoped per thread, including native refinements.
 Result synthesizeUnitary(unsigned width, const std::vector<Gate> &,
                          const Options &, SearchBudget *budget = nullptr);
 

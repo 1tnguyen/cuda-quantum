@@ -5,6 +5,7 @@
  ******************************************************************************/
 
 #pragma once
+#include "HoldAssertions.h"
 
 #include "SynthesisNativeRefinement.h"
 #include "cudaq/Synthesis/Circuit/Circuit.h"
@@ -13,8 +14,9 @@
 
 namespace cudaq::pauli::graph::detail {
 
-/// Normalize commuting one-wire chains of an already generated word. Replay
-/// each normal form with exact ring matrices, including global phase. Ranking
+/// Normalize commuting one-wire chains of an already generated word using
+/// phase-exact Clifford+T identities. Optional assertion replay uses exact
+/// ring matrices, including global phase. Ranking
 /// must wait until native cleanup: the normal form can temporarily use more
 /// Clifford gates even when its completed realization is shorter.
 inline Result normalizeHoldOneQubit(unsigned width,
@@ -54,10 +56,12 @@ inline Result normalizeHoldOneQubit(unsigned width,
     if (found == chains.end() || found->second.empty())
       return true;
     auto &chain = found->second;
-    // Bound exact-integer growth and prepay conversion and matrix replay.
+    // Prepay conversion; exact matrix arithmetic is assertion-only.
     const uint64_t size = chain.size() + 1;
-    if (!budget.take(64 * size * size))
-      return fail("hold one-wire proof budget", SearchTermination::Exhausted);
+    if (!budget.take(construction::checksEnabled() ? 64 * size * size
+                                                   : 64 * size))
+      return fail("hold one-wire construction/assertion budget",
+                  SearchTermination::Exhausted);
     std::vector<Single> time;
     int scalarEighths = 0;
     for (const auto &gate : chain) {
@@ -109,7 +113,10 @@ inline Result normalizeHoldOneQubit(unsigned width,
     for (auto it = time.rbegin(); it != time.rend(); ++it)
       circuit.push_back(*it);
     const auto normalized = circuit.normalized();
-    if (Unitary::from_gates(circuit) != Unitary::from_gates(normalized))
+    if (!construction::check([&] {
+          return Unitary::from_gates(circuit) ==
+                 Unitary::from_gates(normalized);
+        }))
       return fail("hold one-wire exact matrix replay failed",
                   SearchTermination::InvalidProof);
     std::vector<Gate> word;

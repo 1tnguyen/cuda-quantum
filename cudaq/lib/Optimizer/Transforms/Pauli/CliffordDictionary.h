@@ -9,9 +9,10 @@
 //===----------------------------------------------------------------------===//
 /// Private one-/two-wire signed Clifford dictionary mechanics shared by the
 /// unweighted GateCount windows and native-profile synthesis windows. Scalar
-/// phase is intentionally absent from keys and must be independently replayed.
+/// phase is retained in each representative, separately from its tableau key.
 //===----------------------------------------------------------------------===//
 #pragma once
+#include "PhaseConstruction.h"
 #include "TCountInternal.h"
 #include <unordered_map>
 #include <vector>
@@ -50,6 +51,7 @@ struct Entry {
   Gate gate;
   /// Number of named gates, excluding scalar correction.
   unsigned length;
+  construction::CliffordPhase phase;
 };
 using Database = std::unordered_map<Key, Entry>;
 /// Enumerate the finite local Clifford group in breadth-first word order.
@@ -71,15 +73,20 @@ inline std::vector<Gate> orderedGenerators(unsigned n) {
 inline Database buildDatabase(unsigned n) {
   auto generators = orderedGenerators(n);
   Key root = identity(n);
-  Database db{{root, {root, {}, 0}}};
+  Database db{{root, {root, {}, 0, construction::CliffordPhase(n)}}};
   std::vector<Key> queue{root};
   for (size_t i = 0; i < queue.size(); ++i) {
     auto state = queue[i];
     unsigned length = db.at(state).length;
     for (auto g : generators) {
       Key next = advance(state, g, n);
-      if (db.emplace(next, Entry{state, g, length + 1}).second)
+      if (auto [it, inserted] =
+              db.emplace(next, Entry{state, g, length + 1, {}});
+          inserted) {
+        it->second.phase = db.at(state).phase;
+        it->second.phase.append(g);
         queue.push_back(next);
+      }
     }
   }
   return db;

@@ -7,6 +7,8 @@
  ******************************************************************************/
 
 #pragma once
+#include "HoldAssertions.h"
+#include "PhaseConstruction.h"
 
 #include "CliffordDictionary.h"
 #include "SynthesisCost.h"
@@ -135,6 +137,7 @@ struct Entry {
   Key previous = 0;
   unsigned action = 0;
   bool settled = false;
+  construction::CliffordPhase phase;
 };
 struct Table {
   std::vector<Action> actions;
@@ -142,10 +145,10 @@ struct Table {
 };
 } // namespace clifford_window_detail
 
-/// Owns the exact synthesized source. The proof composes exact commutation
-/// witnesses, signed Clifford-tableau search and independent scalar-sensitive
-/// replay for each replacement. Untouched gates and physical outputs keep their
-/// order.
+/// Owns the exact synthesized source. Exact commutation rules and a
+/// phase-bearing Clifford dictionary construct each replacement. Independent
+/// scalar-sensitive replay is optional in HOLD. Untouched gates and physical
+/// outputs keep their order.
 class CertifiedCliffordWindow {
 public:
   const std::vector<Gate> &gates() const { return word; }
@@ -352,7 +355,8 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
     // All edges are actual native gates. Dijkstra minimizes weighted cost,
     // then gate count and entanglers. Scalar correction is free in this model.
     const auto root = lw::identity(n);
-    built->entries.emplace(root, lw::Entry{{}, root, 0, false});
+    built->entries.emplace(
+        root, lw::Entry{{}, root, 0, false, construction::CliffordPhase(n)});
     std::set<std::pair<lw::Rank, lw::Key>> queue{{{}, root}};
     while (!queue.empty()) {
       if (!charge(32))
@@ -382,7 +386,7 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
             result.error = "Clifford dictionary exceeded exact group size";
             return nullptr;
           }
-          built->entries.emplace(next, lw::Entry{cost, key, ai, false});
+          built->entries.emplace(next, lw::Entry{cost, key, ai, false, {}});
         } else {
           if (found->second.settled) {
             result.status = CliffordWindowStatus::InvalidProof;
@@ -390,8 +394,11 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
             return nullptr;
           }
           queue.erase({found->second.rank, next});
-          found->second = {cost, key, ai, false};
+          found->second = {cost, key, ai, false, {}};
         }
+        auto &to = built->entries.at(next);
+        to.phase = from.phase;
+        to.phase.append(edge.gate);
         queue.emplace(cost, next);
       }
     }
@@ -417,15 +424,8 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
     // with an arbitrary/opaque rotation, even though its support is unchanged.
     if (b.kind == Kind::Rotate)
       return tcount::detail::conjugate(b.pauli, a) == b.pauli;
-    if (!charge(256))
-      return false;
-    std::vector<unsigned> wires;
-    auto both = left | right;
-    for (unsigned q : both.set_bits())
-      wires.push_back(q);
-    auto x = lw::compact(a, wires), y = lw::compact(b, wires);
-    ++result.proofChecks;
-    return graph::equivalent(wires.size(), {x, y}, {y, x});
+    // Exact primitive rules retain scalar signs without comparing gate words.
+    return construction::commuteCliffords(a, b);
   };
 
   const unsigned lookahead = std::min(limits.maxLookahead, 256u);
@@ -508,8 +508,11 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
       if (!charge(local.size() + 1))
         return finish();
       auto target = lw::identity(wires.size());
-      for (const auto &gate : local)
+      construction::CliffordPhase inputPhase(wires.size());
+      for (const auto &gate : local) {
         target = lw::advance(target, gate, wires.size());
+        inputPhase.append(gate);
+      }
       auto found = dictionary->entries.find(target);
       if (found == dictionary->entries.end()) {
         result.status = CliffordWindowStatus::InvalidProof;
@@ -529,25 +532,21 @@ optimizeCliffordWindows(unsigned width, const std::vector<Gate> &synthesized,
       std::reverse(replacement.begin(), replacement.end());
       if (!(lw::rank(replacement, options) < lw::rank(local, options)))
         continue;
-      bool equivalent = false;
-      // The signed tableau fixes the unitary up to an eighth root of unity.
-      // Recover it by independent exact replay; no arbitrary-input phase loss.
-      for (int scalar = 0; scalar < 8; ++scalar) {
-        const uint64_t size = local.size() + replacement.size() + 1;
-        if (!charge(llvm::SaturatingAdd<uint64_t>(
-                512, llvm::SaturatingMultiply<uint64_t>(size, 3 * size + 16))))
-          return finish();
-        auto corrected = replacement;
-        if (scalar)
-          corrected.push_back(Gate::phase({scalar, 4}));
+      // Same tableau key: the maintained representative phases determine the
+      // correction directly. No search over phase/equivalence trials.
+      int scalar = inputPhase.relativeTo(found->second.phase);
+      if (scalar)
+        replacement.push_back(Gate::phase({scalar, 4}));
+      const uint64_t size = local.size() + replacement.size() + 1;
+      if (construction::checksEnabled() &&
+          !charge(llvm::SaturatingAdd<uint64_t>(
+              512, llvm::SaturatingMultiply<uint64_t>(size, 3 * size + 16))))
+        return finish();
+      if (construction::checksEnabled())
         ++result.proofChecks;
-        if (graph::equivalent(wires.size(), local, corrected)) {
-          replacement = std::move(corrected);
-          equivalent = true;
-          break;
-        }
-      }
-      if (!equivalent) {
+      bool equivalent = construction::check(
+          [&] { return graph::equivalent(wires.size(), local, replacement); });
+      if (!construction::check([&] { return equivalent; })) {
         result.status = CliffordWindowStatus::InvalidProof;
         result.error = "Clifford native-unitary scalar proof failed";
         return finish();

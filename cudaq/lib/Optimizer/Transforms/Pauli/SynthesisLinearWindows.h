@@ -7,6 +7,8 @@
  ******************************************************************************/
 
 #pragma once
+#include "HoldAssertions.h"
+#include "PhaseConstruction.h"
 
 #include "SynthesisCost.h"
 #include <array>
@@ -336,16 +338,10 @@ optimizeLinearWindows(unsigned width, const std::vector<Gate> &synthesized,
       return true;
     if (a.kind == Kind::CX && b.kind == Kind::CX)
       return a.a != b.b && a.b != b.a;
-    // Do not infer commutation merely from a phase-blind tableau. Replay the
-    // two actual gates on <=4 compact wires, retaining every scalar sign.
-    if (!charge(256))
-      return false;
-    std::vector<unsigned> wires;
-    auto both = left | right;
-    for (unsigned q : both.set_bits())
-      wires.push_back(q);
-    auto x = lw::compact(a, wires), y = lw::compact(b, wires);
-    return graph::equivalent(wires.size(), {x, y}, {y, x});
+    // Exact local rules retain scalar signs without comparing gate words.
+    if (b.kind == Kind::Rotate)
+      return tcount::detail::conjugate(b.pauli, a) == b.pauli;
+    return construction::commuteCliffords(a, b);
   };
 
   const unsigned lookahead = std::min(limits.maxLookahead, 256u);
@@ -450,7 +446,8 @@ optimizeLinearWindows(unsigned width, const std::vector<Gate> &synthesized,
       if (!(lw::rank(replacement, options) < lw::rank(local, options)))
         continue;
       uint64_t size = local.size() + replacement.size();
-      if (!charge(llvm::SaturatingAdd<uint64_t>(
+      if (construction::checksEnabled() &&
+          !charge(llvm::SaturatingAdd<uint64_t>(
               512, llvm::SaturatingMultiply<uint64_t>(size, 3 * size + 16))))
         return finish();
       // Independent truth-table replay does not use the row-update search.
@@ -467,10 +464,12 @@ optimizeLinearWindows(unsigned width, const std::vector<Gate> &synthesized,
         return bits;
       };
       bool equivalent = true;
-      for (unsigned bits = 0; bits < (1u << wires.size()); ++bits)
+      for (unsigned bits = 0;
+           construction::checksEnabled() && bits < (1u << wires.size()); ++bits)
         equivalent &= evaluate(bits, local) == evaluate(bits, logical);
-      equivalent &= graph::equivalent(wires.size(), local, replacement);
-      if (!equivalent) {
+      equivalent &= construction::check(
+          [&] { return graph::equivalent(wires.size(), local, replacement); });
+      if (!construction::check([&] { return equivalent; })) {
         result.status = LinearWindowStatus::InvalidProof;
         result.error = "linear-window map or native-unitary proof failed";
         return finish();

@@ -15,6 +15,7 @@
 /// then optionally reuses the original Clifford network to place new rotations.
 //===----------------------------------------------------------------------===//
 
+#include "HoldAssertions.h"
 #include "TCountInternal.h"
 #include <algorithm>
 #include <bit>
@@ -158,8 +159,13 @@ std::vector<Gate> optimizeBlock(const Block &block,
                 std::accumulate(block.coefficients.begin(),
                                 block.coefficients.end(), 0)) %
                16;
-  if (!verifyPhases(block.coefficients, output, scalar, budget))
-    return original;
+  if (construction::checksEnabled()) {
+    bool valid = verifyPhases(block.coefficients, output, scalar, budget);
+    if (budget.stopped())
+      return original;
+    if (!construction::check([&] { return valid; }))
+      return original;
+  }
   ++stats.verifiedBlocks;
   std::vector<Gate> candidate;
   // First reconstruction: emit the decoded commuting rotations at block entry

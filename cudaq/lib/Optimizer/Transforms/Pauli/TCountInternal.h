@@ -89,11 +89,12 @@ public:
 
 std::vector<Gate> cancelCliffords(const std::vector<Gate> &, Budget &);
 
-/// Independent local certificate: transport the earlier rotation through
-/// the CURRENT intervening circuit. No hash-table or cached frame is trusted.
-/// Returns its signed coefficient at the later rotation, or no proof.
-std::optional<int> verifyMerge(const std::vector<Gate> &, size_t first,
-                               size_t last, Budget &, Statistics &);
+/// Construct a legal move through the current intervening gates, updating the
+/// signed axis at each Clifford and stopping at anticommuting rotations.
+/// This is the rewrite's local precondition, not a unitary equivalence replay.
+/// Returns the transported coefficient or no legal move.
+std::optional<int> transportMerge(const std::vector<Gate> &, size_t first,
+                                  size_t last, Budget &, Statistics &);
 
 std::vector<Gate> merge(const std::vector<Gate> &, unsigned width,
                         const Options &, Budget &, Statistics &);

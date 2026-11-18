@@ -301,11 +301,11 @@ TEST(TCount, RejectCorruptedRewriteWitnesses) {
   std::vector<Gate> gates{Gate::rotation({0, 1}, {1, 4}),
                           {Kind::H, 0},
                           Gate::rotation({1, 0}, {1, 4})};
-  ASSERT_EQ(d::verifyMerge(gates, 0, 2, budget, stats), 1);
+  ASSERT_EQ(d::transportMerge(gates, 0, 2, budget, stats), 1);
   gates[2].pauli = {0, 1};
-  EXPECT_FALSE(d::verifyMerge(gates, 0, 2, budget, stats));
+  EXPECT_FALSE(d::transportMerge(gates, 0, 2, budget, stats));
   gates[2].pauli = {1, 0, true};
-  ASSERT_EQ(d::verifyMerge(gates, 0, 2, budget, stats), -1);
+  ASSERT_EQ(d::transportMerge(gates, 0, 2, budget, stats), -1);
   EXPECT_TRUE(d::verifyPhases({0, 1, 0, 1}, {0, 1, 0, 1}, 0, budget));
   EXPECT_FALSE(d::verifyPhases({0, 1, 0, 1}, {0, 1, 0, 1}, 1, budget));
   EXPECT_FALSE(d::verifyPhases({0, 1, 0, 1}, {0, 1, 0, 0}, 0, budget));

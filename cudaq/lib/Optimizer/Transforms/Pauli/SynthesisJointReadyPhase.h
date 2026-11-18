@@ -9,6 +9,7 @@
  ******************************************************************************/
 
 #pragma once
+#include "HoldAssertions.h"
 
 #include "SynthesisBootstrap.h"
 #include "SynthesisOpen.h"
@@ -385,7 +386,7 @@ solveJointReadyPhaseRegion(unsigned width, const std::vector<Gate> &source,
                 jp::mul(8, jp::mul(normalized.size() + proposal.body.size() +
                                        proposal.exitCliffords.size() + 1,
                                    uint64_t(width) * width + 1)));
-    if (!take(proofWork))
+    if (construction::checksEnabled() && !take(proofWork))
       return false;
     for (const auto &gate : proposal.body)
       if (!open_detail::validNative(width, gate, options)) {
@@ -395,7 +396,8 @@ solveJointReadyPhaseRegion(unsigned width, const std::vector<Gate> &source,
     auto target = normalized;
     target.insert(target.end(), proposal.exitCliffords.begin(),
                   proposal.exitCliffords.end());
-    if (!graph::equivalent(width, target, proposal.body)) {
+    if (!construction::check(
+            [&] { return graph::equivalent(width, target, proposal.body); })) {
       fail(OpenRegionStatus::InvalidProof,
            "joint-phase full-unitary replay failed");
       return false;
