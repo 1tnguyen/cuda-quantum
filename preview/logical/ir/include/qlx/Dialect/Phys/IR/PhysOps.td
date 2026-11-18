@@ -764,6 +764,34 @@ def Phys_ConditionOp : Phys_Op<"condition", []> {
   let hasVerifier = 1;
 }
 
+def Phys_SubmitSyndromeOp : Phys_Op<"submit_syndrome", []> {
+  let summary = "stream one round of physical records to a decoder";
+  let arguments = (ins
+    Variadic<AnyType>:$records,
+    I64Attr:$round,
+    FlatSymbolRefAttr:$decoder,
+    OptionalAttr<StrAttr>:$decoder_erasure_semantics,
+    OptionalAttr<StrAttr>:$event_id
+  );
+  let assemblyFormat = "$records attr-dict `:` type($records)";
+  let hasVerifier = 1;
+}
+
+def Phys_DecodeBitOp : Phys_Op<"decode_bit", []> {
+  let summary = "request one corrected bit from a decoder over physical records";
+  let arguments = (ins
+    Variadic<AnyType>:$records,
+    FlatSymbolRefAttr:$decoder,
+    OptionalAttr<StrAttr>:$decoder_erasure_semantics,
+    OptionalAttr<DenseI64ArrayAttr>:$parity_indices,
+    DefaultValuedAttr<BoolAttr, "false">:$invert,
+    OptionalAttr<StrAttr>:$event_id
+  );
+  let results = (outs I1:$result);
+  let assemblyFormat = "$records attr-dict `:` type($records) `->` type($result)";
+  let hasVerifier = 1;
+}
+
 def Phys_XorOp : Phys_Op<"xor", []> {
   let summary = "causally tracked parity of two physical runtime predicates";
   let arguments = (ins I1:$lhs, I1:$rhs, OptionalAttr<StrAttr>:$event_id);

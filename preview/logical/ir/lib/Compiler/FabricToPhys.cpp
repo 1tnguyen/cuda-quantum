@@ -1098,6 +1098,7 @@ private:
               qlx::fabric::TransformBeginOp, qlx::fabric::TransformEndOp,
               qlx::fabric::MzOp, qlx::fabric::ParityOp, qlx::fabric::AllZeroOp,
               qlx::fabric::XorOp, qlx::fabric::AllFalseOp,
+              qlx::fabric::SubmitSyndromeOp, qlx::fabric::DecodeBitOp,
               qlx::event::SelectionOp, qlx::fabric::ProduceResourceOp,
               qlx::fabric::ResourceRequestOp, qlx::event::AwaitOp,
               qlx::fabric::UnpackResourceOp, qlx::fabric::PackResourceOp,
@@ -5141,6 +5142,49 @@ private:
         Operation *physical =
             createGeneric(builder, operation.getLoc(), "arith.constant", {},
                           TypeRange{*resultType}, attrs);
+        projected[operation.getResult(0)] =
+            PhysicalGroup{physical->getResult(0)};
+        continue;
+      }
+      if (auto submit = dyn_cast<qlx::fabric::SubmitSyndromeOp>(operation)) {
+        PhysicalGroup records;
+        for (Value operand : operation.getOperands()) {
+          auto found = projected.find(operand);
+          if (found == projected.end() || found->second.empty())
+            return submit.emitOpError(
+                "has no physical record projection for a decoder input");
+          llvm::append_range(records, found->second.values());
+        }
+        SmallVector<NamedAttribute> attrs;
+        for (NamedAttribute attribute : operation.getAttrs()) {
+          StringRef name = attribute.getName().strref();
+          if (name != "operandSegmentSizes" && name != "event_id")
+            attrs.push_back(attribute);
+        }
+        attrs.push_back(
+            builder.getNamedAttr("event_id", nextEvent("submit_syndrome")));
+        createGeneric(builder, submit.getLoc(), "phys.submit_syndrome",
+                      records.values(), {}, attrs);
+        continue;
+      }
+      if (auto decode = dyn_cast<qlx::fabric::DecodeBitOp>(operation)) {
+        PhysicalGroup records;
+        for (Value operand : operation.getOperands()) {
+          auto found = projected.find(operand);
+          if (found == projected.end() || found->second.empty())
+            return decode.emitOpError(
+                "has no physical record projection for a decoder input");
+          llvm::append_range(records, found->second.values());
+        }
+        SmallVector<NamedAttribute> attrs;
+        for (NamedAttribute attribute : operation.getAttrs())
+          if (attribute.getName().strref() != "event_id")
+            attrs.push_back(attribute);
+        attrs.push_back(
+            builder.getNamedAttr("event_id", nextEvent("decode_bit")));
+        Operation *physical =
+            createGeneric(builder, decode.getLoc(), "phys.decode_bit",
+                          records.values(), builder.getI1Type(), attrs);
         projected[operation.getResult(0)] =
             PhysicalGroup{physical->getResult(0)};
         continue;

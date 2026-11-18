@@ -10,6 +10,8 @@
 from . import _impl
 
 __all__ = [
+    "submit_syndrome",
+    "decode_bit",
     "allocate",
     "all_false",
     "all_zero",

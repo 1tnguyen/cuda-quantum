@@ -1721,6 +1721,46 @@ def Fabric_XorOp : Fabric_Op<"xor", []> {
   let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($result)";
 }
 
+def Fabric_SubmitSyndromeOp : Fabric_Op<"submit_syndrome", []> {
+  let summary = "stream measurement bits to a decoder";
+  let description = [{
+    Submits one or more measurement/syndrome bundles in operand order as one
+    syndrome round. Records within each bundle retain their original order.
+  }];
+  let arguments = (ins
+    Variadic<AnyTypeOf<[I1, Fabric_SyndromeType, AnyRankedTensor]>>:$bits,
+    I64Attr:$round,
+    FlatSymbolRefAttr:$decoder
+  );
+  let assemblyFormat = "$bits attr-dict `:` type($bits)";
+  let hasVerifier = 1;
+}
+
+def Fabric_DecodeBitOp : Fabric_Op<"decode_bit", []> {
+  let summary = "Decode terminal data measurements into a logical bit";
+  let description = [{
+    RUNTIME OP. Invokes the named decoder with the given measurement
+    bits as the terminal round, and returns the decoded logical bit as
+    an `i1`. The operand is a terminal data-measurement tensor.
+    The decoder combines accumulated
+    state from prior `submit_syndrome` calls with the new data bits. Use this op
+    whenever the corrected logical bit is needed for classical control or as
+    the program result.
+  }];
+  let arguments = (ins
+    AnyRankedTensor:$data_bits,
+    FlatSymbolRefAttr:$decoder,
+    OptionalAttr<StrAttr>:$decoder_erasure_semantics,
+    OptionalAttr<DenseI64ArrayAttr>:$parity_indices,
+    DefaultValuedAttr<BoolAttr, "false">:$invert
+  );
+  let results = (outs I1:$logical_bit);
+  let assemblyFormat = [{
+    $data_bits attr-dict `:` type($data_bits) `->` type($logical_bit)
+  }];
+  let hasVerifier = 1;
+}
+
 def Fabric_AllZeroOp : Fabric_Op<"all_zero", []> {
   let summary = "true when every bit in a measurement bundle is zero";
   let description = [{

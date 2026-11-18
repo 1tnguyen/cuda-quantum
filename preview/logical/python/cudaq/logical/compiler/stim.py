@@ -44,6 +44,26 @@ def emit_stim(
 
     Returns annotated circuit text directly, without a simulator dependency.
     """
+    return _lower_stim_chain(profiles,
+                             noise=noise,
+                             depolarizations=depolarizations)[0]
+
+
+def detector_record_indices(profiles) -> tuple[tuple[int, ...], ...]:
+    """Return each detector's absolute measurement indices for a closed chain.
+
+    Uses exactly the contract substitution and measurement ordering of
+    ``emit_stim`` without parsing Stim text or requiring the Stim package.
+    Each row is an XOR support; duplicates cancel. Affine detector offsets
+    are rejected because measurement-index rows alone cannot express them.
+    """
+    _, detectors = _lower_stim_chain(profiles)
+    if any(constant for _, constant in detectors):
+        raise ValueError("detector record indices require zero-offset parities")
+    return tuple(tuple(sorted(support)) for support, _ in detectors)
+
+
+def _lower_stim_chain(profiles, *, noise=None, depolarizations=None):
     from cudaq.logical.gadgets import GadgetContract
 
     profiles = tuple(profiles)
@@ -132,11 +152,18 @@ def emit_stim(
             else:
                 binary = op.kind in ("CX", "CZ", "SWAP")
                 width = 2 if binary else 1
+                if after[index] and len(set(op.carriers)) != len(op.carriers):
+                    raise ValueError(
+                        "gate-noise export requires disjoint carrier groups")
                 for start in range(0, len(targets), width):
                     group = targets[start:start + width]
                     append(op.kind, group)
-                    if after[index]:
-                        append_noise(after[index][start // width])
+                    # One gate can have multiple noise channels, including
+                    # independent channels on its individual operands.
+                    local = set(op.carriers[start:start + width])
+                    for channel in after[index]:
+                        if set(channel.carriers) <= local:
+                            append_noise(channel)
 
         def lower(parity):
             support = set()
@@ -186,7 +213,7 @@ def emit_stim(
         append("DETECTOR", targets(row))
     for index, row in observables:
         append("OBSERVABLE_INCLUDE", targets(row), index)
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n", tuple(detectors)
 
 
-__all__ = ["emit_stim"]
+__all__ = ["emit_stim", "detector_record_indices"]

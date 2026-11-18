@@ -65,6 +65,7 @@ from ..std import (
     LogicalInstrumentRef,
     SyndromeExtractionAction,
 )
+from cudaq.logical.qec.decoder_attrs import decoder_attributes
 
 
 def _normalize_pairs(pairs, control_width: int, target_width: int):
@@ -146,6 +147,7 @@ class GadgetBuilder:
         self._produced_record_bases: set[str] = set()
         self._produced_records: set[str] = set()
         self._produced_record_order: list[str] = []
+        self._decoder_rounds: dict[str, int] = {}
         self._arguments = None
         self._finished = False
         self._bb_pending_continuation = None
@@ -2855,6 +2857,66 @@ class GadgetBuilder:
                     "period_closure"] = patch_value.encoding.profile.period_closure
             self._subsystem_steps.append(step)
         return self._new_patch(operation.result, patch_value.encoding, epoch=to)
+
+    def decode_bit(self, bits, *, decoder, parity_indices, invert=False):
+        if not isinstance(bits, MeasurementBits) or bits.owner is not self:
+            raise TypeError(
+                "cudaq.logical.decode_bit expects measurement bits from this gadget"
+            )
+        self._before_operation("fabric.decode_bit")
+        attributes = decoder_attributes(decoder, self.context)
+        indices = tuple(parity_indices)
+        if any(
+                isinstance(index, bool) or not isinstance(index, int) or
+                index < 0 for index in indices):
+            raise TypeError("parity_indices must contain nonnegative integers")
+        if not isinstance(invert, bool):
+            raise TypeError("decode_bit invert must be Boolean")
+        attributes["parity_indices"] = mlir_ir.DenseI64ArrayAttr.get(
+            indices, self.context)
+        attributes["invert"] = mlir_ir.BoolAttr.get(invert,
+                                                    context=self.context)
+        operation = self._emit(
+            "fabric.decode_bit",
+            operands=[bits.mlir_value],
+            results=[self.i1_type],
+            attributes=attributes,
+        )
+        producer = self._measurement_parity(bits, indices=indices)
+        if isinstance(producer, ProfileParity) and invert:
+            producer = producer ^ True
+        return LogicalBool(operation.result, owner=self, producer=producer)
+
+    def submit_syndrome(self, bits, *, decoder, round=None):
+        bundles = bits if isinstance(bits, (tuple, list)) else (bits,)
+        if not bundles or any(
+                not isinstance(value, (MeasurementBits, SyndromeValue,
+                                       LogicalBool)) or value.owner is not self
+                for value in bundles):
+            raise TypeError(
+                "cudaq.logical.submit_syndrome expects syndrome or measurement "
+                "bits from this gadget, or a nonempty list or tuple of them")
+        self._before_operation("fabric.submit_syndrome")
+        attributes = decoder_attributes(decoder, self.context)
+        symbol = str(attributes["decoder"]).lstrip("@")
+        if round is None:
+            round = self._decoder_rounds.get(symbol, 0)
+        if isinstance(round, bool) or not isinstance(round, int) or round < 0:
+            raise ValueError("submit_syndrome round must be nonnegative")
+        self._decoder_rounds[symbol] = max(self._decoder_rounds.get(symbol, 0),
+                                           round + 1)
+        attributes.update({
+            "round":
+                mlir_ir.IntegerAttr.get(
+                    mlir_ir.IntegerType.get_signless(64, context=self.context),
+                    round,
+                ),
+        })
+        self._emit(
+            "fabric.submit_syndrome",
+            operands=[value.mlir_value for value in bundles],
+            attributes=attributes,
+        )
 
     def xor(self, lhs, rhs):
         if any(not isinstance(value, LogicalBool) or value.owner is not self

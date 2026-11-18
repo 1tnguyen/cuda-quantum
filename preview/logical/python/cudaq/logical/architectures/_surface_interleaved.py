@@ -36,7 +36,7 @@ class SurfaceInterleavedNZDefinitions:
     coordinates: tuple[tuple[float, float], ...]
 
 
-def build_definitions(distance):
+def build_definitions(distance, *, decoder=None):
     from cudaq.logical.compiler import compile, project_clifford
 
     code = codes.Surface[distance]
@@ -81,9 +81,15 @@ def build_definitions(distance):
         block = ops.h(block.sx)
         # Resets belong to the next gadget that uses each ancilla. Only data
         # errors cross the encoded interface between extraction rounds.
+        measurements = []
         for _, partition, i in ancillas:
-            block, _ = ops.mz(getattr(block, partition)[(i,)],
-                              record=f"{partition}{i}")
+            block, bits = ops.mz(getattr(block, partition)[(i,)],
+                                 record=f"{partition}{i}")
+            measurements.append(bits)
+        if decoder is not None:
+            # One submission per extraction, preserving the measurement order
+            # used by the detector contract below.
+            ops.submit_syndrome(measurements, decoder=decoder)
         return block
 
     extraction = define(extract, "extract", std.idle, types.patch[encoding])
@@ -110,6 +116,13 @@ def build_definitions(distance):
         # subsequent ancilla interactions, those faults have zero response.
         block = ops.reset(block.sx)
         block = ops.reset(block.sz)
+        if decoder is not None:
+            block, bits = ops.mz(block.data, record="terminal_data")
+            result = ops.decode_bit(bits,
+                                    decoder=decoder,
+                                    parity_indices=tuple(code.lz[0]))
+            ops.discard(block)
+            return result
         logical = []
         for i in range(code.n):
             block, outcome = ops.mz(block.data[(i,)], record=f"data{i}")
@@ -156,10 +169,15 @@ def build_definitions(distance):
                 index = i if partition == "sx" else len(xs) + i
                 graph.detector(incoming[index] ^ records[partition, i])
         if kind == "readout":
+            terminal = {
+                row.carriers[0]: gadget.record(row.record)
+                for row in projection.interface.measurements
+                if row.symbol == gadget.name
+            }
             for i in z_boundary_order:
                 parity = gadgets.ProfileParity()
                 for q in code.hz[i]:
-                    parity ^= gadget.record(f"data{q}.data0")
+                    parity ^= terminal[port.data_carriers[q]]
                 graph.detector(parity ^ records["sz", i])
         else:
             graph.bind(

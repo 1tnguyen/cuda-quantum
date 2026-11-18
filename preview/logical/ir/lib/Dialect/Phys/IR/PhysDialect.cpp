@@ -5998,6 +5998,32 @@ LogicalResult ConditionOp::verify() {
   return success();
 }
 
+LogicalResult SubmitSyndromeOp::verify() {
+  if (getRecords().empty())
+    return emitOpError("requires at least one physical record or i1 input");
+  for (Value value : getRecords())
+    if (!isa<RecordType>(value.getType()) && !value.getType().isInteger(1))
+      return emitOpError("inputs must be !phys.record or i1 values");
+  if (getRoundAttr().getInt() < 0)
+    return emitOpError("round must be nonnegative");
+  return success();
+}
+
+LogicalResult DecodeBitOp::verify() {
+  if (getRecords().empty())
+    return emitOpError("requires at least one physical record or i1 input");
+  for (Value value : getRecords())
+    if (!isa<RecordType>(value.getType()) && !value.getType().isInteger(1))
+      return emitOpError("inputs must be !phys.record or i1 values");
+  if (getParityIndicesAttr()) {
+    for (int64_t index : getParityIndicesAttr().asArrayRef()) {
+      if (index < 0 || index >= static_cast<int64_t>(getRecords().size()))
+        return emitOpError("parity index is outside the physical record list");
+    }
+  }
+  return success();
+}
+
 enum class VerifiedPatchMacroKind { Action, Prepare, Measure };
 
 struct VerifiedPatchMacro {

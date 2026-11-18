@@ -1520,9 +1520,9 @@ def definitions(distance: int) -> SurfaceDefinitions:
     return _family[distance]
 
 
-@lru_cache(maxsize=None)
-def interleaved_nz_definitions(
-        distance: int) -> SurfaceInterleavedNZDefinitions:
+def interleaved_nz_definitions(distance: int,
+                               *,
+                               decoder=None) -> SurfaceInterleavedNZDefinitions:
     """Return preparation, SEC and SEC-plus-Z-readout with the N/Z schedule.
 
     All three include a round of interleaved N/Z extraction. Their contracts
@@ -1532,10 +1532,26 @@ def interleaved_nz_definitions(
     closes the Z-check detectors and returns the logical-Z parity. Its
     terminal ancilla resets preserve the standard physical schedule's reset
     fault sites, including faults with zero response.
+
+    With a DecoderSpec, each check measurement is explicitly submitted in
+    circuit order and terminal data is consumed by ``ops.decode_bit``. The
+    attached contracts still describe the pre-correction observable used to
+    configure the decoder. Without a decoder the readout returns raw parity.
     """
+    if decoder is None:
+        return _interleaved_nz_definitions(distance)
+    return _build_interleaved_nz_definitions(distance, decoder=decoder)
+
+
+@lru_cache(maxsize=None)
+def _interleaved_nz_definitions(distance):
+    return _build_interleaved_nz_definitions(distance)
+
+
+def _build_interleaved_nz_definitions(distance, *, decoder=None):
     from ._surface_interleaved import build_definitions
 
-    result, contracts, sites = build_definitions(distance)
+    result, contracts, sites = build_definitions(distance, decoder=decoder)
     for contract in contracts:
         _register_contract(contract.gadget, ("contract", contract))
     for gadget, projection, before, carriers in sites:

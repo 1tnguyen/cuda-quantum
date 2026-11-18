@@ -3273,6 +3273,22 @@ resolveTypedRecordExpression(Value value) {
       return result;
     }
 
+    if (auto decode = current.getDefiningOp<DecodeBitOp>()) {
+      RecordAffineExpression result;
+      auto indices = decode.getParityIndicesAttr();
+      if (!indices)
+        return failure();
+      auto bundle = resolveTypedRecordBundle(decode.getDataBits());
+      if (failed(bundle))
+        return failure();
+      for (int64_t index : indices.asArrayRef()) {
+        if (index < 0 || index >= static_cast<int64_t>(bundle->size()))
+          return failure();
+        xorRecordExpression(result, (*bundle)[index]);
+      }
+      result.constant ^= decode.getInvert();
+      return result;
+    }
     return failure();
   };
   return resolve(value);
@@ -6454,6 +6470,33 @@ LogicalResult PackResourceOp::verify() {
           "each payload_encodings entry must match its consumed patch type");
   }
   return verifyRegisteredResourcePack(*this);
+}
+
+LogicalResult DecodeBitOp::verify() {
+  auto tensor = cast<RankedTensorType>(getDataBits().getType());
+  if (tensor.getRank() != 1 || !tensor.getElementType().isInteger(1))
+    return emitOpError("requires a tensor<Nxi1> measurement bundle");
+  if (!getParityIndicesAttr())
+    return success();
+  int64_t width = tensor.isDynamicDim(0) ? -1 : tensor.getDimSize(0);
+  for (int64_t index : getParityIndicesAttr().asArrayRef()) {
+    if (index < 0)
+      return emitOpError("parity_indices must be nonnegative");
+    if (width >= 0 && index >= width)
+      return emitOpError("parity index exceeds the measurement width");
+  }
+  return success();
+}
+
+LogicalResult SubmitSyndromeOp::verify() {
+  if (getBits().empty())
+    return emitOpError("requires one or more measurement or syndrome bundles");
+  for (Value bits : getBits()) {
+    if (auto tensor = dyn_cast<RankedTensorType>(bits.getType()))
+      if (tensor.getRank() != 1 || !tensor.getElementType().isInteger(1))
+        return emitOpError("requires tensor<Nxi1> measurement bundles");
+  }
+  return success();
 }
 
 LogicalResult AllZeroOp::verify() {

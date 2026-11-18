@@ -53,6 +53,19 @@ def PhysToQuake : Pass<"phys-to-quake", "mlir::ModuleOp"> {
         in the module. The Phys graph verifier resolves actions the same way.
       - `phys.condition`, `phys.xor`, and `phys.all_false` become `i1` logic.
         A measurement stays a `!cc.measure_handle` until a Boolean is needed.
+      - `phys.submit_syndrome` and `phys.decode_bit` use explicitly bound
+        packed-record decoder callbacks through `cc.device_call`. Each named
+        decoder is reset once at entry. Records are packed in operand order
+        in batches of at most 64 bits, with tag
+        zero (whole-shot decoding). `decode_bit` submits its terminal records,
+        requests observable-zero correction, and XORs it with the declared
+        parity, including `invert`. Bindings declare a nonnegative i64
+        `decoder_session` and `decoder_reset`, `decoder_submit`, and
+        `decoder_correction` symbol references. All arguments/results are i64:
+        reset(session), submit(session, count, bits, tag), and
+        correction(session, count, reset) -> bits. The application supplies
+        callbacks and decoder configuration; target-specific call lowering is
+        owned by CUDA-Q. Windowed and erasure decoding are rejected.
       - `phys.delay`, `phys.barrier`, `phys.move`, and `event.fence` emit
         nothing and forward their states.
       - `arith` operations are cloned. A record operand becomes its `i1`, so

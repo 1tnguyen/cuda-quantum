@@ -489,6 +489,10 @@ private:
         // Affine outcome processing has no carrier action. GadgetSpec records
         // its exact parity; dynamic uses still fail at their controlling op.
         .Case<ParityOp, XorOp>([](auto) {})
+        // Decoder I/O has no carrier action. Fault analysis uses the
+        // pre-correction observable recorded in the gadget contract. A
+        // decoded result used for dynamic control still fails at that use.
+        .Case<SubmitSyndromeOp, DecodeBitOp>([](auto) {})
         .Case<AllZeroOp>([&](auto op) {
           auto tensor = dyn_cast<RankedTensorType>(op.getBits().getType());
           if (!tensor || tensor.getRank() != 1 || tensor.isDynamicDim(0) ||

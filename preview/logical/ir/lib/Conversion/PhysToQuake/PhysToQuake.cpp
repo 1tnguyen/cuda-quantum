@@ -25,6 +25,7 @@
 #include "cudaq/Optimizer/Dialect/Quake/QuakeDialect.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeTypes.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/JSON.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -172,6 +173,13 @@ static FailureOr<SmallVector<Value>> emitBuiltinGate(OpBuilder &builder,
 
 namespace {
 
+/// External callbacks implementing the packed-record decoder interface.
+struct DecoderBinding {
+  int64_t session = 0;
+  StringAttr reset, submit, correction;
+  bool operator==(const DecoderBinding &) const = default;
+};
+
 /// Translates one `phys.graph` into the body of a `func.func`. It walks the
 /// graph's ops in program order and emits Quake at `builder`'s insertion
 /// point. Call bodies and control-flow regions recurse through `lowerOp`, so
@@ -216,6 +224,10 @@ private:
   LogicalResult lowerCondition(qlx::phys::ConditionOp op);
   LogicalResult lowerAllFalse(qlx::phys::AllFalseOp op);
   LogicalResult lowerReturn(qlx::phys::ReturnOp op);
+  LogicalResult collectDecoders();
+  Value decoderCall(Location loc, StringRef name, ValueRange args,
+                    bool returns = false);
+  LogicalResult lowerDecoder(Operation *op, ValueRange records, bool terminal);
   Value toBoolean(Value physValue);
   Attribute carrierOf(Value state);
   Value wireOf(Value state);
@@ -254,6 +266,7 @@ private:
   /// The `phys.call` bodies being lowered, as calls or as template replays.
   /// A template that replays one of them would recurse without end.
   SmallPtrSet<Operation *, 4> activeCalls;
+  llvm::MapVector<StringAttr, DecoderBinding> decoders;
 };
 
 } // namespace
@@ -270,6 +283,122 @@ LogicalResult GraphLowering::checkSidecars() {
       return sidecar.emitOpError(
           "post-selects shots of the entry graph, which `phys-to-quake` does "
           "not support");
+  return success();
+}
+
+LogicalResult GraphLowering::collectDecoders() {
+  llvm::MapVector<StringAttr, unsigned> callbacks;
+  auto result = graph.walk([&](Operation *op) -> WalkResult {
+    if (!isa<qlx::phys::SubmitSyndromeOp, qlx::phys::DecodeBitOp>(op))
+      return WalkResult::advance();
+    auto reject = [&](StringRef message) {
+      op->emitOpError(message);
+      return WalkResult::interrupt();
+    };
+    auto session = op->getAttrOfType<IntegerAttr>("decoder_session");
+    auto reset = op->getAttrOfType<FlatSymbolRefAttr>("decoder_reset");
+    auto submit = op->getAttrOfType<FlatSymbolRefAttr>("decoder_submit");
+    auto correction =
+        op->getAttrOfType<FlatSymbolRefAttr>("decoder_correction");
+    if (!session || !session.getType().isSignlessInteger(64) ||
+        session.getInt() < 0 || !reset || !submit || !correction)
+      return reject("decoder requires a nonnegative i64 session and reset, "
+                    "submit, and correction callback symbols");
+    if (op->hasAttr("decoder_window") || op->hasAttr("decoder_overlap") ||
+        op->hasAttr("decoder_erasure_semantics"))
+      return reject("packed-record decoder lowering supports only whole-shot "
+                    "decoding without erasures");
+    DecoderBinding binding{session.getInt(), reset.getAttr(), submit.getAttr(),
+                           correction.getAttr()};
+    auto symbol = op->getAttrOfType<FlatSymbolRefAttr>("decoder").getAttr();
+    for (const auto &[other, value] : decoders)
+      if ((other == symbol && value != binding) ||
+          (other != symbol && value == binding))
+        return reject("decoder symbols require consistent, distinct runtime "
+                      "bindings");
+    decoders[symbol] = binding;
+    unsigned signature = 0;
+    for (StringAttr callback :
+         {binding.reset, binding.submit, binding.correction}) {
+      if (callback.getValue().empty())
+        return reject("decoder callback symbols must be nonempty");
+      auto [found, inserted] = callbacks.try_emplace(callback, signature);
+      if (!inserted && found->second != signature)
+        return reject("decoder callback symbol is used with conflicting "
+                      "signatures");
+      ++signature;
+    }
+    if (isa<qlx::phys::DecodeBitOp>(op) && !op->hasAttr("parity_indices"))
+      return reject("decoded readout requires explicit parity_indices");
+    return WalkResult::advance();
+  });
+  if (result.wasInterrupted())
+    return failure();
+  for (const auto &[name, signature] : callbacks)
+    if (SymbolTable::lookupSymbolIn(module, name.getValue()))
+      return graph.emitOpError("decoder callback collides with source symbol: ")
+             << name.getValue();
+  return success();
+}
+
+Value GraphLowering::decoderCall(Location loc, StringRef name, ValueRange args,
+                                 bool returns) {
+  SmallVector<Type> resultTypes;
+  if (returns)
+    resultTypes.push_back(builder.getI64Type());
+  if (!module.lookupSymbol(name)) {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPointToEnd(module.getBody());
+    auto declaration = func::FuncOp::create(
+        builder, loc, name,
+        builder.getFunctionType(args.getTypes(), resultTypes));
+    declaration.setPrivate();
+  }
+  auto call = cudaq::cc::DeviceCallOp::create(builder, loc, resultTypes, name,
+                                              Value{}, args);
+  return returns ? call.getResult(0) : Value{};
+}
+
+LogicalResult GraphLowering::lowerDecoder(Operation *op, ValueRange records,
+                                          bool terminal) {
+  Location loc = op->getLoc();
+  auto constant = [&](int64_t value) -> Value {
+    return arith::ConstantIntOp::create(builder, loc, value, 64);
+  };
+  auto symbol = op->getAttrOfType<FlatSymbolRefAttr>("decoder").getAttr();
+  const auto &binding = decoders.find(symbol)->second;
+  Value decoder = constant(binding.session);
+  Value zero = constant(0);
+  // Operand order is the stream contract. `round` is provenance, not a
+  // transport tag for this unwindowed ABI. Never infer inputs from nearby MZs.
+  for (size_t offset = 0; offset < records.size(); offset += 64) {
+    auto batch =
+        records.slice(offset, std::min<size_t>(64, records.size() - offset));
+    Value packed = zero;
+    for (auto [index, record] : llvm::enumerate(batch)) {
+      Value word = arith::ExtUIOp::create(builder, loc, builder.getI64Type(),
+                                          toBoolean(record));
+      word = arith::ShLIOp::create(builder, loc, word, constant(index));
+      packed = arith::OrIOp::create(builder, loc, packed, word);
+    }
+    decoderCall(loc, binding.submit.getValue(),
+                ValueRange{decoder, constant(batch.size()), packed, zero});
+  }
+  if (terminal) {
+    auto decode = cast<qlx::phys::DecodeBitOp>(op);
+    Value parity =
+        arith::ConstantIntOp::create(builder, loc, decode.getInvert(), 1);
+    for (int64_t index : decode.getParityIndicesAttr().asArrayRef())
+      parity = arith::XOrIOp::create(builder, loc, parity,
+                                     toBoolean(records[index]));
+    Value correction =
+        decoderCall(loc, binding.correction.getValue(),
+                    ValueRange{decoder, constant(1), zero}, true);
+    correction =
+        arith::TruncIOp::create(builder, loc, builder.getI1Type(), correction);
+    mapValue(decode.getResult(),
+             arith::XOrIOp::create(builder, loc, parity, correction));
+  }
   return success();
 }
 
@@ -318,6 +447,8 @@ FailureOr<func::FuncOp> GraphLowering::lower() {
   // Step 1: Reject a graph that a selection sidecar post-selects.
   if (failed(checkSidecars()))
     return failure();
+  if (failed(collectDecoders()))
+    return failure();
   // Step 2: Compute the entry signature. This rejects the input and result
   // types that the pass does not translate, before any Quake is emitted.
   auto type = entryType();
@@ -349,6 +480,13 @@ FailureOr<func::FuncOp> GraphLowering::lower() {
   entry->setAttr(cudaq::kernelAttrName, builder.getUnitAttr());
   Block *body = entry.addEntryBlock();
   builder.setInsertionPointToStart(body);
+  // A session belongs to a shot, not a round or a nested call. Reset each
+  // explicitly bound runtime ID once, before any control flow or submission.
+  for (const auto &[symbol, binding] : decoders) {
+    Value value = arith::ConstantIntOp::create(builder, graph.getLoc(),
+                                               binding.session, 64);
+    decoderCall(graph.getLoc(), binding.reset.getValue(), value);
+  }
   // Step 5: Map the graph's arguments to the entry's. An `index` argument
   // arrives as `i64` and is cast back, so cloned `index` arithmetic still
   // type-checks.
@@ -413,6 +551,12 @@ LogicalResult GraphLowering::lowerOp(Operation *op) {
       })
       .Case([&](qlx::phys::AllFalseOp allFalse) {
         return lowerAllFalse(allFalse);
+      })
+      .Case([&](qlx::phys::SubmitSyndromeOp submit) {
+        return lowerDecoder(submit, submit.getRecords(), false);
+      })
+      .Case([&](qlx::phys::DecodeBitOp decode) {
+        return lowerDecoder(decode, decode.getRecords(), true);
       })
       // Scheduling and transport do not change the ideal state, and they keep
       // each state's resource, so its wire stays where it is.

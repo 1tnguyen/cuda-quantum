@@ -38,6 +38,19 @@ class StandardDepolarizingNoise:
 
 
 @dataclass(frozen=True, slots=True)
+class IndependentCXDepolarizingNoise(StandardDepolarizingNoise):
+    """Independent depolarization on each CX operand.
+
+    ``probability`` is the total X/Y/Z probability on each operand after CX,
+    with equally likely X, Y, and Z errors. Other operations are noiseless
+    unless inherited fields are explicitly set. With joint Clifford noise also
+    enabled, independent CX channels follow it as an additional layer.
+    """
+
+    probability: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class Depolarize1Placement:
     """Independent one-qubit depolarization on explicit projected carriers.
 
@@ -126,9 +139,18 @@ def _standard_noise_placement(projection, noise, depolarizations=()):
                          carriers[i:i +
                                   width], noise.after_clifford_depolarization)
                 for i in range(0, len(op.carriers), width))
+        if (op.kind == "CX" and
+                isinstance(noise, IndependentCXDepolarizingNoise) and
+                noise.probability):
+            post.extend(
+                _Channel("DEPOLARIZE1", (q,), noise.probability)
+                for q in op.carriers)
         before.append(tuple(pre))
         after.append(tuple(post))
     return tuple(before), tuple(after)
 
 
-__all__ = ["StandardDepolarizingNoise", "Depolarize1Placement"]
+__all__ = [
+    "StandardDepolarizingNoise", "IndependentCXDepolarizingNoise",
+    "Depolarize1Placement"
+]

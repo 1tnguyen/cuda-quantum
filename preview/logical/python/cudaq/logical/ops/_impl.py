@@ -368,6 +368,27 @@ def transition_epoch(patch, *, to, evidence, logical_map=None):
         patch, to=to, evidence=evidence, logical_map=logical_map)
 
 
+def decode_bit(bits, *, decoder, parity_indices, invert=False):
+    """Request a corrected bit, using an explicit decoder declaration."""
+    return require_trace("decode_bit").decode_bit(bits,
+                                                  decoder=decoder,
+                                                  parity_indices=parity_indices,
+                                                  invert=invert)
+
+
+def submit_syndrome(bits, *, decoder, round=None):
+    """Stream a syndrome round, using an explicit decoder declaration.
+
+    Accepts a measurement bundle, syndrome bundle, or traced Boolean, or a
+    nonempty list or tuple of these values from the current gadget. Bundles
+    are flattened in the supplied order into one submission; each bundle
+    retains its internal record order.
+    """
+    return require_trace("submit_syndrome").submit_syndrome(bits,
+                                                            decoder=decoder,
+                                                            round=round)
+
+
 def xor(lhs, rhs):
     """Return the runtime parity of two traced Boolean values."""
 

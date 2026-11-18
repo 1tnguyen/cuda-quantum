@@ -256,12 +256,6 @@ cudaq_internal::compiler::Compiler::prepareModule(const std::string &kernelName,
           cudaq::opt::createApplySpecialization({.constantPropagation = true}));
       cudaq::opt::addAggressiveInlining(pm);
 
-      // Lower cc.device_calls
-      if (target.supportDeviceCalls) {
-        pm.addPass(cudaq::opt::createQIRDeviceCall());
-        pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
-      }
-
       if (target.replaceStateWithKernel) {
         pm.addNestedPass<mlir::func::FuncOp>(
             cudaq::opt::createReplaceStateWithKernel());
@@ -294,6 +288,17 @@ cudaq_internal::compiler::Compiler::prepareModule(const std::string &kernelName,
             pm, moduleOp.getOperation())))
       throw std::runtime_error(
           "Could not successfully apply kernel specialization.");
+  }
+
+  // Device calls also occur in argument-free and packed-argument kernels.
+  // Lower them independently of argument specialization.
+  if (target.supportDeviceCalls) {
+    mlir::PassManager pm(contextPtr);
+    pm.addPass(cudaq::opt::createQIRDeviceCall());
+    pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
+    if (failed(cudaq_internal::compiler::runPassManager(
+            pm, moduleOp.getOperation())))
+      throw std::runtime_error("Could not successfully lower device calls.");
   }
 
   return {moduleOp, epFunc, isFullySpecialized};
