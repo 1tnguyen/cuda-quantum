@@ -21,10 +21,10 @@ _Z_ORDER = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 
 @dataclass(frozen=True, slots=True)
 class SurfaceInterleavedNZDefinitions:
-    """Reusable preparation, SEC and destructive Z readout for one distance.
+    """Reusable preparations, SEC and destructive readouts for one distance.
 
-    Each gadget includes one extraction round. Readout then measures every data
-    qubit and closes the code interface. Coordinates cover data, X ancillas,
+    Preparations and SEC each include one extraction round. A data-only readout
+    can follow an explicit SEC. Coordinates cover data, X ancillas,
     then Z ancillas, in the compiler's physical carrier order.
     """
 
@@ -34,6 +34,9 @@ class SurfaceInterleavedNZDefinitions:
     syndrome_extraction: gadgets.GadgetDefinition
     measure_z_with_syndrome: gadgets.GadgetDefinition
     coordinates: tuple[tuple[float, float], ...]
+    prepare_plus: gadgets.GadgetDefinition | None = None
+    measure_z_data: gadgets.GadgetDefinition | None = None
+    measure_x_data: gadgets.GadgetDefinition | None = None
 
 
 def build_definitions(distance, *, decoder=None):
@@ -51,7 +54,7 @@ def build_definitions(distance, *, decoder=None):
         key=lambda item: (item[0][1], item[0][0]))
     z_boundary_order = sorted(range(len(zs)), key=lambda i: zs[i].coordinate)
 
-    def define(function, name, action, result):
+    def define(function, name, action, result, *, rounds=1):
         function.__name__ = function.__qualname__ = (
             f"surface_d{distance}_circuit_{name}")
         function.__annotations__ = {
@@ -60,7 +63,7 @@ def build_definitions(distance, *, decoder=None):
         }
         return gadgets.gadget(function,
                               implements=action,
-                              metadata={"syndrome_rounds": 1})
+                              metadata={"syndrome_rounds": rounds})
 
     def extract(block):
         block = ops.h(block.sx)
@@ -101,14 +104,46 @@ def build_definitions(distance, *, decoder=None):
 
     sec = define(syndrome_round, "sec", std.idle, types.patch[encoding])
 
-    def prepare(block):
-        block = ops.reset(block.data)
+    def prepare_with_checks(block):
         block = ops.reset(block.sx)
         block = ops.reset(block.sz)
-        return extraction(block)
+        # Keep preparation's checks on this patch. Sharing SEC's nested
+        # extraction here can bind its data operands to a sibling patch.
+        return extract(block)
+
+    def prepare(block):
+        return prepare_with_checks(ops.reset(block.data))
+
+    def prepare_plus(block):
+        block = ops.reset(block.data)
+        return prepare_with_checks(ops.h(block.data))
 
     prep = define(prepare, "prepare_zero", std.prepare_zero,
                   types.patch[encoding])
+    plus = define(prepare_plus, "prepare_plus", std.prepare_plus,
+                  types.patch[encoding])
+
+    def measure_data(block, logical_support):
+        if decoder is not None:
+            block, bits = ops.mz(block.data, record="terminal_data")
+            result = ops.decode_bit(bits,
+                                    decoder=decoder,
+                                    parity_indices=tuple(logical_support))
+            ops.discard(block)
+            return result
+        logical = []
+        for i in range(code.n):
+            block, outcome = ops.mz(block.data[(i,)], record=f"data{i}")
+            if i in logical_support:
+                logical.append(outcome)
+        ops.discard(block)
+        return ops.parity(*logical)
+
+    def measure_z_data(block):
+        return measure_data(block, code.lz[0])
+
+    def measure_x_data(block):
+        return measure_data(ops.h(block.data), code.lx[0])
 
     def readout(block):
         block = sec(block)
@@ -116,69 +151,69 @@ def build_definitions(distance, *, decoder=None):
         # subsequent ancilla interactions, those faults have zero response.
         block = ops.reset(block.sx)
         block = ops.reset(block.sz)
-        if decoder is not None:
-            block, bits = ops.mz(block.data, record="terminal_data")
-            result = ops.decode_bit(bits,
-                                    decoder=decoder,
-                                    parity_indices=tuple(code.lz[0]))
-            ops.discard(block)
-            return result
-        logical = []
-        for i in range(code.n):
-            block, outcome = ops.mz(block.data[(i,)], record=f"data{i}")
-            if i in code.lz[0]:
-                logical.append(outcome)
-        ops.discard(block)
-        return ops.parity(*logical)
+        return measure_z_data(block)
 
     mz = define(readout, "measure_z", std.measure_z, bool)
-
+    data_mz = define(measure_z_data,
+                     "measure_z_data",
+                     std.measure_z,
+                     bool,
+                     rounds=0)
+    data_mx = define(measure_x_data,
+                     "measure_x_data",
+                     std.measure_x,
+                     bool,
+                     rounds=0)
     sites = []
 
     def contract(gadget, kind):
         projection = project_clifford(compile(gadget), gadget=gadget.name)
         port, = projection.interface.inputs or projection.interface.outputs
+        graph = gadgets.GadgetContractBuilder(gadget.interface)
+        # Each carrier is measured at most once in these single-round gadgets.
         measured = {
             row.carriers[0]: gadget.record(row.record)
             for row in projection.interface.measurements
-            if row.symbol == extraction.name
         }
-        # The named site is the entry to this exact nested syndrome gadget,
-        # before its first operation. Record provenance identifies the call;
-        # no gate-kind heuristic is needed to find the boundary.
-        call_path, = {
-            row.call_path
-            for row in projection.interface.measurements
-            if row.symbol == extraction.name
-        }
-        prefix = ".".join((*call_path, ""))
+
+        def close_checks(previous, checks, order):
+            for i in order:
+                parity = previous[i]
+                for q in checks[i]:
+                    parity ^= measured[port.data_carriers[q]]
+                graph.detector(parity)
+
+        if kind in ("data_z", "data_x"):
+            incoming = gadget.inputs.only().syndrome
+            if kind == "data_z":
+                close_checks([incoming[len(xs) + i] for i in range(len(zs))],
+                             code.hz, z_boundary_order)
+            else:
+                close_checks([incoming[i] for i in range(len(xs))], code.hx,
+                             range(len(xs)))
+            return graph.freeze()
+        # Extraction begins with H on the X ancillas, after the prep/reset.
         entry = next(op for op in projection.instructions
-                     if op.site_id.startswith(prefix))
+                     if op.kind == "H" and op.carriers == port.carriers("sx"))
         sites.append((gadget, projection, entry.site_id, port.data_carriers))
         records = {
             (partition, i): measured[q] for partition in ("sx", "sz")
             for i, q in enumerate(port.carriers(partition))
         }
-        graph = gadgets.GadgetContractBuilder(gadget.interface)
         if kind == "prep":
             for i in z_boundary_order:
                 graph.detector(records["sz", i])
+        elif kind == "plus":
+            for i in range(len(xs)):
+                graph.detector(records["sx", i])
         else:
             incoming = gadget.inputs.only().syndrome
             for _, partition, i in ancillas:
                 index = i if partition == "sx" else len(xs) + i
                 graph.detector(incoming[index] ^ records[partition, i])
         if kind == "readout":
-            terminal = {
-                row.carriers[0]: gadget.record(row.record)
-                for row in projection.interface.measurements
-                if row.symbol == gadget.name
-            }
-            for i in z_boundary_order:
-                parity = gadgets.ProfileParity()
-                for q in code.hz[i]:
-                    parity ^= terminal[port.data_carriers[q]]
-                graph.detector(parity ^ records["sz", i])
+            close_checks([records["sz", i] for i in range(len(zs))], code.hz,
+                         z_boundary_order)
         else:
             graph.bind(
                 gadget.outputs.only().syndrome,
@@ -188,10 +223,17 @@ def build_definitions(distance, *, decoder=None):
         return graph.freeze()
 
     definitions = SurfaceInterleavedNZDefinitions(
-        distance, code, prep, sec, mz,
+        distance,
+        code,
+        prep,
+        sec,
+        mz,
         lattice.coordinates + tuple(face.coordinate for face in xs) +
-        tuple(face.coordinate for face in zs))
-    contracts = (contract(prep,
-                          "prep"), contract(sec,
-                                            "sec"), contract(mz, "readout"))
+        tuple(face.coordinate for face in zs),
+        prepare_plus=plus,
+        measure_z_data=data_mz,
+        measure_x_data=data_mx)
+    contracts = (contract(prep, "prep"), contract(plus, "plus"),
+                 contract(sec, "sec"), contract(mz, "readout"),
+                 contract(data_mz, "data_z"), contract(data_mx, "data_x"))
     return definitions, contracts, sites

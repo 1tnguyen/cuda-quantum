@@ -176,7 +176,9 @@ namespace {
 /// External callbacks implementing the packed-record decoder interface.
 struct DecoderBinding {
   int64_t session = 0;
-  StringAttr reset, submit, correction;
+  StringAttr reset, submit, getter;
+  bool logicalReadout;
+  uint64_t numObservables = 1;
   bool operator==(const DecoderBinding &) const = default;
 };
 
@@ -267,6 +269,9 @@ private:
   /// A template that replays one of them would recurse without end.
   SmallPtrSet<Operation *, 4> activeCalls;
   llvm::MapVector<StringAttr, DecoderBinding> decoders;
+  // Each terminal gadget owns one observable in the configured record map.
+  // Resolve its SSA value at first use, after intervening submissions.
+  DenseMap<StringAttr, SmallVector<arith::ConstantIntOp>> terminalReadouts;
 };
 
 } // namespace
@@ -300,33 +305,53 @@ LogicalResult GraphLowering::collectDecoders() {
     auto submit = op->getAttrOfType<FlatSymbolRefAttr>("decoder_submit");
     auto correction =
         op->getAttrOfType<FlatSymbolRefAttr>("decoder_correction");
+    auto readout =
+        op->getAttrOfType<FlatSymbolRefAttr>("decoder_logical_readout");
     if (!session || !session.getType().isSignlessInteger(64) ||
-        session.getInt() < 0 || !reset || !submit || !correction)
-      return reject("decoder requires a nonnegative i64 session and reset, "
-                    "submit, and correction callback symbols");
+        session.getInt() < 0 || !reset || !submit ||
+        static_cast<bool>(correction) == static_cast<bool>(readout))
+      return reject(
+          "decoder requires a nonnegative i64 session and reset, "
+          "submit, and exactly one correction or logical readout callback");
     if (op->hasAttr("decoder_window") || op->hasAttr("decoder_overlap") ||
         op->hasAttr("decoder_erasure_semantics"))
       return reject("packed-record decoder lowering supports only whole-shot "
                     "decoding without erasures");
-    DecoderBinding binding{session.getInt(), reset.getAttr(), submit.getAttr(),
-                           correction.getAttr()};
+    uint64_t count = 1;
+    if (auto attr = op->getAttr("decoder_num_observables")) {
+      auto integer = dyn_cast<IntegerAttr>(attr);
+      if (!integer || !integer.getType().isSignlessInteger(64) ||
+          integer.getInt() < 1)
+        return reject("decoder_num_observables must be a positive i64");
+      count = integer.getInt();
+    }
+    if (count != 1 && !readout)
+      return reject("multiple observables require decoder_logical_readout");
+    DecoderBinding binding{
+        session.getInt(),           reset.getAttr(),
+        submit.getAttr(),           (readout ? readout : correction).getAttr(),
+        static_cast<bool>(readout), count};
     auto symbol = op->getAttrOfType<FlatSymbolRefAttr>("decoder").getAttr();
     for (const auto &[other, value] : decoders)
       if ((other == symbol && value != binding) ||
-          (other != symbol && value == binding))
+          (other != symbol && value.session == binding.session &&
+           value.reset == binding.reset && value.submit == binding.submit &&
+           value.getter == binding.getter))
         return reject("decoder symbols require consistent, distinct runtime "
                       "bindings");
     decoders[symbol] = binding;
-    unsigned signature = 0;
-    for (StringAttr callback :
-         {binding.reset, binding.submit, binding.correction}) {
+    // The mapped submit has one extra argument, as does the indexed getter.
+    const std::pair<StringAttr, unsigned> signatures[] = {
+        {binding.reset, 0},
+        {binding.submit, readout ? 3u : 1u},
+        {binding.getter, readout ? 4u : 2u}};
+    for (auto [callback, abi] : signatures) {
       if (callback.getValue().empty())
         return reject("decoder callback symbols must be nonempty");
-      auto [found, inserted] = callbacks.try_emplace(callback, signature);
-      if (!inserted && found->second != signature)
+      auto [found, inserted] = callbacks.try_emplace(callback, abi);
+      if (!inserted && found->second != abi)
         return reject("decoder callback symbol is used with conflicting "
                       "signatures");
-      ++signature;
     }
     if (isa<qlx::phys::DecodeBitOp>(op) && !op->hasAttr("parity_indices"))
       return reject("decoded readout requires explicit parity_indices");
@@ -367,6 +392,14 @@ LogicalResult GraphLowering::lowerDecoder(Operation *op, ValueRange records,
   };
   auto symbol = op->getAttrOfType<FlatSymbolRefAttr>("decoder").getAttr();
   const auto &binding = decoders.find(symbol)->second;
+  if (binding.logicalReadout) {
+    if (terminalReadouts[symbol].size() == binding.numObservables)
+      return op->emitOpError("submits after the final decoder observable");
+    if (terminal &&
+        !isa<func::FuncOp>(builder.getInsertionBlock()->getParentOp()))
+      return op->emitOpError(
+          "multi-observable terminal readouts must be unconditional");
+  }
   Value decoder = constant(binding.session);
   Value zero = constant(0);
   // Operand order is the stream contract. `round` is provenance, not a
@@ -381,18 +414,33 @@ LogicalResult GraphLowering::lowerDecoder(Operation *op, ValueRange records,
       word = arith::ShLIOp::create(builder, loc, word, constant(index));
       packed = arith::OrIOp::create(builder, loc, packed, word);
     }
-    decoderCall(loc, binding.submit.getValue(),
-                ValueRange{decoder, constant(batch.size()), packed, zero});
+    SmallVector<Value> args{decoder, constant(batch.size()), packed, zero};
+    if (binding.logicalReadout) {
+      bool last = terminal && offset + batch.size() == records.size() &&
+                  terminalReadouts[symbol].size() + 1 == binding.numObservables;
+      args.push_back(constant(last));
+    }
+    decoderCall(loc, binding.submit.getValue(), args);
   }
   if (terminal) {
     auto decode = cast<qlx::phys::DecodeBitOp>(op);
+    if (binding.logicalReadout) {
+      if (records.empty())
+        return op->emitOpError(
+            "a logical readout requires measurement records");
+      auto value =
+          arith::ConstantIntOp::create(builder, loc, decode.getInvert(), 1);
+      terminalReadouts[symbol].push_back(value);
+      mapValue(decode.getResult(), value);
+      return success();
+    }
     Value parity =
         arith::ConstantIntOp::create(builder, loc, decode.getInvert(), 1);
     for (int64_t index : decode.getParityIndicesAttr().asArrayRef())
       parity = arith::XOrIOp::create(builder, loc, parity,
                                      toBoolean(records[index]));
     Value correction =
-        decoderCall(loc, binding.correction.getValue(),
+        decoderCall(loc, binding.getter.getValue(),
                     ValueRange{decoder, constant(1), zero}, true);
     correction =
         arith::TruncIOp::create(builder, loc, builder.getI1Type(), correction);
@@ -505,6 +553,47 @@ FailureOr<func::FuncOp> GraphLowering::lower() {
       entry.erase();
       return failure();
     }
+  for (const auto &[symbol, binding] : decoders) {
+    if (!binding.logicalReadout)
+      continue;
+    auto &readouts = terminalReadouts[symbol];
+    if (readouts.size() != binding.numObservables) {
+      entry.erase();
+      return graph.emitOpError("terminal readout count differs from "
+                               "decoder_num_observables for ")
+             << symbol;
+    }
+    for (auto [index, readout] : llvm::enumerate(readouts)) {
+      // Lower the getter at the first consumer, including a use inside a
+      // nested block. Sibling MZs can then submit before the return reads
+      // either bit. The decoder owns the raw parity and applies its correction.
+      Operation *first = nullptr;
+      for (Operation *user : readout->getUsers()) {
+        auto *use = readout->getBlock()->findAncestorOpInBlock(*user);
+        if (!first || use->isBeforeInBlock(first))
+          first = use;
+      }
+      if (first) {
+        builder.setInsertionPoint(first);
+        Location loc = readout.getLoc();
+        auto word = [&](int64_t v) -> Value {
+          return arith::ConstantIntOp::create(builder, loc, v, 64);
+        };
+        Value logical = decoderCall(
+            loc, binding.getter.getValue(),
+            ValueRange{word(binding.session), word(index), word(1), word(0)},
+            true);
+        Value bit =
+            arith::TruncIOp::create(builder, loc, builder.getI1Type(), logical);
+        if (readout.value())
+          bit = arith::XOrIOp::create(
+              builder, loc, bit,
+              arith::ConstantIntOp::create(builder, loc, 1, 1));
+        readout.getResult().replaceAllUsesWith(bit);
+      }
+      readout.erase();
+    }
+  }
   return entry;
 }
 

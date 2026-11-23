@@ -14,12 +14,20 @@ from dataclasses import dataclass
 class DecoderSpec:
     """Bind a decoder session to three external device-call symbols.
 
-    All arguments and the correction result use unsigned 64-bit words:
-    ``reset(session)``, ``submit(session, count, packed_bits, tag)``, and
-    ``correction(session, count, reset) -> packed_bits``. Submission packs
-    consecutive measurement bits least-significant bit first, in batches of
-    at most 64. Whole-shot decoding uses tag zero and requests one observable
-    correction without resetting the session. Reset runs once at shot entry.
+    All arguments and results are unsigned 64-bit words. Both interfaces
+    reset(session) at shot entry and submit up to 64 records per batch,
+    least-significant bit first.
+
+    With correction, submit(session, count, bits, tag) appends raw bits and
+    correction(session, 1, 0) supplies the flip for the gadget's local parity.
+
+    With logical_readout, submit(session, count, bits, tag, mapping) tags the
+    last batch of the final measurement with mapping 1 (FINAL), all others
+    with 0 (BULK). Each unconditional terminal gadget owns one observable in
+    composed EDEM order. At first use, logical_readout(session, index, 1, 0)
+    returns that observable's corrected measurement. Its raw measurement map
+    in the decoder must match the gadget's parity_indices, before inversion.
+    The configured graph must have released the observable by that first use.
 
     The application supplies callback implementations and decoder configuration.
     Logical does not select a decoder algorithm or an execution backend.
@@ -28,16 +36,29 @@ class DecoderSpec:
     name: str
     reset: str
     submit: str
-    correction: str
+    correction: str | None = None
     session_id: int = 0
+    num_observables: int = 1
+    logical_readout: str | None = None
 
     def __post_init__(self):
-        for field in ("name", "reset", "submit", "correction"):
+        if (isinstance(self.num_observables, bool) or
+                not isinstance(self.num_observables, int) or
+                not 1 <= self.num_observables < 2**63):
+            raise ValueError(
+                "DecoderSpec.num_observables must be a positive int64")
+        if (self.correction is None) == (self.logical_readout is None):
+            raise ValueError(
+                "specify exactly one of correction and logical_readout")
+        if self.correction is not None and self.num_observables != 1:
+            raise ValueError("multiple observables require logical_readout")
+        getter = "correction" if self.logical_readout is None else "logical_readout"
+        for field in ("name", "reset", "submit", getter):
             value = getattr(self, field)
             if not isinstance(value, str) or not value:
                 raise TypeError(
                     f"DecoderSpec.{field} must be a nonempty string")
-        if len({self.reset, self.submit, self.correction}) != 3:
+        if len({self.reset, self.submit, getattr(self, getter)}) != 3:
             raise ValueError("decoder callbacks require distinct symbols")
         if (isinstance(self.session_id, bool) or
                 not isinstance(self.session_id, int) or

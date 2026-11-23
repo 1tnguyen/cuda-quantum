@@ -118,7 +118,7 @@ def data_depol(
 
     ``before_syndrome`` precedes the first syndrome operation, after any
     preparation resets and basis changes. It is available on the ideal-MPP
-    preparations and SEC, and on all three interleaved N/Z gadgets. A direct
+    preparations and SEC, and on interleaved N/Z gadgets containing SEC. A direct
     logical readout has no such site and is rejected.
 
     The result uses the ordinary explicit placements accepted by circuit
@@ -1523,20 +1523,22 @@ def definitions(distance: int) -> SurfaceDefinitions:
 def interleaved_nz_definitions(distance: int,
                                *,
                                decoder=None) -> SurfaceInterleavedNZDefinitions:
-    """Return preparation, SEC and SEC-plus-Z-readout with the N/Z schedule.
+    """Return N/Z preparations, syndrome extraction, and destructive readouts.
 
-    All three include a round of interleaved N/Z extraction. Their contracts
+    Both zero and plus preparations include one extraction round. Contracts
     are available through ``gadget_contract``. ``syndrome_extraction`` resets
     the check ancillas and measures the checks. ``measure_z_with_syndrome``
     performs that SEC before destructively measuring all data qubits, then
     closes the Z-check detectors and returns the logical-Z parity. Its
     terminal ancilla resets preserve the standard physical schedule's reset
-    fault sites, including faults with zero response.
+    fault sites, including faults with zero response. ``measure_z_data``
+    measures the data directly and closes Z checks against the input syndrome.
+    ``measure_x_data`` changes the data to the X measurement basis and closes
+    the X checks against the input syndrome.
 
-    With a DecoderSpec, each check measurement is explicitly submitted in
-    circuit order and terminal data is consumed by ``ops.decode_bit``. The
-    attached contracts still describe the pre-correction observable used to
-    configure the decoder. Without a decoder the readout returns raw parity.
+    With a DecoderSpec, each extraction submits its check bits in circuit
+    order. Each readout submits its data and returns the corrected logical
+    measurement via ``ops.decode_bit``. Its contract describes the raw observable.
     """
     if decoder is None:
         return _interleaved_nz_definitions(distance)

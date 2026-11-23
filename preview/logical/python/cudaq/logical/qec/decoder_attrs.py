@@ -22,7 +22,12 @@ def decoder_attributes(decoder, context):
                 mlir_ir.IntegerType.get_signless(64, context=context),
                 decoder.session_id),
     }
-    for field in ("reset", "submit", "correction"):
+    if decoder.num_observables != 1:
+        attributes["decoder_num_observables"] = mlir_ir.IntegerAttr.get(
+            mlir_ir.IntegerType.get_signless(64, context=context),
+            decoder.num_observables)
+    getter = "correction" if decoder.logical_readout is None else "logical_readout"
+    for field in ("reset", "submit", getter):
         attributes["decoder_" + field] = mlir_ir.FlatSymbolRefAttr.get(
             getattr(decoder, field), context=context)
     return attributes

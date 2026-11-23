@@ -57,13 +57,18 @@ def PhysToQuake : Pass<"phys-to-quake", "mlir::ModuleOp"> {
         packed-record decoder callbacks through `cc.device_call`. Each named
         decoder is reset once at entry. Records are packed in operand order
         in batches of at most 64 bits, with tag
-        zero (whole-shot decoding). `decode_bit` submits its terminal records,
-        requests observable-zero correction, and XORs it with the declared
-        parity, including `invert`. Bindings declare a nonnegative i64
-        `decoder_session` and `decoder_reset`, `decoder_submit`, and
-        `decoder_correction` symbol references. All arguments/results are i64:
-        reset(session), submit(session, count, bits, tag), and
-        correction(session, count, reset) -> bits. The application supplies
+        zero. Bindings declare a nonnegative i64 session and one of two
+        interfaces (all arguments/results are i64):
+        * With `decoder_correction`, submit(session, count, bits, tag) and
+          XOR correction(session, 1, 0) with the declared measurement parity.
+        * With `decoder_logical_readout`, submit(session, count, bits, tag,
+          mapping), where mapping is 1 for the final batch and 0 otherwise.
+          Each unconditional terminal readout gets its own observable index
+          in composed EDEM order. At first use, readout(session, index, 1, 0)
+          supplies that corrected bit. Apply the gadget's invert flag once.
+          The number of terminal gadgets must equal `decoder_num_observables`
+          (default 1).
+        Both use reset(session) at shot entry. The application supplies
         callbacks and decoder configuration; target-specific call lowering is
         owned by CUDA-Q. Windowed and erasure decoding are rejected.
       - `phys.delay`, `phys.barrier`, `phys.move`, and `event.fence` emit
