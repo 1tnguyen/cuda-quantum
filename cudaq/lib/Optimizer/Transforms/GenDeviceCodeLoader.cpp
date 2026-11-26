@@ -133,6 +133,10 @@ public:
     // Build the symbol table once, before the registration stubs are added.
     SymbolTable dependencySymbols(module);
 
+    // Func ops with no body. A dummy body is added to them at the end, after
+    // all funcs have been processed.
+    llvm::SetVector<func::FuncOp> emptyFuncOps;
+
     for (auto &op : *module.getBody()) {
       auto funcOp = dyn_cast<func::FuncOp>(op);
       if (!funcOp)
@@ -212,15 +216,16 @@ public:
       auto insPt = builder.saveInsertionPoint();
       auto *initFunEntry = initFun.addEntryBlock(builder);
       builder.setInsertionPointToStart(initFunEntry);
-      auto devRef = LLVM::AddressOfOp::create(
-          builder, loc, cudaq::opt::factory::getPointerType(devName.getType()),
+      auto devRef = cudaq::cc::AddressOfOp::create(
+          builder, loc, cudaq::cc::PointerType::get(devName.getType()),
           devName.getSymName());
-      auto codeRef = LLVM::AddressOfOp::create(
-          builder, loc, cudaq::opt::factory::getPointerType(devCode.getType()),
+      auto codeRef = cudaq::cc::AddressOfOp::create(
+          builder, loc, cudaq::cc::PointerType::get(devCode.getType()),
           devCode.getSymName());
-      auto castDevRef = LLVM::BitcastOp::create(
+      // The callee is an `llvm.func`, so its operands are `!llvm.ptr`.
+      auto castDevRef = cudaq::cc::CastOp::create(
           builder, loc, cudaq::opt::factory::getPointerType(ctx), devRef);
-      auto castCodeRef = LLVM::BitcastOp::create(
+      auto castCodeRef = cudaq::cc::CastOp::create(
           builder, loc, cudaq::opt::factory::getPointerType(ctx), codeRef);
       LLVM::CallOp::create(builder, loc, TypeRange{},
                            cudaq::runtime::deviceCodeHolderAdd,
@@ -241,11 +246,16 @@ public:
           }
           auto hostFuncOp = module.lookupSymbol<func::FuncOp>(hostFuncName);
           if (!hostFuncOp) {
-            // Using a fake type. We just want the symbol of an artifact defined
-            // in host code. We're not calling this function.
+            // Using a fake type. We just want a symbol whose address is the
+            // kernel's registration key. We're not calling this function.
             hostFuncOp = cudaq::opt::factory::createFunction(hostFuncName, {},
                                                              {}, module);
             hostFuncOp.setPrivate();
+          }
+          if (hostFuncOp.empty()) {
+            assert(!funcOp->hasAttr(cudaq::entryPointAttrName) &&
+                   "declaration-only kernel cannot be marked as entry point");
+            emptyFuncOps.insert(hostFuncOp);
           }
           auto entryRef = func::ConstantOp::create(builder, loc,
                                                    hostFuncOp.getFunctionType(),
@@ -260,8 +270,8 @@ public:
           auto nameTy =
               cudaq::opt::factory::getStringType(ctx, kernName.size() + 1);
           // The original kernel's name was already created.
-          auto devRef = LLVM::AddressOfOp::create(
-              builder, loc, cudaq::opt::factory::getPointerType(nameTy),
+          auto devRef = cudaq::cc::AddressOfOp::create(
+              builder, loc, cudaq::cc::PointerType::get(nameTy),
               kernName + "CodeHolder.extract_device_name");
           auto ccPtr = cudaq::cc::CastOp::create(builder, loc, ptrTy, devRef);
           func::CallOp::create(builder, loc, TypeRange{},
@@ -284,6 +294,16 @@ public:
       builder.restoreInsertionPoint(insPt);
       cudaq::opt::factory::createGlobalCtorCall(
           module, mlir::FlatSymbolRefAttr::get(ctx, initFun.getName()));
+    }
+
+    // Give forward declared `func`s a body that shadows the host definition
+    // of the same name (see fixup-linkage). These are never called as they are
+    // not valid entrypoints.
+    for (auto stub : emptyFuncOps) {
+      stub.setPublic();
+      auto stubBuilder = OpBuilder::atBlockEnd(stub.addEntryBlock());
+      LLVM::Trap::create(stubBuilder, stub.getLoc());
+      LLVM::UnreachableOp::create(stubBuilder, stub.getLoc());
     }
     out.keep();
   }

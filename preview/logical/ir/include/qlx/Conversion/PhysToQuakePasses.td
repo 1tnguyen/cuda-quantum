@@ -52,7 +52,7 @@ def PhysToQuake : Pass<"phys-to-quake", "mlir::ModuleOp"> {
       - Actions and instruments resolve in the graph's machine first, then
         in the module. The Phys graph verifier resolves actions the same way.
       - `phys.condition`, `phys.xor`, and `phys.all_false` become `i1` logic.
-        A measurement stays a `!cc.measure_handle` until a Boolean is needed.
+        A measurement stays a `!quake.measure` until a Boolean is needed.
       - `phys.submit_syndrome` and `phys.decode_bit` use explicitly bound
         packed-record decoder callbacks through `cc.device_call`. Each named
         decoder is reset once at entry. Records are packed in operand order

@@ -35,8 +35,8 @@
 #include "cudaq/Support/Hash.h"
 #include "cudaq/algorithms/policy_dispatch.h"
 #include "cudaq/platform.h"
-#include "cudaq/platform/nvqpp_interface.h"
 #include "cudaq/platform/qpu.h"
+#include "cudaq/platform/quantum_platform.h"
 #include "cudaq/runtime/logger/logger.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Error.h"
@@ -1368,7 +1368,8 @@ static ModuleOp cleanLowerToCodegenKernel(ModuleOp mod,
     cudaq::addPythonSignalInstrumentation(pm);
     pm.addInstrumentation(std::make_unique<cudaq::TracePassInstrumentation>());
     std::string transport = getTransportLayer();
-    cudaq::opt::addAOTPipelineConvertToQIR(pm, transport);
+    cudaq::opt::addAOTPipelineConvertToQIR(
+        pm, transport, cudaq::opt::CodegenMode::normalize_and_optimize);
     executeMLIRPassManager(mod, pm);
     return mod;
   }

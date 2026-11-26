@@ -259,6 +259,7 @@ from .runtime.translate import translate
 from .runtime.state import (get_state, get_state_async, to_cupy)
 from .runtime.draw import draw
 from .runtime.unitary import get_unitary
+from .runtime.compile import compile
 from .runtime.resource_count import estimate
 from .runtime.resource_count import estimate_resources
 from .runtime.dem import dem_from_kernel
@@ -495,7 +496,7 @@ def to_bools(handles):
     ``list[bool]``. Device-only: this Python symbol exists so kernel
     code can call ``cudaq.to_bools(...)``; the AST bridge intercepts
     the call and lowers it to a vector form ``quake.discriminate`` on
-    ``!cc.sequence<!cc.measure_handle>``. Host-side invocation raises a
+    ``!cc.sequence<!quake.measure>``. Host-side invocation raises a
     ``RuntimeError``.
     """
     raise RuntimeError(_KERNEL_ONLY_ERROR_MESSAGE.format("cudaq.to_bools"))

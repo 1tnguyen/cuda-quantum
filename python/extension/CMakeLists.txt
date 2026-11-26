@@ -141,10 +141,10 @@ if (CUDAQ_ENABLE_ORCA_BACKEND)
   target_compile_definitions(CUDAQuantumPythonSources.Extension INTERFACE CUDAQ_ORCA_BACKEND_ENABLED)
 endif()
 
-target_link_libraries(CUDAQuantumPythonSources.Extension INTERFACE 
-    cudaq 
-    cudaq-logger 
-    cudaq-common 
+target_link_libraries(CUDAQuantumPythonSources.Extension INTERFACE
+    cudaq
+    cudaq-logger
+    cudaq-common
     cudaq-em-default
     cudaq-em-photonics
     fmt::fmt-header-only
@@ -176,7 +176,7 @@ add_cudaq_python_modules(CUDAQuantumPythonModules
     cudaq::cudaqMLIRCAPI
 )
 
-# Loaded by path after the local runtime has been bound. Do not link this facade.
-if(TARGET cudaq-kernel-runtime)
-  add_dependencies(CUDAQuantumPythonModules cudaq-kernel-runtime)
+# `dlopen`-ed at runtime into the global scope (see LinkedLibraryHolder.cpp).
+if(TARGET cudaq-nvqpp-capi)
+  add_dependencies(CUDAQuantumPythonModules cudaq-nvqpp-capi)
 endif()
